@@ -4,6 +4,7 @@ include("constants.jl")
 include("deterministic_math.jl")
 include("io.jl")
 include("horizons.jl")
+include("shadows.jl")
 
 # Verify LUT integrity at module load
 function __init__()
