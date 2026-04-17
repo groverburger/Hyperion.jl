@@ -167,13 +167,52 @@ function compute_azel(body_pos_km::Vector{Float64}, dem::ShadowDEM)
     el_rad = Matrix{Float32}(undef, H, W)
 
     for r in 1:H, c in 1:W
-        # local = R @ body_pos + T
         lx = dem.R[r,c,1,1]*body_pos_km[1] + dem.R[r,c,1,2]*body_pos_km[2] + dem.R[r,c,1,3]*body_pos_km[3] + dem.T[r,c,1]
         ly = dem.R[r,c,2,1]*body_pos_km[1] + dem.R[r,c,2,2]*body_pos_km[2] + dem.R[r,c,2,3]*body_pos_km[3] + dem.T[r,c,2]
         lz = dem.R[r,c,3,1]*body_pos_km[1] + dem.R[r,c,3,2]*body_pos_km[2] + dem.R[r,c,3,3]*body_pos_km[3] + dem.T[r,c,3]
 
         az_rad[r,c] = atan2_lut(Float32(ly), Float32(lx)) + Float32(π)
         el_rad[r,c] = atan2_lut(Float32(lz), Float32(sqrt(lx^2 + ly^2)))
+    end
+
+    return az_rad, el_rad
+end
+
+"""
+    compute_azel_subsampled(body_pos_km, dem, skip)
+
+Compute az/el only at every `skip`-th pixel and replicate to full size.
+Produces identical output to compute_azel + _subsample_azel but avoids
+computing 99.6% of pixels that get discarded.
+"""
+function compute_azel_subsampled(body_pos_km::Vector{Float64}, dem::ShadowDEM, skip::Int)
+    H, W = dem.H, dem.W
+    sh = cld(H, skip)
+    sw = cld(W, skip)
+
+    # Compute only at subsampled positions
+    sub_az = Matrix{Float32}(undef, sh, sw)
+    sub_el = Matrix{Float32}(undef, sh, sw)
+
+    @inbounds for sr in 1:sh, sc in 1:sw
+        r = (sr - 1) * skip + 1
+        c = (sc - 1) * skip + 1
+        lx = dem.R[r,c,1,1]*body_pos_km[1] + dem.R[r,c,1,2]*body_pos_km[2] + dem.R[r,c,1,3]*body_pos_km[3] + dem.T[r,c,1]
+        ly = dem.R[r,c,2,1]*body_pos_km[1] + dem.R[r,c,2,2]*body_pos_km[2] + dem.R[r,c,2,3]*body_pos_km[3] + dem.T[r,c,2]
+        lz = dem.R[r,c,3,1]*body_pos_km[1] + dem.R[r,c,3,2]*body_pos_km[2] + dem.R[r,c,3,3]*body_pos_km[3] + dem.T[r,c,3]
+
+        sub_az[sr, sc] = atan2_lut(Float32(ly), Float32(lx)) + Float32(π)
+        sub_el[sr, sc] = atan2_lut(Float32(lz), Float32(sqrt(lx^2 + ly^2)))
+    end
+
+    # Replicate to full size (same as _subsample_azel output)
+    az_rad = Matrix{Float32}(undef, H, W)
+    el_rad = Matrix{Float32}(undef, H, W)
+    @inbounds for r in 1:H, c in 1:W
+        sr = min(cld(r, skip), sh)
+        sc = min(cld(c, skip), sw)
+        az_rad[r, c] = sub_az[sr, sc]
+        el_rad[r, c] = sub_el[sr, sc]
     end
 
     return az_rad, el_rad
@@ -188,7 +227,8 @@ function sun_fraction(az_deg::Matrix{Float32}, el_deg::Matrix{Float32},
 
     photons = zeros(Float32, H, W)
 
-    @inbounds for r in 1:H, c in 1:W
+    Threads.@threads for r in 1:H
+    @inbounds for c in 1:W
         sun_left_deg = az_deg[r,c] - SUN_HALF_ANGLE_DEG - bucket_width / Float32(2.0)
         sun_left_bucket_f = sun_left_deg * (HSF / Float32(360.0))
         sun_left_bucket = unsafe_trunc(Int32, sun_left_bucket_f)
@@ -218,6 +258,7 @@ function sun_fraction(az_deg::Matrix{Float32}, el_deg::Matrix{Float32},
         end
         photons[r,c] = px
     end
+    end  # @threads
 
     return photons ./ MAX_PHOTONS
 end
@@ -228,7 +269,8 @@ function over_horizon_deg(az_rad::Matrix{Float32}, el_deg::Matrix{Float32},
     H, W = size(az_rad)
     result = Matrix{Float32}(undef, H, W)
 
-    @inbounds for r in 1:H, c in 1:W
+    Threads.@threads for r in 1:H
+    @inbounds for c in 1:W
         norm_az = mod(az_rad[r,c], Float32(2π))
         if norm_az < 0f0; norm_az += Float32(2π); end
 
@@ -242,6 +284,7 @@ function over_horizon_deg(az_rad::Matrix{Float32}, el_deg::Matrix{Float32},
         h_right = horizons[r, c, right + 1]
         result[r,c] = el_deg[r,c] - (h_left + fr * (h_right - h_left))
     end
+    end  # @threads
 
     return result
 end
@@ -370,36 +413,44 @@ function generate_shadows(;
     t0 = time()
 
     p = Progress(n; desc="Shadows: ", showspeed=true)
+    pending_writes = Task[]
+
     for (idx, dt) in enumerate(timesteps)
         et = datetime_to_et(dt)
         ts = format_timestamp(dt)
 
-        # Sun
+        # Sun — compute az/el only at subsampled positions (256× fewer pixels)
         sun_pos = get_body_position(NAIF_SUN, et)
-        sun_az, sun_el = compute_azel(sun_pos, dem)
-        sun_az = _subsample_azel(sun_az, SKIP)
-        sun_el = _subsample_azel(sun_el, SKIP)
+        sun_az, sun_el = compute_azel_subsampled(sun_pos, dem, SKIP)
         sun_frac = sun_fraction(sun_az .* F32_RAD2DEG, sun_el .* F32_RAD2DEG, horizons)
         sun_data = UInt8.(clamp.(unsafe_trunc.(Int, Float32(255.0) .* sun_frac), 0, 255))
 
         sun_fname = "sun.$ts.png"
-        save_indexed_png(sun_data, SUN_PALETTE, joinpath(sun_output_dir, sun_fname))
         push!(sun_filenames, sun_fname)
 
-        # DSN (Earth)
+        # DSN (Earth) — same subsampled optimization
         earth_pos = get_body_position(NAIF_EARTH, et)
-        earth_az, earth_el = compute_azel(earth_pos, dem)
-        earth_az = _subsample_azel(earth_az, SKIP)
-        earth_el = _subsample_azel(earth_el, SKIP)
+        earth_az, earth_el = compute_azel_subsampled(earth_pos, dem, SKIP)
         over_hz = over_horizon_deg(earth_az, earth_el .* F32_RAD2DEG, horizons)
         dsn_data = UInt8.(clamp.(floor.(Int, over_hz .* 10.0f0), 0, 250))
 
         dsn_fname = "dsn.$ts.png"
-        save_indexed_png(dsn_data, DSN_PALETTE, joinpath(dsn_output_dir, dsn_fname))
         push!(dsn_filenames, dsn_fname)
+
+        # Write PNGs in background while computing next timestep
+        # Wait for any previous writes to finish first to avoid unbounded queue
+        for t in pending_writes; wait(t); end
+        empty!(pending_writes)
+        let sd = sun_data, dd = dsn_data, sf = sun_fname, df = dsn_fname
+            push!(pending_writes, Threads.@spawn save_indexed_png(sd, SUN_PALETTE, joinpath(sun_output_dir, sf)))
+            push!(pending_writes, Threads.@spawn save_indexed_png(dd, DSN_PALETTE, joinpath(dsn_output_dir, df)))
+        end
 
         next!(p)
     end
+
+    # Wait for final writes
+    for t in pending_writes; wait(t); end
     finish!(p)
 
     write_stack_json(joinpath(sun_output_dir, "stack.json"), "sun",
