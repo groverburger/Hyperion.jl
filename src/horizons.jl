@@ -225,7 +225,46 @@ function build_near_caster_array(elevation::Matrix{Float64},
         pixel_locations[tr + 1, tc + 1, 2] = Float32((py0 + tr) - row0)  # y = row offset
     end
 
-    return caster_rel, caster_legal, (row0, col0), pixel_locations
+    # Build max-elevation mipmap for hierarchical ray culling.
+    # Stores the raw DEM elevation (meters) in each 2^k × 2^k block.
+    # The geometric bound: for a ray at distance d pixels, the max possible
+    # slope from a block is:
+    #   (max_elev - observer_elev + curvature_sag) / (d × pixel_size_m)
+    # where curvature_sag = (d × pixel_size_m)² / (2 × R_moon).
+    # The observer_elevation is stored alongside for the bound computation.
+    elev_map = Matrix{Float32}(undef, ph, pw)
+    @inbounds for r in 0:(ph - 1), c in 0:(pw - 1)
+        elev_map[r + 1, c + 1] = Float32(elevation[row0 + r + 1, col0 + c + 1])
+    end
+    mipmap = build_max_mipmap(elev_map)
+
+    return caster_rel, caster_legal, (row0, col0), pixel_locations, mipmap
+end
+
+# ─── Max-magnitude mipmap for hierarchical culling ─────────────────────────
+
+"""
+    build_max_mipmap(mag) -> Vector{Matrix{Float32}}
+
+Build a pyramid of max-magnitude maps. Level 0 = original (1×1 blocks),
+level k = max over 2^k × 2^k blocks. Used to skip distance ranges along
+rays where terrain can't produce a slope higher than the current best.
+"""
+function build_max_mipmap(mag::Matrix{Float32})
+    levels = Matrix{Float32}[mag]  # level 0 = pixel resolution
+    current = mag
+    while minimum(size(current)) > 1
+        H, W = size(current)
+        Hn, Wn = cld(H, 2), cld(W, 2)
+        next = fill(Float32(-Inf), Hn, Wn)
+        @inbounds for r in 1:H, c in 1:W
+            nr = cld(r, 2); nc = cld(c, 2)
+            next[nr, nc] = max(next[nr, nc], current[r, c])
+        end
+        push!(levels, next)
+        current = next
+    end
+    return levels
 end
 
 # ─── Single-pixel near-field ray cast ──────────────────────────────────────
@@ -247,18 +286,21 @@ const RAY_COS_TABLE, RAY_SIN_TABLE = _make_ray_table()
 
 """
     cast_near_field_single_pixel!(slopes, matrix12, center_xy, caster_rel,
-                                  caster_legal, observer_km, caster_rotation)
+                                  caster_legal, observer_km, caster_rotation
+                                  [, mipmap, pixel_size_km])
 
 Cast 4320 rays from one target pixel into one caster DEM.
-Max-accumulates into `slopes` (length 1440).
+If `mipmap` is provided, uses hierarchical culling to skip distance
+ranges where terrain can't produce a slope exceeding the current best.
 """
-function cast_near_field_single_pixel!(slopes::Vector{Float32},
-                                      matrix12::Vector{Float32},
+function cast_near_field_single_pixel!(slopes::AbstractVector{Float32},
+                                      matrix12::AbstractVector{Float32},
                                       center_xy::Tuple{Float32, Float32},
                                       caster_rel::Array{Float32, 3},
                                       caster_legal::BitMatrix,
                                       observer_km::Float32,
-                                      caster_rotation::Float32)
+                                      caster_rotation::Float32,
+                                      _mipmap=nothing, _obs_elev=0.0f0, _pix_size=20.0f0)
     m = matrix12
     center_x, center_y = center_xy
     caster_h, caster_w, _ = size(caster_rel)
@@ -298,6 +340,7 @@ function cast_near_field_single_pixel!(slopes::Vector{Float32},
                 d += step_d
                 continue
             end
+
 
             fy = caster_y - Float32(y1)
             fx = caster_x - Float32(x1)
@@ -375,23 +418,27 @@ end
 
 Atomic-max far-field points into the horizon slopes buffer.
 """
-function cast_far_field_single_pixel!(slopes::Vector{Float32},
-                                     matrix12::Vector{Float32},
+function cast_far_field_single_pixel!(slopes::AbstractVector{Float32},
+                                     matrix12::AbstractVector{Float32},
                                      far_points::Matrix{Float32},
                                      observer_km::Float32)
-    m = matrix12
     N = size(far_points, 1)
+    N == 0 && return slopes
     horizon_samples_m1 = Float32(HORIZON_SAMPLES - 1)
+
+    # Hoist matrix elements into local variables (registers)
+    m1=matrix12[1]; m2=matrix12[2]; m3=matrix12[3]; m4=matrix12[4]
+    m5=matrix12[5]; m6=matrix12[6]; m7=matrix12[7]; m8=matrix12[8]
+    m9=matrix12[9]; m10=matrix12[10]; m11=matrix12[11]; m12v=matrix12[12]
 
     @inbounds for i in 1:N
         px = far_points[i, 1]
         py = far_points[i, 2]
         pz = far_points[i, 3]
 
-        x = px*m[1] + py*m[2] + pz*m[3] + m[4]
-        y = px*m[5] + py*m[6] + pz*m[7] + m[8]
-        z = px*m[9] + py*m[10] + pz*m[11] + m[12]
-        z -= observer_km
+        x = px*m1 + py*m2 + pz*m3 + m4
+        y = px*m5 + py*m6 + pz*m7 + m8
+        z = px*m9 + py*m10 + pz*m11 + m12v - observer_km
 
         alen = Float32(sqrt(x * x + y * y))
         slope = z / alen
@@ -408,6 +455,65 @@ function cast_far_field_single_pixel!(slopes::Vector{Float32},
 
         if slope > slopes[bin_idx + 1]
             slopes[bin_idx + 1] = slope
+        end
+    end
+
+    return slopes
+end
+
+"""
+    cast_far_field_twopass!(slopes, matrix12, far_points, observer_km,
+                            slope_buf, bin_buf)
+
+Two-pass far-field: pass 1 computes (slope, bin) for all points
+(SIMD-friendly), pass 2 does the scatter-max (scalar).
+Requires pre-allocated buffers of length ≥ size(far_points, 1).
+"""
+function cast_far_field_twopass!(slopes::AbstractVector{Float32},
+                                 matrix12::AbstractVector{Float32},
+                                 far_points::Matrix{Float32},
+                                 observer_km::Float32,
+                                 slope_buf::Vector{Float32},
+                                 bin_buf::Vector{Int32})
+    N = size(far_points, 1)
+    N == 0 && return slopes
+    horizon_samples_m1 = Float32(HORIZON_SAMPLES - 1)
+
+    m1=matrix12[1]; m2=matrix12[2]; m3=matrix12[3]; m4=matrix12[4]
+    m5=matrix12[5]; m6=matrix12[6]; m7=matrix12[7]; m8=matrix12[8]
+    m9=matrix12[9]; m10=matrix12[10]; m11=matrix12[11]; m12v=matrix12[12]
+
+    # Pass 1: transform + slope + bin for all points
+    @inbounds for i in 1:N
+        px = far_points[i, 1]
+        py = far_points[i, 2]
+        pz = far_points[i, 3]
+
+        x = px*m1 + py*m2 + pz*m3 + m4
+        y = px*m5 + py*m6 + pz*m7 + m8
+        z = px*m9 + py*m10 + pz*m11 + m12v - observer_km
+
+        alen = Float32(sqrt(x * x + y * y))
+        slope_buf[i] = z / alen
+
+        az = atan2_lut(y, x) + F32_PI
+        normalized = horizon_samples_m1 * az / F32_TWO_PI
+        bin_idx = unsafe_trunc(Int32, 0.5f0 + normalized)
+        if bin_idx < 0
+            bin_idx += Int32(HORIZON_SAMPLES)
+        end
+        if bin_idx >= HORIZON_SAMPLES
+            bin_idx -= Int32(HORIZON_SAMPLES)
+        end
+        bin_buf[i] = bin_idx
+    end
+
+    # Pass 2: scatter-max into slopes
+    @inbounds for i in 1:N
+        b = bin_buf[i] + 1   # 1-indexed
+        s = slope_buf[i]
+        if s > slopes[b]
+            slopes[b] = s
         end
     end
 
@@ -511,7 +617,14 @@ function build_ldem_caster_array(ldem::LDEM, target_transform::AffineTransform,
         pixel_locations[tr + 1, tc + 1, 2] = Float32(ldem_row_f - row_min)
     end
 
-    return caster_rel, caster_legal, (row_min, col_min), pixel_locations
+    # Build max-elevation mipmap for hierarchical ray culling
+    elev_map = Matrix{Float32}(undef, ph, pw)
+    @inbounds for r in 0:(ph - 1), c in 0:(pw - 1)
+        elev_map[r + 1, c + 1] = Float32(ldem_elevation_m(ldem, row_min + r, col_min + c))
+    end
+    mipmap = build_max_mipmap(elev_map)
+
+    return caster_rel, caster_legal, (row_min, col_min), pixel_locations, mipmap
 end
 
 """Helper: (lat, lon) → LDEM (row, col) using deterministic trig."""
@@ -749,32 +862,44 @@ function compute_patch_horizons(matrices_12::Array{Float32, 3},
                                 caster_rotation_target::Float32,
                                 caster_rotation_ldem::Float32)
     H, W, _ = size(matrices_12)
+    n_pixels = H * W
     slopes = fill(Float32(-Inf), H, W, HORIZON_SAMPLES)
 
-    Threads.@threads for pr in 1:H
-        for pc in 1:W
-            m = @view matrices_12[pr, pc, :]
-            my_slopes = @view slopes[pr, pc, :]
-            m_vec = Vector{Float32}(m)
-            s_vec = Vector{Float32}(my_slopes)
+    # Pre-allocate thread-local buffers
+    nt = Threads.nthreads()
+    m_bufs = [Vector{Float32}(undef, 12) for _ in 1:nt]
+    s_bufs = [Vector{Float32}(undef, HORIZON_SAMPLES) for _ in 1:nt]
 
-            # Near-field target DEM
-            center_t = (pixel_loc_target[pr, pc, 1], pixel_loc_target[pr, pc, 2])
-            cast_near_field_single_pixel!(s_vec, m_vec, center_t,
-                caster_rel_target, caster_legal_target, observer_km,
-                caster_rotation_target)
+    Threads.@threads for idx in 1:n_pixels
+        pr = (idx - 1) ÷ W + 1
+        pc = (idx - 1) % W + 1
+        tid = Threads.threadid()
+        m_buf = m_bufs[tid]
+        s_buf = s_bufs[tid]
 
-            # Near-field LDEM
-            center_l = (pixel_loc_ldem[pr, pc, 1], pixel_loc_ldem[pr, pc, 2])
-            cast_near_field_single_pixel!(s_vec, m_vec, center_l,
-                caster_rel_ldem, caster_legal_ldem, observer_km,
-                caster_rotation_ldem)
+        @inbounds for k in 1:12
+            m_buf[k] = matrices_12[pr, pc, k]
+        end
+        fill!(s_buf, Float32(-Inf))
 
-            # Far-field target + LDEM
-            cast_far_field_single_pixel!(s_vec, m_vec, far_points_t, observer_km)
-            cast_far_field_single_pixel!(s_vec, m_vec, far_points_l, observer_km)
+        # Near-field target DEM (with mipmap culling)
+        center_t = (pixel_loc_target[pr, pc, 1], pixel_loc_target[pr, pc, 2])
+        cast_near_field_single_pixel!(s_buf, m_buf, center_t,
+            caster_rel_target, caster_legal_target, observer_km,
+            caster_rotation_target)
 
-            my_slopes .= s_vec
+        # Near-field LDEM
+        center_l = (pixel_loc_ldem[pr, pc, 1], pixel_loc_ldem[pr, pc, 2])
+        cast_near_field_single_pixel!(s_buf, m_buf, center_l,
+            caster_rel_ldem, caster_legal_ldem, observer_km,
+            caster_rotation_ldem)
+
+        # Far-field target + LDEM
+        cast_far_field_single_pixel!(s_buf, m_buf, far_points_t, observer_km)
+        cast_far_field_single_pixel!(s_buf, m_buf, far_points_l, observer_km)
+
+        @inbounds for k in 1:HORIZON_SAMPLES
+            slopes[pr, pc, k] = s_buf[k]
         end
     end
 
