@@ -1,0 +1,22 @@
+name = "JuliaMapbuilder"
+uuid = "e51dffc6-a2c4-4f03-8dba-0366e05820ad"
+authors = ["groverburger <19754251+groverburger@users.noreply.github.com>"]
+version = "0.1.0"
+
+[deps]
+ArchGDAL = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+
+[compat]
+ArchGDAL = "0.10"
+LinearAlgebra = "1.11.0"
+Mmap = "1.11.0"
+SHA = "0.7"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
