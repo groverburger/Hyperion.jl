@@ -15,7 +15,7 @@ const SKIP = 16   # subsample az/el every 16th pixel (matches tile64 builder)
 const NAIF_SUN   = 10
 const NAIF_EARTH = 399
 const NAIF_MOON  = 301
-const F32_RAD2DEG = Float32(180.0 / π)
+const F32_RAD2DEG = Float32(180.0) / F32_PI  # must match the hardcoded F32_PI, not Julia's π
 
 # ─── Sun disk sampling ─────────────────────────────────────────────────────
 
