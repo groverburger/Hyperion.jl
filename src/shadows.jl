@@ -380,7 +380,7 @@ function generate_shadows(;
         sun_az = _subsample_azel(sun_az, SKIP)
         sun_el = _subsample_azel(sun_el, SKIP)
         sun_frac = sun_fraction(sun_az .* F32_RAD2DEG, sun_el .* F32_RAD2DEG, horizons)
-        sun_data = UInt8.(clamp.(round.(Int, Float32(255.0) .* sun_frac), 0, 255))
+        sun_data = UInt8.(clamp.(unsafe_trunc.(Int, Float32(255.0) .* sun_frac), 0, 255))
 
         sun_fname = "sun.$ts.png"
         save_indexed_png(sun_data, SUN_PALETTE, joinpath(sun_output_dir, sun_fname))
