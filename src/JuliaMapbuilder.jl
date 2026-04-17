@@ -4,6 +4,7 @@ include("constants.jl")
 include("deterministic_math.jl")
 include("io.jl")
 include("horizons.jl")
+include("gpu_kernels.jl")
 include("mapset.jl")
 include("shadows.jl")
 
