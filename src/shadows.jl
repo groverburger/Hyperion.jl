@@ -48,13 +48,15 @@ function load_shadow_dem(dem_path::AbstractString)
         easting  = transform.c + Float64(c) * transform.a
         northing = transform.f + Float64(r) * transform.e
         rho = sqrt(easting^2 + northing^2)
-        c_ang = 2.0 * atan(rho, 2.0 * MOON_RADIUS_M)
+        c_ang = 2.0 * Float64(atan2_lut(Float32(rho), Float32(2.0 * MOON_RADIUS_M)))
         lat = c_ang - π / 2.0
-        lon = atan(easting, northing)
+        lon = Float64(atan2_lut(Float32(easting), Float32(northing)))
 
         radius_km = MOON_RADIUS_KM + Float64(elev[r+1, c+1]) / 1000.0
-        clat = cos(lat); slat = sin(lat)
-        clon = cos(lon); slon = sin(lon)
+        c_f32, s_f32 = cos_sin_lut(Float32(lat))
+        clat = Float64(c_f32); slat = Float64(s_f32)
+        c_f32, s_f32 = cos_sin_lut(Float32(lon))
+        clon = Float64(c_f32); slon = Float64(s_f32)
 
         pos = [radius_km * clat * clon, radius_km * clat * slon, radius_km * slat]
 
@@ -170,8 +172,8 @@ function compute_azel(body_pos_km::Vector{Float64}, dem::ShadowDEM)
         ly = dem.R[r,c,2,1]*body_pos_km[1] + dem.R[r,c,2,2]*body_pos_km[2] + dem.R[r,c,2,3]*body_pos_km[3] + dem.T[r,c,2]
         lz = dem.R[r,c,3,1]*body_pos_km[1] + dem.R[r,c,3,2]*body_pos_km[2] + dem.R[r,c,3,3]*body_pos_km[3] + dem.T[r,c,3]
 
-        az_rad[r,c] = Float32(atan(ly, lx) + π)
-        el_rad[r,c] = Float32(atan(lz, sqrt(lx^2 + ly^2)))
+        az_rad[r,c] = atan2_lut(Float32(ly), Float32(lx)) + Float32(π)
+        el_rad[r,c] = atan2_lut(Float32(lz), Float32(sqrt(lx^2 + ly^2)))
     end
 
     return az_rad, el_rad

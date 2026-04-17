@@ -260,3 +260,91 @@ function compute_patch_horizons_gpu(
     # Download result
     return Array(d_slopes)
 end
+
+# ─── Persistent GPU context for mapset runs ───────────────────────────────
+
+"""
+    GPUContext
+
+Holds GPU-resident constant data (LUTs, ray tables) and a reusable output
+buffer. Created once per mapset run to avoid repeated uploads.
+"""
+struct GPUContext
+    backend::Metal.MetalBackend
+    d_ray_cos::Metal.MtlArray{Float32, 1}
+    d_ray_sin::Metal.MtlArray{Float32, 1}
+    d_atan_lut::Metal.MtlArray{Float32, 1}
+    d_slopes::Metal.MtlArray{Float32, 3}  # reusable output buffer
+end
+
+function create_gpu_context(patch_h::Int=PATCH_SIZE, patch_w::Int=PATCH_SIZE)
+    backend = Metal.MetalBackend()
+    GPUContext(
+        backend,
+        Metal.MtlArray(RAY_COS_TABLE),
+        Metal.MtlArray(RAY_SIN_TABLE),
+        Metal.MtlArray(ATAN_LUT),
+        Metal.MtlArray(fill(Float32(-Inf), patch_h, patch_w, HORIZON_SAMPLES)),
+    )
+end
+
+"""
+    compute_patch_horizons_gpu!(ctx, ...) -> Array{Float32, 3}
+
+GPU kernel using a persistent context. Avoids re-uploading constant data.
+"""
+function compute_patch_horizons_gpu!(
+    ctx::GPUContext,
+    matrices_12::Array{Float32, 3},
+    pixel_loc_target::Array{Float32, 3},
+    caster_rel_target::Array{Float32, 3},
+    caster_legal_target::BitMatrix,
+    pixel_loc_ldem::Array{Float32, 3},
+    caster_rel_ldem::Array{Float32, 3},
+    caster_legal_ldem::BitMatrix,
+    far_points_t::Matrix{Float32},
+    far_points_l::Matrix{Float32},
+    observer_km::Float32,
+    caster_rotation_target::Float32,
+    caster_rotation_ldem::Float32)
+
+    H, W, _ = size(matrices_12)
+    n_pixels = H * W
+
+    # Upload per-patch data
+    d_matrices = Metal.MtlArray(matrices_12)
+    d_plt = Metal.MtlArray(pixel_loc_target)
+    d_crt = Metal.MtlArray(caster_rel_target)
+    d_clt = Metal.MtlArray(Float32.(caster_legal_target))
+    d_pll = Metal.MtlArray(pixel_loc_ldem)
+    d_crl = Metal.MtlArray(caster_rel_ldem)
+    d_cll = Metal.MtlArray(Float32.(caster_legal_ldem))
+    d_far_t = Metal.MtlArray(far_points_t)
+    d_far_l = Metal.MtlArray(far_points_l)
+
+    ch_t = Int32(size(caster_rel_target, 1))
+    cw_t = Int32(size(caster_rel_target, 2))
+    ch_l = Int32(size(caster_rel_ldem, 1))
+    cw_l = Int32(size(caster_rel_ldem, 2))
+
+    # Reuse output buffer (resize if needed)
+    d_slopes = ctx.d_slopes
+    if size(d_slopes) != (H, W, HORIZON_SAMPLES)
+        d_slopes = Metal.MtlArray(fill(Float32(-Inf), H, W, HORIZON_SAMPLES))
+    end
+
+    kernel = _horizon_kernel!(ctx.backend, 256)
+    kernel(d_slopes, d_matrices,
+           d_plt, d_crt, d_clt,
+           d_pll, d_crl, d_cll,
+           d_far_t, d_far_l,
+           observer_km, caster_rotation_target, caster_rotation_ldem,
+           Int32(size(far_points_t, 1)), Int32(size(far_points_l, 1)),
+           ch_t, cw_t, ch_l, cw_l,
+           ctx.d_ray_cos, ctx.d_ray_sin,
+           ctx.d_atan_lut, ATAN_LUT_SCALE;
+           ndrange=n_pixels)
+    KernelAbstractions.synchronize(ctx.backend)
+
+    return Array(d_slopes)
+end
