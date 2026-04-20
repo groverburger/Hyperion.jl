@@ -1,0 +1,27 @@
+   \begintext
+
+   MOON_ME is the name of the generic lunar mean Earth/polar axis (ME)
+   reference frame. This frame is an alias for the mean Earth/polar
+   axis frame defined by the latest version of the JPL Solar System
+   Dynamics Group's planetary ephemeris.
+ 
+   In this instance of the lunar reference frames kernel, MOON_ME is an
+   alias for the lunar mean Earth/polar axis frame associated with the
+   planetary ephemeris DE-421.
+
+   \begindata
+
+      FRAME_MOON_ME                 = 31001
+      FRAME_31001_NAME              = 'MOON_ME'
+      FRAME_31001_CLASS             = 4
+      FRAME_31001_CLASS_ID          = 31001
+      FRAME_31001_CENTER            = 301
+ 
+      TKFRAME_31001_SPEC            = 'MATRIX'
+      TKFRAME_31001_RELATIVE        = 'MOON_ME_DE440_ME421'
+      TKFRAME_31001_MATRIX          = ( 1 0 0
+                                        0 1 0
+                                        0 0 1 )
+
+
+   \begintext

@@ -1,4 +1,8 @@
 __pycache__/
 Manifest.toml
 ._*
-validation_results/
+
+# Test data — fetched via scripts/fetch_test_data.jl, not stored in git
+data/inputs/
+data/outputs/
+# data/reference/ IS tracked (pinned test fixtures)

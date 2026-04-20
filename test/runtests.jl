@@ -7,14 +7,14 @@ using Dates
 # ─── Test data discovery ───────────────────────────────────────────────────
 
 const PROJECT_ROOT = dirname(@__DIR__)
-const DRIVE_ROOT   = dirname(PROJECT_ROOT)
-const TEST_INPUTS  = joinpath(DRIVE_ROOT, "mapbuilder", "test_inputs")
-const KERNEL_DIR   = joinpath(DRIVE_ROOT, "mapbuilder", "corelib", "StaticFiles", "kernels")
-const TARGET_DEM   = joinpath(TEST_INPUTS, "nobile_20m.tif")
-const LDEM_PATH    = joinpath(TEST_INPUTS, "ldem_80s_20m.img")
-const HORIZON_DIR  = joinpath(TEST_INPUTS, "nobile_27_28_20m", "horizon")
+const DATA_DIR     = joinpath(PROJECT_ROOT, "data", "inputs")
+const KERNEL_DIR   = joinpath(PROJECT_ROOT, "kernels")
+const TARGET_DEM   = joinpath(DATA_DIR, "nobile_20m.tif")
+const LDEM_PATH    = joinpath(DATA_DIR, "ldem_80s_20m.img")
+const HORIZON_DIR  = joinpath(DATA_DIR, "nobile_27_28_20m", "horizon")
 
-const HAS_TEST_DATA = isfile(TARGET_DEM) && isfile(LDEM_PATH) && isdir(HORIZON_DIR)
+const HAS_TEST_DATA = isfile(TARGET_DEM) && isfile(LDEM_PATH)
+const HAS_HORIZONS  = isdir(HORIZON_DIR)
 const HAS_KERNELS   = isdir(KERNEL_DIR) && isfile(joinpath(KERNEL_DIR, "metakernel.txt"))
 
 function sha256_f32(v::AbstractArray{Float32})
@@ -55,7 +55,7 @@ end
 # ─── Integration tests (require test data on the drive) ───────────────────
 
 if !HAS_TEST_DATA
-    @warn "Test data not found at $TEST_INPUTS — skipping integration tests"
+    @warn "Test data not found at $DATA_DIR — run `julia --project scripts/fetch_test_data.jl` to populate. Skipping integration tests."
 else
 
 @testset "Horizon Tier 1 — single pixel" begin
@@ -145,13 +145,20 @@ end
     @test sha == "a5770a2c370da3897bb795a98156d2b05918262492fabb8779736d0078760c70"
 end
 
-if HAS_KERNELS
+if HAS_KERNELS && HAS_HORIZONS
+
+const REFERENCE_DIR = joinpath(PROJECT_ROOT, "data", "reference")
+const SHADOW_REF_DIR = joinpath(REFERENCE_DIR, "shadows")
+const HAS_SHADOW_REF = isdir(SHADOW_REF_DIR)
+
+if !HAS_SHADOW_REF
+    @warn "Shadow reference PNGs not found at $SHADOW_REF_DIR — skipping shadow test. Generate references with a known-good build and commit them to $SHADOW_REF_DIR."
+else
 
 @testset "Shadow PNGs — pixel-exact vs reference" begin
     using Images, FileIO
 
-    # Generate one timestep from Julia
-    output_dir = joinpath(PROJECT_ROOT, "validation_results", "shadow_test_$(Dates.now())")
+    output_dir = mktempdir()
     sun_dir = joinpath(output_dir, "sun")
     dsn_dir = joinpath(output_dir, "dsn")
 
@@ -167,50 +174,29 @@ if HAS_KERNELS
         step_hours     = 2.0,
     )
 
-    # Generate same timestep from Python for comparison
-    py_dir = joinpath(output_dir, "python_ref")
-    py_sun = joinpath(py_dir, "sun")
-    py_dsn = joinpath(py_dir, "dsn")
-
-    python_mapbuilder = joinpath(DRIVE_ROOT, "python-mapbuilder")
-    py_script = """
-import sys; sys.path.insert(0, '$(python_mapbuilder)')
-from shadow_generator_tui import generate_shadows
-from datetime import datetime
-generate_shadows(
-    dem_path='$(TARGET_DEM)',
-    horizon_dir='$(HORIZON_DIR)',
-    kernel_dir='$(KERNEL_DIR)',
-    sun_output_dir='$(py_sun)',
-    dsn_output_dir='$(py_dsn)',
-    observer_height=0.0,
-    start_dt=datetime(2027, 6, 1, 0, 0, 0),
-    stop_dt=datetime(2027, 6, 1, 0, 0, 0),
-    step_hours=2.0,
-)
-"""
-    run(`python3 -c $py_script`)
-
-    # Compare pixel values
     ts = "2027-06-01T00-00-00"
     for kind in ["sun", "dsn"]
-        jl_img = load(joinpath(output_dir, kind, "$kind.$ts.png"))
-        py_img = load(joinpath(py_dir, kind, "$kind.$ts.png"))
+        jl_img  = load(joinpath(output_dir, kind, "$kind.$ts.png"))
+        ref_img = load(joinpath(SHADOW_REF_DIR, kind, "$kind.$ts.png"))
 
-        # Convert to raw UInt8 RGB for comparison
-        jl_rgb = reinterpret.(UInt8, channelview(jl_img))
-        py_rgb = reinterpret.(UInt8, channelview(py_img))
+        jl_rgb  = reinterpret.(UInt8, channelview(jl_img))
+        ref_rgb = reinterpret.(UInt8, channelview(ref_img))
 
-        @test size(jl_rgb) == size(py_rgb)
-        @test jl_rgb == py_rgb
+        @test size(jl_rgb) == size(ref_rgb)
+        @test jl_rgb == ref_rgb
     end
 
-    # Clean up
     rm(output_dir; recursive=true, force=true)
 end
 
+end  # HAS_SHADOW_REF
+
 else
-    @warn "SPICE kernels not found at $KERNEL_DIR — skipping shadow tests"
-end  # HAS_KERNELS
+    if !HAS_KERNELS
+        @warn "SPICE kernels not found at $KERNEL_DIR — skipping shadow tests"
+    elseif !HAS_HORIZONS
+        @warn "Pre-computed horizons not found at $HORIZON_DIR — skipping shadow tests"
+    end
+end  # HAS_KERNELS && HAS_HORIZONS
 
 end  # HAS_TEST_DATA

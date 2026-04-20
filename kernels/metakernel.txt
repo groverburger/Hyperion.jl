@@ -1,0 +1,31 @@
+kernels/generic/earth_assoc_itrf93.tf.txt
+
+#kernels/generic/de421.bsp
+#kernels/generic/de430.bsp
+
+# de440s covers 1949 DEC 14 00:00:00.000 -> 2050 JAN 02 00:00:00.000, which is sufficient for us.
+# de440 is the same in this interval but covers a larger time interval.
+kernels/generic/de440s.bsp
+
+kernels/generic/moon_de440_200625.tf
+#kernels/generic/moon_080317.tf
+kernels/generic/moon_assoc_me.tf
+
+#kernels/generic/moon_pa_de421_1900-2050.bpc
+kernels/generic/moon_pa_de440_200625.bpc
+
+# This is a test
+kernels/generic/moon_me_from_moon_me_de440.tk
+
+kernels/generic/naif0012.tls.pc
+kernels/generic/pck00010.tpc
+kernels/generic/earthstns_fx_050714.bsp
+kernels/generic/earth_topo_050714_earth_fixed.tf.txt
+#includes frames for DSN antennae. For example: DSS-12_TOPO
+
+kernels/generic/ESTRACK_V04.TF.txt
+kernels/generic/goonhilly.bsp
+
+kernels/generic/earth_070425_370426_predict.bpc
+#kernels/generic/earth_200101_990628_predict.bpc
+
