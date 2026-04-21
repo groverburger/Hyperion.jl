@@ -201,7 +201,7 @@ end
 Compute (sun_frac, over_hz_deg) for one pixel, using the pure live algorithm
 with all optimizations enabled.
 """
-function _live_pure_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
+function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
                               ldem_H::Int, ldem_W::Int,
                               ldem_col::Int, ldem_row::Int,
                               sun_pos_km::NTuple{3, Float64},
@@ -643,20 +643,6 @@ end
     return max_slope
 end
 
-# Backward-compatible wrapper
-function _live_pure_pixel(ldem::Matrix{Int16}, ldem_H::Int, ldem_W::Int,
-                          ldem_col::Int, ldem_row::Int,
-                          sun_pos_km::NTuple{3, Float64},
-                          earth_pos_km::NTuple{3, Float64},
-                          observer_km::Float32, early_return::Bool)
-    # Ad-hoc: wrap base LDEM in a 1-level "mipmap" and disable mipmap lookup.
-    # Kept for the profile script's existing calls.
-    mipmap_fake = (ldem, ldem, ldem, ldem, ldem)   # compile-time unused past [1]
-    return _live_pure_pixel_opt(mipmap_fake, ldem_H, ldem_W,
-        ldem_col, ldem_row, sun_pos_km, earth_pos_km,
-        observer_km, early_return, false)
-end
-
 # ─── Full-frame driver ────────────────────────────────────────────────────
 
 """
@@ -761,7 +747,7 @@ function _precompute_subsampled_azel(ldem::Matrix{Int16},
     return sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg
 end
 
-function generate_frame_live_pure(ldem::Matrix{Int16},
+function generate_live_shadow_frame(ldem::Matrix{Int16},
                                   ldem_origin_row::Int, ldem_origin_col::Int,
                                   H::Int, W::Int,
                                   sun_pos_km::NTuple{3, Float64},
@@ -807,7 +793,7 @@ function generate_frame_live_pure(ldem::Matrix{Int16},
                 ldc = ldem_origin_col + c
                 ldr = ldem_origin_row + r
                 if subsample_azel
-                    sun_frac, over_hz = _live_pure_pixel_opt(mm, ldem_H, ldem_W,
+                    sun_frac, over_hz = _live_pixel_opt(mm, ldem_H, ldem_W,
                         ldc, ldr, sun_pos_km, earth_pos_km, observer_km,
                         early_return, eff_use_mipmap;
                         min_mipmaps=min_mipmaps,
@@ -816,7 +802,7 @@ function generate_frame_live_pure(ldem::Matrix{Int16},
                         override_earth_az_rad=earth_az_rad[r + 1, c + 1],
                         override_earth_el_deg=earth_el_deg[r + 1, c + 1])
                 else
-                    sun_frac, over_hz = _live_pure_pixel_opt(mm, ldem_H, ldem_W,
+                    sun_frac, over_hz = _live_pixel_opt(mm, ldem_H, ldem_W,
                         ldc, ldr, sun_pos_km, earth_pos_km, observer_km,
                         early_return, eff_use_mipmap;
                         min_mipmaps=min_mipmaps)

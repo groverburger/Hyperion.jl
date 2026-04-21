@@ -9,7 +9,7 @@ import JuliaMapbuilder as JM
 const REPO = dirname(@__DIR__)
 const DATA = joinpath(REPO, "data", "inputs")
 const KERNELS = joinpath(REPO, "kernels")
-const OUT = joinpath(REPO, "data", "outputs", "live_pure_test")
+const OUT = joinpath(REPO, "data", "outputs", "live_shadow_test")
 mkpath(joinpath(OUT, "sun")); mkpath(joinpath(OUT, "dsn"))
 
 @info "Loading LDEM"
@@ -42,7 +42,7 @@ configs = [
 
 # Warmup
 for (um, minmm, _) in configs
-    JM._live_pure_pixel_opt(max_mm, ldem_H, ldem_W,
+    JM._live_pixel_opt(max_mm, ldem_H, ldem_W,
         18432 + 256, 8960 + 256, sun_t, earth_t, 0f0, true, um;
         min_mipmaps=minmm)
 end
@@ -55,11 +55,11 @@ for (r, c, label) in test_points
     ldr = 8960 + r; ldc = 18432 + c
     for (um, minmm, cfg) in configs
         t = @elapsed for _ in 1:N
-            JM._live_pure_pixel_opt(max_mm, ldem_H, ldem_W, ldc, ldr,
+            JM._live_pixel_opt(max_mm, ldem_H, ldem_W, ldc, ldr,
                 sun_t, earth_t, 0f0, true, um; min_mipmaps=minmm)
         end
         μs = t / N * 1e6
-        sf, _ = JM._live_pure_pixel_opt(max_mm, ldem_H, ldem_W, ldc, ldr,
+        sf, _ = JM._live_pixel_opt(max_mm, ldem_H, ldem_W, ldc, ldr,
             sun_t, earth_t, 0f0, true, um; min_mipmaps=minmm)
         @printf("%-12s  %-26s  %10.1f  %.3f\n", label, cfg, μs, sf)
     end
@@ -84,7 +84,7 @@ for (label, um, minmm) in [("max_only", true, nothing),
                            ("hierarch", true, min_mm)]
     @info "Running $label"
     t0 = time()
-    sun_d, dsn_d = JM.generate_frame_live_pure(ldem.data,
+    sun_d, dsn_d = JM.generate_live_shadow_frame(ldem.data,
         8960, 18432, 512, 896, sun_t, earth_t, 0.0;
         mipmaps=max_mm, min_mipmaps=minmm, use_mipmap=um, progress=false)
     elapsed = time() - t0
