@@ -31,7 +31,86 @@ using Base.Threads
 
 const R_M_F64    = Float64(MOON_RADIUS_M)
 const R_KM_F64   = Float64(MOON_RADIUS_KM)
+const R_KM_F32   = Float32(MOON_RADIUS_KM)
+const R_M_F32    = Float32(MOON_RADIUS_M)
 const LDEM_PIX_M = 20.0
+const LDEM_S0_F32 = Float32(LDEM_S0)
+const LDEM_L0_F32 = Float32(LDEM_L0)
+
+# ─── Numerically-stable Float32 polar-stereographic helpers ──────────────
+# These avoid the catastrophic magnitude mismatch in `4R² + r²` (Float32
+# would lose the rho² contribution when 4R² ≈ 1.2e13 and rho² ≈ 1e10).
+# Instead, work with u = rho/(2R) which is small (~0.05 near Nobile), so
+# 1 ± u² stays near 1 with full Float32 precision.
+
+"""
+    _stereo_clat_slat_f32(rho_km, R_km) -> (clat, slat, u2_denom)
+
+Exact trig-free (cos(lat), sin(lat)) from polar-stereographic radius,
+expressed via u = rho/(2R). Returns u2_denom = 1 + u² for reuse.
+"""
+@inline function _stereo_clat_slat_f32(rho_km::Float32, R_km::Float32)
+    u = rho_km / (2.0f0 * R_km)
+    u2 = u * u
+    denom = 1.0f0 + u2
+    clat = 2.0f0 * u / denom         # cos(lat) = sin(colatitude)
+    slat = (u2 - 1.0f0) / denom      # sin(lat) = -cos(colatitude)
+    (clat, slat, denom)
+end
+
+"""
+    _stereo_to_moonme_f32(cx, cy, elev_m) -> (X, Y, Z) in km
+
+Float32 polar-stereographic → MOON_ME cartesian, numerically stable.
+"""
+@inline function _stereo_to_moonme_f32(cx::Float32, cy::Float32, elev_m::Float32)
+    e_km = (cx - LDEM_S0_F32) * 0.02f0
+    n_km = (LDEM_L0_F32 - cy) * 0.02f0
+    rho = sqrt(e_km * e_km + n_km * n_km)
+    R_total = R_KM_F32 + elev_m * 0.001f0
+    u = rho / (2.0f0 * R_KM_F32)
+    u2 = u * u
+    denom = 1.0f0 + u2
+    # X = R_total * clat * clon,  clat = 2u/denom,  clon = n/rho
+    #   = R_total * 2u/denom * n/rho = R_total * n / (R_km * denom)  (since 2u/rho = 1/R_km)
+    common = R_total / (R_KM_F32 * denom)
+    X = common * n_km
+    Y = common * e_km
+    Z = R_total * (u2 - 1.0f0) / denom
+    (X, Y, Z)
+end
+
+"""
+    _live_query_setup_f32(cx, cy, elev_m)
+      -> (qx, qy, qz, M11..M33, rho_km, qn_km, qe_km)
+
+Float32 query-pixel setup used by both `_live_pixel_opt` and
+`_compute_azel_at_pixel`. All outputs Float32; coordinates in km.
+
+Numerically-stable u = rho/(2R) formulation.
+"""
+@inline function _live_query_setup_f32(cx::Float32, cy::Float32, elev_m::Float32)
+    qe_km = (cx - LDEM_S0_F32) * 0.02f0
+    qn_km = (LDEM_L0_F32 - cy) * 0.02f0
+    rho = sqrt(qe_km * qe_km + qn_km * qn_km)
+    R_total = R_KM_F32 + elev_m * 0.001f0
+    u = rho / (2.0f0 * R_KM_F32)
+    u2 = u * u
+    denom = 1.0f0 + u2
+    qclat = 2.0f0 * u / denom
+    qslat = (u2 - 1.0f0) / denom
+    qclon = rho > 0.0f0 ? qn_km / rho : 1.0f0
+    qslon = rho > 0.0f0 ? qe_km / rho : 0.0f0
+    common = R_total / (R_KM_F32 * denom)
+    qx = common * qn_km
+    qy = common * qe_km
+    qz = R_total * (u2 - 1.0f0) / denom
+    M11 = qslat*qclon; M12 = qslat*qslon; M13 = -qclat
+    M21 = -qslon;      M22 = qclon;       M23 = 0.0f0
+    M31 = qclat*qclon; M32 = qclat*qslon; M33 = qslat
+    (qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33, rho, qn_km, qe_km)
+end
+
 
 # Max lunar terrain relief above the mean sphere. Mt. Huygens ~5.5 km; 10 km
 # is a conservative upper bound for dynamic-max-d capping.
@@ -123,11 +202,11 @@ Max distance: bounded by `max_d_pixels` (dynamic per-bucket cap).
 """
 @inline function _cast_ray_mipmap(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
                                   ldem_H::Int, ldem_W::Int,
-                                  query_col::Float64, query_row::Float64,
-                                  qx::Float64, qy::Float64, qz::Float64,
-                                  M11::Float64, M12::Float64, M13::Float64,
-                                  M21::Float64, M22::Float64, M23::Float64,
-                                  M31::Float64, M32::Float64, M33::Float64,
+                                  query_col::Float32, query_row::Float32,
+                                  qx::Float32, qy::Float32, qz::Float32,
+                                  M11::Float32, M12::Float32, M13::Float32,
+                                  M21::Float32, M22::Float32, M23::Float32,
+                                  M31::Float32, M32::Float32, M33::Float32,
                                   ray_cos::Float32, ray_sin::Float32,
                                   observer_km::Float32,
                                   threshold::Float32,
@@ -137,7 +216,6 @@ Max distance: bounded by `max_d_pixels` (dynamic per-bucket cap).
     lvl    = 0                                 # current mipmap level
     lvl_thresh = MIPMAP_BASE_THRESH            # d at which to promote to next level
     d = 1.0f0
-    qc_f32 = Float32(query_col); qr_f32 = Float32(query_row)
 
     @inbounds while d <= max_d_pixels
         # Promote to coarser mipmap level when d crosses threshold
@@ -147,8 +225,8 @@ Max distance: bounded by `max_d_pixels` (dynamic per-bucket cap).
             lvl_thresh *= 2.0f0
         end
 
-        cx = Float64(qc_f32 + ray_cos * d)
-        cy = Float64(qr_f32 + ray_sin * d)
+        cx = query_col + ray_cos * d
+        cy = query_row + ray_sin * d
         col_i = unsafe_trunc(Int32, cx)
         row_i = unsafe_trunc(Int32, cy)
         (col_i < 0 || col_i >= ldem_W || row_i < 0 || row_i >= ldem_H) && break
@@ -158,30 +236,20 @@ Max distance: bounded by `max_d_pixels` (dynamic per-bucket cap).
         shift = lvl
         mm_col = (col_i >> shift) + Int32(1)
         mm_row = (row_i >> shift) + Int32(1)
-        telev_m = Float64(mm[mm_row, mm_col]) * 0.5
+        telev_m = Float32(mm[mm_row, mm_col]) * 0.5f0
 
-        # Terrain 3D position in MOON_ME (using base pixel coords cx, cy for
-        # geometry; mipmap only affects the elevation lookup).
-        e, n = _ldem_pixel_to_en(cx, cy)
-        lat, lon = _en_to_latlon(e, n)
-        r_km = R_KM_F64 + telev_m / 1000.0
-        c_f, s_f = cos_sin_lut(Float32(lat))
-        clat = Float64(c_f); slat = Float64(s_f)
-        c_f, s_f = cos_sin_lut(Float32(lon))
-        clon = Float64(c_f); slon = Float64(s_f)
-        tx = r_km * clat * clon
-        ty = r_km * clat * slon
-        tz = r_km * slat
+        # Terrain 3D position in MOON_ME (Float32, stable u-formulation).
+        tx, ty, tz = _stereo_to_moonme_f32(cx, cy, telev_m)
 
         # Transform (terrain - query) to query's ENU frame
         dx = tx - qx; dy = ty - qy; dz = tz - qz
         lx = M11*dx + M12*dy + M13*dz
         ly = M21*dx + M22*dy + M23*dz
-        lz = M31*dx + M32*dy + M33*dz - Float64(observer_km)
+        lz = M31*dx + M32*dy + M33*dz - observer_km
 
         alen_sq = lx*lx + ly*ly
-        if alen_sq > 0.0
-            slope = Float32(lz / sqrt(alen_sq))
+        if alen_sq > 0.0f0
+            slope = lz / sqrt(alen_sq)
             if slope > max_slope
                 max_slope = slope
                 if slope >= threshold
@@ -217,39 +285,26 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
     ldem = mipmaps[1]   # native resolution
     hierarchical = (min_mipmaps !== nothing)
 
-    # ── Query pixel position + ENU frame (exact trig-free, matches algo A) ─
-    qelev_m = Float64(ldem[ldem_row + 1, ldem_col + 1]) * 0.5
-    qe_km = (Float64(ldem_col) - LDEM_S0) * LDEM_SCALE_KM
-    qn_km = (LDEM_L0 - Float64(ldem_row)) * LDEM_SCALE_KM
-    r2_q = qe_km * qe_km + qn_km * qn_km
-    four_R2_q = 4.0 * R_KM_F64 * R_KM_F64
-    denom_q = four_R2_q + r2_q
-    rho_q = sqrt(r2_q)
-    qclat = 4.0 * R_KM_F64 * rho_q / denom_q
-    qslat = (r2_q - four_R2_q) / denom_q
-    qclon = rho_q > 0.0 ? qn_km / rho_q : 1.0
-    qslon = rho_q > 0.0 ? qe_km / rho_q : 0.0
-    qr_km = R_KM_F64 + qelev_m / 1000.0
-    qx = qr_km * qclat * qclon
-    qy = qr_km * qclat * qslon
-    qz = qr_km * qslat
+    # ── Query pixel position + ENU frame (Float32, stable u-formulation) ───
+    qelev_m = Float32(ldem[ldem_row + 1, ldem_col + 1]) * 0.5f0
+    ldem_col_f = Float32(ldem_col); ldem_row_f = Float32(ldem_row)
+    (qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+        rho_q, qn_km, qe_km) =
+        _live_query_setup_f32(ldem_col_f, ldem_row_f, qelev_m)
 
-    M11 = qslat*qclon; M12 = qslat*qslon; M13 = -qclat
-    M21 = -qslon;      M22 = qclon;       M23 = 0.0
-    M31 = qclat*qclon; M32 = qclat*qslon; M33 = qslat
+    # Sun/earth positions as Float32 vectors for per-pixel dot products.
+    sun_x = Float32(sun_pos_km[1]); sun_y = Float32(sun_pos_km[2]); sun_z = Float32(sun_pos_km[3])
+    earth_x = Float32(earth_pos_km[1]); earth_y = Float32(earth_pos_km[2]); earth_z = Float32(earth_pos_km[3])
 
     # ── Sun az/el ──────────────────────────────────────────────────────
-    # If overrides provided (precomputed at block reference pixel, matching
-    # compute_azel_subsampled's 16×16 subsampling), use them. Otherwise
-    # compute per-pixel.
     sun_az_deg  = Float32(0.0); sun_el_deg  = Float32(0.0)
     if isnan(override_sun_az_deg)
-        sdx = sun_pos_km[1] - qx; sdy = sun_pos_km[2] - qy; sdz = sun_pos_km[3] - qz
+        sdx = sun_x - qx; sdy = sun_y - qy; sdz = sun_z - qz
         sun_lx = M11*sdx + M12*sdy + M13*sdz
         sun_ly = M21*sdx + M22*sdy + M23*sdz
-        sun_lz = M31*sdx + M32*sdy + M33*sdz - Float64(observer_km)
-        sun_az_rad = atan2_lut(Float32(sun_ly), Float32(sun_lx)) + F32_PI
-        sun_el_rad = atan2_lut(Float32(sun_lz), Float32(sqrt(sun_lx*sun_lx + sun_ly*sun_ly)))
+        sun_lz = M31*sdx + M32*sdy + M33*sdz - observer_km
+        sun_az_rad = atan2_lut(sun_ly, sun_lx) + F32_PI
+        sun_el_rad = atan2_lut(sun_lz, sqrt(sun_lx*sun_lx + sun_ly*sun_ly))
         sun_az_deg = sun_az_rad * F32_RAD2DEG
         sun_el_deg = sun_el_rad * F32_RAD2DEG
     else
@@ -260,12 +315,12 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
     # ── Earth az/el ────────────────────────────────────────────────────
     earth_az_rad = Float32(0.0); earth_el_deg = Float32(0.0)
     if isnan(override_earth_az_rad)
-        edx = earth_pos_km[1] - qx; edy = earth_pos_km[2] - qy; edz = earth_pos_km[3] - qz
+        edx = earth_x - qx; edy = earth_y - qy; edz = earth_z - qz
         e_lx = M11*edx + M12*edy + M13*edz
         e_ly = M21*edx + M22*edy + M23*edz
-        e_lz = M31*edx + M32*edy + M33*edz - Float64(observer_km)
-        earth_az_rad = atan2_lut(Float32(e_ly), Float32(e_lx)) + F32_PI
-        earth_el_deg = atan2_lut(Float32(e_lz), Float32(sqrt(e_lx*e_lx + e_ly*e_ly))) * F32_RAD2DEG
+        e_lz = M31*edx + M32*edy + M33*edz - observer_km
+        earth_az_rad = atan2_lut(e_ly, e_lx) + F32_PI
+        earth_el_deg = atan2_lut(e_lz, sqrt(e_lx*e_lx + e_ly*e_ly)) * F32_RAD2DEG
     else
         earth_az_rad = override_earth_az_rad
         earth_el_deg = override_earth_el_deg
@@ -282,7 +337,7 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
 
     # ── Frame-rotation offset ──────────────────────────────────────────
     r_pix = rho_q
-    off_rad = atan2_lut(Float32(qn_km / r_pix), Float32(-qe_km / r_pix)) + F32_PI
+    off_rad = atan2_lut(qn_km / r_pix, -qe_km / r_pix) + F32_PI
     off_bucket_f = off_rad * Float32(HORIZON_SAMPLES) / F32_TWO_PI
 
     # ── Target buckets ─────────────────────────────────────────────────
@@ -336,7 +391,6 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
     end
 
     # ── Ray-cast one bucket ────────────────────────────────────────────
-    q_elev_m_f32 = Float32(qelev_m)
     @inline function ray(B::Int32, thr::Float32, max_d::Float32)
         adjB = mod(off_bucket_f - Float32(B), HSF) * Float32(3.0)
         ray_idx_f = adjB + Float32(2.0)
@@ -346,18 +400,18 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
         rs = RAY_SIN_TABLE[ray_i]
         if hierarchical
             s = _cast_ray_hierarchical(mipmaps, min_mipmaps, ldem_H, ldem_W,
-                Float64(ldem_col), Float64(ldem_row),
-                q_elev_m_f32,
+                ldem_col_f, ldem_row_f,
+                qelev_m,
                 qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
                 rc, rs, observer_km, thr, max_d)
         elseif use_mipmap
             s = _cast_ray_mipmap(mipmaps, ldem_H, ldem_W,
-                Float64(ldem_col), Float64(ldem_row),
+                ldem_col_f, ldem_row_f,
                 qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
                 rc, rs, observer_km, thr, max_d)
         else
             s = _cast_ray_base(ldem, ldem_H, ldem_W,
-                Float64(ldem_col), Float64(ldem_row),
+                ldem_col_f, ldem_row_f,
                 qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
                 rc, rs, observer_km, thr, max_d)
         end
@@ -447,12 +501,12 @@ end
         max_pyr::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
         min_pyr::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
         ldem_H::Int, ldem_W::Int,
-        query_col::Float64, query_row::Float64,
+        query_col::Float32, query_row::Float32,
         q_elev_m::Float32,
-        qx::Float64, qy::Float64, qz::Float64,
-        M11::Float64, M12::Float64, M13::Float64,
-        M21::Float64, M22::Float64, M23::Float64,
-        M31::Float64, M32::Float64, M33::Float64,
+        qx::Float32, qy::Float32, qz::Float32,
+        M11::Float32, M12::Float32, M13::Float32,
+        M21::Float32, M22::Float32, M23::Float32,
+        M31::Float32, M32::Float32, M33::Float32,
         ray_cos::Float32, ray_sin::Float32,
         observer_km::Float32,
         threshold::Float32,
@@ -460,7 +514,6 @@ end
     ldem = max_pyr[1]
     max_slope = Float32(-Inf)
     d = 1.0f0
-    qc_f32 = Float32(query_col); qr_f32 = Float32(query_row)
     base_step = Float32(NEAR_FIELD_RAY_STEP)
 
     @inbounds while d <= max_d_pixels
@@ -477,8 +530,8 @@ end
             lvl_raw > N_MIPMAP_LEVELS - 1 ? N_MIPMAP_LEVELS - 1 : lvl_raw
         end
 
-        cx = Float64(qc_f32 + ray_cos * d)
-        cy = Float64(qr_f32 + ray_sin * d)
+        cx = query_col + ray_cos * d
+        cy = query_row + ray_sin * d
         col_i = unsafe_trunc(Int32, cx)
         row_i = unsafe_trunc(Int32, cy)
         (col_i < 0 || col_i >= ldem_W || row_i < 0 || row_i >= ldem_H) && break
@@ -521,33 +574,24 @@ end
         (col_i + 1 >= ldem_W || row_i + 1 >= ldem_H) && begin
             d += base_step; continue
         end
-        e11 = Float64(ldem[row_i + 1, col_i + 1])
-        e21 = Float64(ldem[row_i + 1, col_i + 2])
-        e12 = Float64(ldem[row_i + 2, col_i + 1])
-        e22 = Float64(ldem[row_i + 2, col_i + 2])
-        fx = cx - Float64(col_i)
-        fy = cy - Float64(row_i)
-        telev_m = ((1.0-fx)*(1.0-fy)*e11 + fx*(1.0-fy)*e21 +
-                   (1.0-fx)*fy*e12 + fx*fy*e22) * 0.5
+        e11 = Float32(ldem[row_i + 1, col_i + 1])
+        e21 = Float32(ldem[row_i + 1, col_i + 2])
+        e12 = Float32(ldem[row_i + 2, col_i + 1])
+        e22 = Float32(ldem[row_i + 2, col_i + 2])
+        fx = cx - Float32(col_i)
+        fy = cy - Float32(row_i)
+        telev_m = ((1.0f0-fx)*(1.0f0-fy)*e11 + fx*(1.0f0-fy)*e21 +
+                   (1.0f0-fx)*fy*e12 + fx*fy*e22) * 0.5f0
 
-        # Full spherical projection for the committed slope
-        e, n = _ldem_pixel_to_en(cx, cy)
-        lat, lon = _en_to_latlon(e, n)
-        r_km = R_KM_F64 + telev_m / 1000.0
-        c_f, s_f = cos_sin_lut(Float32(lat))
-        clat = Float64(c_f); slat = Float64(s_f)
-        c_f, s_f = cos_sin_lut(Float32(lon))
-        clon = Float64(c_f); slon = Float64(s_f)
-        tx = r_km * clat * clon
-        ty = r_km * clat * slon
-        tz = r_km * slat
+        # Full spherical projection for the committed slope (Float32, stable)
+        tx, ty, tz = _stereo_to_moonme_f32(cx, cy, telev_m)
         dx = tx - qx; dy = ty - qy; dz = tz - qz
         lx = M11*dx + M12*dy + M13*dz
         ly = M21*dx + M22*dy + M23*dz
-        lz = M31*dx + M32*dy + M33*dz - Float64(observer_km)
+        lz = M31*dx + M32*dy + M33*dz - observer_km
         alen_sq = lx*lx + ly*ly
-        if alen_sq > 0.0
-            slope = Float32(lz / sqrt(alen_sq))
+        if alen_sq > 0.0f0
+            slope = lz / sqrt(alen_sq)
             if slope > max_slope
                 max_slope = slope
                 if slope >= threshold
@@ -563,11 +607,11 @@ end
 
 # Non-mipmap (base-level only) ray caster, for comparison/fallback
 @inline function _cast_ray_base(ldem::Matrix{Int16}, ldem_H::Int, ldem_W::Int,
-                                query_col::Float64, query_row::Float64,
-                                qx::Float64, qy::Float64, qz::Float64,
-                                M11::Float64, M12::Float64, M13::Float64,
-                                M21::Float64, M22::Float64, M23::Float64,
-                                M31::Float64, M32::Float64, M33::Float64,
+                                query_col::Float32, query_row::Float32,
+                                qx::Float32, qy::Float32, qz::Float32,
+                                M11::Float32, M12::Float32, M13::Float32,
+                                M21::Float32, M22::Float32, M23::Float32,
+                                M31::Float32, M32::Float32, M33::Float32,
                                 ray_cos::Float32, ray_sin::Float32,
                                 observer_km::Float32,
                                 threshold::Float32,
@@ -575,49 +619,32 @@ end
     max_slope = Float32(-Inf)
     base_step = Float32(NEAR_FIELD_RAY_STEP)
     d = 1.0f0
-    qc_f32 = Float32(query_col); qr_f32 = Float32(query_row)
-    four_R2 = 4.0 * R_KM_F64 * R_KM_F64
 
-    # Distance-dependent stride: match algo A's far-field sub-sampling so
-    # the ray catches approximately the same peaks that algo A's grid-filtered
-    # far-field point cloud would sample. Below ~230 px we use the near-field
-    # base step (0.707). Beyond, stride grows linearly with distance, following
-    # algo A's _decide_far_field_step formula:
-    #   stride ≈ HORIZON_RESOLUTION_DEG / atan(pixel/dist) ≈ d · π/720
-    # Without this, pure-live over-samples far terrain and catches peaks that
-    # algo A filters out — producing systematic over-shadowing near the
-    # terminator.
+    # Distance-dependent stride (see original comment): d * π/720 beyond ~230 px.
     stride_coef = Float32(π / 720.0)
 
     @inbounds while d <= max_d_pixels
         step_d = max(base_step, d * stride_coef)
-        cx = Float64(qc_f32 + ray_cos * d)
-        cy = Float64(qr_f32 + ray_sin * d)
+        cx = query_col + ray_cos * d
+        cy = query_row + ray_sin * d
         col_i = unsafe_trunc(Int32, cx)
         row_i = unsafe_trunc(Int32, cy)
         (col_i < 0 || col_i + 1 >= ldem_W || row_i < 0 || row_i + 1 >= ldem_H) && break
 
-        # Compute 4 neighboring 3D positions individually, then bilinear
-        # (matches algo A's caster_rel bilinear of pre-projected positions).
-        fx = cx - Float64(col_i)
-        fy = cy - Float64(row_i)
+        # Bilinear interpolation of pre-projected terrain points (Float32).
+        fx = cx - Float32(col_i)
+        fy = cy - Float32(row_i)
 
         @inline function moonme_at(c::Int32, r::Int32, raw::Int16)
-            e_km = (Float64(c) - LDEM_S0) * LDEM_SCALE_KM
-            n_km = (LDEM_L0 - Float64(r)) * LDEM_SCALE_KM
-            r2 = e_km * e_km + n_km * n_km
-            dn = four_R2 + r2
-            elev_m = Float64(raw) * 0.5
-            R_total = R_KM_F64 + elev_m / 1000.0
-            fxy = 4.0 * R_KM_F64 * R_total / dn
-            (fxy * n_km, fxy * e_km, R_total * (r2 - four_R2) / dn)
+            elev_m = Float32(raw) * 0.5f0
+            _stereo_to_moonme_f32(Float32(c), Float32(r), elev_m)
         end
         tx11, ty11, tz11 = moonme_at(col_i,         row_i,         ldem[row_i + 1, col_i + 1])
         tx21, ty21, tz21 = moonme_at(col_i + Int32(1), row_i,      ldem[row_i + 1, col_i + 2])
         tx12, ty12, tz12 = moonme_at(col_i,         row_i + Int32(1), ldem[row_i + 2, col_i + 1])
         tx22, ty22, tz22 = moonme_at(col_i + Int32(1), row_i + Int32(1), ldem[row_i + 2, col_i + 2])
 
-        w11 = (1.0-fx)*(1.0-fy); w21 = fx*(1.0-fy); w12 = (1.0-fx)*fy; w22 = fx*fy
+        w11 = (1.0f0-fx)*(1.0f0-fy); w21 = fx*(1.0f0-fy); w12 = (1.0f0-fx)*fy; w22 = fx*fy
         tx = w11*tx11 + w21*tx21 + w12*tx12 + w22*tx22
         ty = w11*ty11 + w21*ty21 + w12*ty12 + w22*ty22
         tz = w11*tz11 + w21*tz21 + w12*tz12 + w22*tz22
@@ -625,11 +652,11 @@ end
         dx = tx - qx; dy = ty - qy; dz = tz - qz
         lx = M11*dx + M12*dy + M13*dz
         ly = M21*dx + M22*dy + M23*dz
-        lz = M31*dx + M32*dy + M33*dz - Float64(observer_km)
+        lz = M31*dx + M32*dy + M33*dz - observer_km
 
         alen_sq = lx*lx + ly*ly
-        if alen_sq > 0.0
-            slope = Float32(lz / sqrt(alen_sq))
+        if alen_sq > 0.0f0
+            slope = lz / sqrt(alen_sq)
             if slope > max_slope
                 max_slope = slope
                 if slope >= threshold
@@ -654,40 +681,28 @@ function _compute_azel_at_pixel(ldem_col::Int, ldem_row::Int,
                                 sun_pos_km::NTuple{3, Float64},
                                 earth_pos_km::NTuple{3, Float64},
                                 observer_km::Float32)
-    qelev_m = Float64(ldem[ldem_row + 1, ldem_col + 1]) * 0.5
-    qe_km = (Float64(ldem_col) - LDEM_S0) * LDEM_SCALE_KM
-    qn_km = (LDEM_L0 - Float64(ldem_row)) * LDEM_SCALE_KM
-    r2_q = qe_km * qe_km + qn_km * qn_km
-    four_R2_q = 4.0 * R_KM_F64 * R_KM_F64
-    denom_q = four_R2_q + r2_q
-    rho_q = sqrt(r2_q)
-    qclat = 4.0 * R_KM_F64 * rho_q / denom_q
-    qslat = (r2_q - four_R2_q) / denom_q
-    qclon = rho_q > 0.0 ? qn_km / rho_q : 1.0
-    qslon = rho_q > 0.0 ? qe_km / rho_q : 0.0
-    qr_km = R_KM_F64 + qelev_m / 1000.0
-    qx = qr_km * qclat * qclon
-    qy = qr_km * qclat * qslon
-    qz = qr_km * qslat
-    M11 = qslat*qclon; M12 = qslat*qslon; M13 = -qclat
-    M21 = -qslon;      M22 = qclon;       M23 = 0.0
-    M31 = qclat*qclon; M32 = qclat*qslon; M33 = qslat
+    qelev_m = Float32(ldem[ldem_row + 1, ldem_col + 1]) * 0.5f0
+    (qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33, _, _, _) =
+        _live_query_setup_f32(Float32(ldem_col), Float32(ldem_row), qelev_m)
 
-    sdx = sun_pos_km[1] - qx; sdy = sun_pos_km[2] - qy; sdz = sun_pos_km[3] - qz
+    sun_x = Float32(sun_pos_km[1]); sun_y = Float32(sun_pos_km[2]); sun_z = Float32(sun_pos_km[3])
+    earth_x = Float32(earth_pos_km[1]); earth_y = Float32(earth_pos_km[2]); earth_z = Float32(earth_pos_km[3])
+
+    sdx = sun_x - qx; sdy = sun_y - qy; sdz = sun_z - qz
     sun_lx = M11*sdx + M12*sdy + M13*sdz
     sun_ly = M21*sdx + M22*sdy + M23*sdz
-    sun_lz = M31*sdx + M32*sdy + M33*sdz - Float64(observer_km)
-    sun_az_rad = atan2_lut(Float32(sun_ly), Float32(sun_lx)) + F32_PI
-    sun_el_rad = atan2_lut(Float32(sun_lz), Float32(sqrt(sun_lx*sun_lx + sun_ly*sun_ly)))
+    sun_lz = M31*sdx + M32*sdy + M33*sdz - observer_km
+    sun_az_rad = atan2_lut(sun_ly, sun_lx) + F32_PI
+    sun_el_rad = atan2_lut(sun_lz, sqrt(sun_lx*sun_lx + sun_ly*sun_ly))
     sun_az_deg = sun_az_rad * F32_RAD2DEG
     sun_el_deg = sun_el_rad * F32_RAD2DEG
 
-    edx = earth_pos_km[1] - qx; edy = earth_pos_km[2] - qy; edz = earth_pos_km[3] - qz
+    edx = earth_x - qx; edy = earth_y - qy; edz = earth_z - qz
     e_lx = M11*edx + M12*edy + M13*edz
     e_ly = M21*edx + M22*edy + M23*edz
-    e_lz = M31*edx + M32*edy + M33*edz - Float64(observer_km)
-    earth_az_rad = atan2_lut(Float32(e_ly), Float32(e_lx)) + F32_PI
-    earth_el_deg = atan2_lut(Float32(e_lz), Float32(sqrt(e_lx*e_lx + e_ly*e_ly))) * F32_RAD2DEG
+    e_lz = M31*edx + M32*edy + M33*edz - observer_km
+    earth_az_rad = atan2_lut(e_ly, e_lx) + F32_PI
+    earth_el_deg = atan2_lut(e_lz, sqrt(e_lx*e_lx + e_ly*e_ly)) * F32_RAD2DEG
 
     return (sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg)
 end

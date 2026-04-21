@@ -8,6 +8,7 @@ include("gpu_kernels.jl")
 include("mapset.jl")
 include("shadows.jl")
 include("live_shadows.jl")
+include("gpu_live.jl")
 
 # Verify LUT integrity at module load
 function __init__()
