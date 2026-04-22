@@ -116,7 +116,7 @@ Float32 polar-stereographic pixel → MOON_ME cartesian.
     # fma (not muladd) so ARM and x86 Julia backends both emit hardware FMA
     # rather than letting LLVM's heuristic decide per-target.
     rho = sqrt(fma(n_km, n_km, e_km * e_km))
-    R_total = R_KM_F32 + elev_m * 0.001f0
+    R_total = fma(elev_m, 0.001f0, R_KM_F32)
     u = rho / (2.0f0 * R_KM_F32)
     u2 = u * u
     denom = 1.0f0 + u2
@@ -137,7 +137,7 @@ Query-pixel Float32 3D position + ENU rotation matrix.
     qe_km = (cx - LDEM_S0_F32) * 0.02f0
     qn_km = (LDEM_L0_F32 - cy) * 0.02f0
     rho = sqrt(fma(qn_km, qn_km, qe_km * qe_km))
-    R_total = R_KM_F32 + elev_m * 0.001f0
+    R_total = fma(elev_m, 0.001f0, R_KM_F32)
     u = rho / (2.0f0 * R_KM_F32)
     u2 = u * u
     denom = 1.0f0 + u2

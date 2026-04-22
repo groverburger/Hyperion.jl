@@ -95,8 +95,14 @@ end
               d < 4.0f0*mipmap_base   ? Int32(2) :
               d < 8.0f0*mipmap_base   ? Int32(3) : Int32(4)
 
-        cx = query_col + ray_cos * d
-        cy = query_row + ray_sin * d
+        # Explicit fma: ray position determines which mipmap cell we sample
+        # every step. If Metal contracts this to fma and CUDA doesn't (or
+        # picks a different rounding), `unsafe_trunc` can land on different
+        # integer cells at cell boundaries → divergent terrain samples →
+        # different max_slope → different UInt8 output. This was the single
+        # biggest contributor to the residual Metal↔CUDA drift.
+        cx = fma(ray_cos, d, query_col)
+        cy = fma(ray_sin, d, query_row)
         col_i = unsafe_trunc(Int32, cx)
         row_i = unsafe_trunc(Int32, cy)
         if col_i < Int32(0) || col_i >= ldem_W || row_i < Int32(0) || row_i >= ldem_H
@@ -162,7 +168,7 @@ end
                 e_km = (cx - ldem_s0) * 0.02f0
                 n_km = (ldem_l0 - cy) * 0.02f0
                 rho = sqrt(fma(n_km, n_km, e_km * e_km))
-                R_total = R_km + telev_m * 0.001f0
+                R_total = fma(telev_m, 0.001f0, R_km)
                 u = rho / (2.0f0 * R_km)
                 u2 = u * u
                 dn = 1.0f0 + u2
@@ -258,7 +264,7 @@ end
     qe_km = (Float32(ldem_col) - ldem_s0) * 0.02f0
     qn_km = (ldem_l0 - Float32(ldem_row)) * 0.02f0
     rho_q = sqrt(fma(qn_km, qn_km, qe_km*qe_km))
-    R_total_q = R_km + qelev_m * 0.001f0
+    R_total_q = fma(qelev_m, 0.001f0, R_km)
     u_q = rho_q / (2.0f0 * R_km)
     u2_q = u_q * u_q
     denom_q = 1.0f0 + u2_q
@@ -418,7 +424,7 @@ end
                  i == Int32(14) ? 0.19606979f0 :
                  i == Int32(15) ? 0.15739954f0 :
                                   0.09395602f0
-            horizon_el = frac * bucket_delta + left_el
+            horizon_el = fma(frac, bucket_delta, left_el)
             delta = (sun_el_deg + sc) - horizon_el
             px += clamp(delta, 0.0f0, 2.0f0 * sc)
             frac += frac_step
