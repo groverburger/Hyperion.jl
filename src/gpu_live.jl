@@ -311,7 +311,11 @@ end
 
     norm_ea = mod(earth_az_rad, TWO_PI_F32)
     if norm_ea < 0f0; norm_ea += TWO_PI_F32; end
-    e_idx = 1440.0f0 * norm_ea / TWO_PI_F32
+    # Single-multiply form: `1440 * norm_ea / TWO_PI_F32` as `(a*b)/c` lets
+    # each vendor reassociate differently and drifts 1 ULP near bucket
+    # boundaries, flipping `unsafe_trunc` to a neighboring bucket → totally
+    # different DSN ray direction. Compute the constant once, then single mul.
+    e_idx = norm_ea * (1440.0f0 / TWO_PI_F32)
     e_left = unsafe_trunc(Int32, e_idx)
     e_fr = e_idx - Float32(e_left)
     e_right = mod(e_left + Int32(1), S)

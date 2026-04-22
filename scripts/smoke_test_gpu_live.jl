@@ -72,12 +72,26 @@ dsn_sha = bytes2hex(sha256(reinterpret(UInt8, vec(dsn_gpu))))
 @printf("\nCompare these SHAs across hardware. Byte-exactness means the\n")
 @printf("same PNGs regardless of Apple Silicon / NVIDIA / AMD / CPU.\n")
 
-# ── Save PNGs for cross-platform visual comparison ───────────────────────
+# ── Save PNGs + raw outputs for cross-platform visual comparison ──────────
 outdir = joinpath(REPO, "data", "outputs", "smoke_compare", BACKEND_NAME)
 mkpath(outdir)
 JM.save_indexed_png(sun_gpu, JM.SUN_PALETTE, joinpath(outdir, "sun.png"))
 JM.save_indexed_png(dsn_gpu, JM.DSN_PALETTE, joinpath(outdir, "dsn.png"))
-# Also dump raw UInt8 matrices so we can diff without palette influence
 open(joinpath(outdir, "sun_raw.bin"), "w") do f; write(f, sun_gpu); end
 open(joinpath(outdir, "dsn_raw.bin"), "w") do f; write(f, dsn_gpu); end
-@info "Saved comparison images" dir=outdir
+
+# ── Also dump the CPU-side az/el precompute buffer ────────────────────────
+# This is the input to the GPU kernel. Comparing it across platforms tells
+# us whether residual output drift is CPU-precompute-side or GPU-kernel-side.
+# Channels 1..6 = [sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg,
+#                  sun_slope_tan, dsn_slope_tan].
+sun_az, sun_el, earth_az, earth_el, sun_tan, dsn_tan = JM._precompute_azel(
+    ldem.data, origin_r, origin_c, H, W, sun_t, earth_t, Float32(0.0))
+open(joinpath(outdir, "azel_raw.bin"), "w") do f
+    write(f, sun_az); write(f, sun_el); write(f, earth_az); write(f, earth_el)
+    write(f, sun_tan); write(f, dsn_tan)
+end
+azel_sha = bytes2hex(sha256(reinterpret(UInt8, vcat(vec(sun_az), vec(sun_el),
+    vec(earth_az), vec(earth_el), vec(sun_tan), vec(dsn_tan)))))
+@printf("azel SHA-256: %s\n", azel_sha)
+@info "Saved comparison images + azel buffer" dir=outdir

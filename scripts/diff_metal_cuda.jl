@@ -13,6 +13,54 @@ function load_u8(path)
     return reshape(data, (H, W))
 end
 
+# ── CPU-side az/el buffer diff (isolates CPU-precompute drift) ───────────
+# Layout: H*W Float32 per channel × 6 channels
+#   [sun_az, sun_el, earth_az, earth_el, sun_slope_tan, dsn_slope_tan]
+function load_azel(path)
+    nbytes = H * W * 6 * sizeof(Float32)
+    data = reinterpret(Float32, read(path))
+    @assert length(data) == H * W * 6
+    channels = (
+        reshape(data[1*H*W + 1 - H*W : 1*H*W], (H, W)),
+        reshape(data[2*H*W + 1 - H*W : 2*H*W], (H, W)),
+        reshape(data[3*H*W + 1 - H*W : 3*H*W], (H, W)),
+        reshape(data[4*H*W + 1 - H*W : 4*H*W], (H, W)),
+        reshape(data[5*H*W + 1 - H*W : 5*H*W], (H, W)),
+        reshape(data[6*H*W + 1 - H*W : 6*H*W], (H, W)),
+    )
+    return channels
+end
+
+azel_m_path = joinpath(base, "metal", "azel_raw.bin")
+azel_c_path = joinpath(base, "cuda",  "azel_raw.bin")
+if isfile(azel_m_path) && isfile(azel_c_path)
+    println("\n═══ CPU-side azel buffer diff (isolates CPU precompute) ═══")
+    metal_ch = load_azel(azel_m_path)
+    cuda_ch  = load_azel(azel_c_path)
+    for (i, name) in enumerate(["sun_az", "sun_el", "earth_az", "earth_el",
+                                 "sun_slope_tan", "dsn_slope_tan"])
+        m, c = metal_ch[i], cuda_ch[i]
+        # Float32 bit-compare
+        mb = reinterpret(UInt32, vec(m))
+        cb = reinterpret(UInt32, vec(c))
+        nd = count(i -> mb[i] != cb[i], eachindex(mb))
+        @printf("  %-16s bit-diff: %5d / %d pixels", name, nd, length(mb))
+        if nd > 0
+            # ULP distribution on the diffs
+            ulp_diffs = Int[]
+            for i in eachindex(mb)
+                if mb[i] != cb[i]
+                    push!(ulp_diffs, Int(cb[i]) - Int(mb[i]))
+                end
+            end
+            @printf("   ULP diff range: %+d..%+d\n",
+                    minimum(ulp_diffs), maximum(ulp_diffs))
+        else
+            println()
+        end
+    end
+end
+
 for channel in ["sun", "dsn"]
     println("\n─── $channel ─────────────────────────────────────────")
     metal = load_u8(joinpath(base, "metal", "$(channel)_raw.bin"))
