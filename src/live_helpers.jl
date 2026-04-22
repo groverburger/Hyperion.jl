@@ -39,6 +39,15 @@ const TWILIGHT_SKIP_DEG = Float32(-10.0)
 const N_MIPMAP_LEVELS    = 5
 const MIPMAP_BASE_THRESH = Float32(100.0)
 
+# Precomputed at module load — NOT evaluated inline in the kernel.
+# `1440.0f0 / TWO_PI_F32` written in the kernel body can be constant-folded
+# by different vendor compilers (Metal vs CUDA) to Float32 bit patterns
+# that differ by 1 ULP, which flips `unsafe_trunc(Int32, norm_ea * const)`
+# to a neighboring bucket → totally different DSN ray direction. Folding
+# once at Julia module load gives a single canonical Float32 that's a
+# literal constant at kernel compile time.
+const BUCKETS_PER_RAD = Float32(HORIZON_SAMPLES) / F32_TWO_PI
+
 # Sun disk sampling weights (16 ticks across the disk diameter).
 function _make_half_circle()
     ticks = 8

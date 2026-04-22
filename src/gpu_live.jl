@@ -312,11 +312,14 @@ end
 
     norm_ea = mod(earth_az_rad, TWO_PI_F32)
     if norm_ea < 0f0; norm_ea += TWO_PI_F32; end
-    # Single-multiply form: `1440 * norm_ea / TWO_PI_F32` as `(a*b)/c` lets
-    # each vendor reassociate differently and drifts 1 ULP near bucket
-    # boundaries, flipping `unsafe_trunc` to a neighboring bucket → totally
-    # different DSN ray direction. Compute the constant once, then single mul.
-    e_idx = norm_ea * (1440.0f0 / TWO_PI_F32)
+    # Use the module-load-time constant `BUCKETS_PER_RAD`. Writing
+    # `norm_ea * (1440.0f0 / TWO_PI_F32)` inline still let Metal vs CUDA
+    # compilers fold the division to different Float32 bit patterns by
+    # 1 ULP → `unsafe_trunc` flipped to a neighboring bucket → totally
+    # different ray direction on some pixels (we measured Δdf up to 0.20
+    # rad in an earlier cross-platform diff). The named constant is a
+    # single Float32 literal at kernel compile time.
+    e_idx = norm_ea * BUCKETS_PER_RAD
     e_left = unsafe_trunc(Int32, e_idx)
     e_fr = e_idx - Float32(e_left)
     e_right = mod(e_left + Int32(1), S)
