@@ -147,14 +147,21 @@ end
                 @inbounds e22 = Float32(max0[row_i + Int32(2), col_i + Int32(2)])
                 fx = cx - Float32(col_i)
                 fy = cy - Float32(row_i)
-                telev_raw = (1.0f0-fx)*(1.0f0-fy)*e11 + fx*(1.0f0-fy)*e21 +
-                            (1.0f0-fx)*fy*e12 + fx*fy*e22
+                # Bilinear with explicit fma chain for vendor-independent
+                # single-rounding semantics.
+                w11 = (1.0f0 - fx) * (1.0f0 - fy)
+                w21 =       fx   * (1.0f0 - fy)
+                w12 = (1.0f0 - fx) *       fy
+                w22 =       fx   *       fy
+                telev_raw = fma(w22, e22,
+                              fma(w12, e12,
+                                fma(w21, e21, w11 * e11)))
                 telev_m = telev_raw * 0.5f0
 
                 # Numerically-stable u-formulation (matches CPU _stereo_to_moonme_f32)
                 e_km = (cx - ldem_s0) * 0.02f0
                 n_km = (ldem_l0 - cy) * 0.02f0
-                rho = sqrt(e_km * e_km + n_km * n_km)
+                rho = sqrt(fma(n_km, n_km, e_km * e_km))
                 R_total = R_km + telev_m * 0.001f0
                 u = rho / (2.0f0 * R_km)
                 u2 = u * u
@@ -165,11 +172,14 @@ end
                 tz = R_total * (u2 - 1.0f0) / dn
 
                 dx = tx - qx; dy = ty - qy; dz = tz - qz
-                lx = M11*dx + M12*dy + M13*dz
-                ly = M21*dx + M22*dy + M23*dz
-                lz = M31*dx + M32*dy + M33*dz - observer_km
+                # Explicit fma so Metal (air.fma.f32) and CUDA (fma.rn.f32)
+                # produce bit-identical single-rounded results. Plain `a*b+c`
+                # lets each vendor's compiler decide contraction independently.
+                lx = fma(M13, dz, fma(M12, dy, M11*dx))
+                ly = fma(M23, dz, fma(M22, dy, M21*dx))
+                lz = fma(M33, dz, fma(M32, dy, M31*dx)) - observer_km
 
-                alen_sq = lx*lx + ly*ly
+                alen_sq = fma(ly, ly, lx*lx)
                 if alen_sq > 0.0f0
                     slope = lz / sqrt(alen_sq)
                     if slope > max_slope
@@ -247,7 +257,7 @@ end
     qelev_m = qelev_raw * 0.5f0
     qe_km = (Float32(ldem_col) - ldem_s0) * 0.02f0
     qn_km = (ldem_l0 - Float32(ldem_row)) * 0.02f0
-    rho_q = sqrt(qe_km*qe_km + qn_km*qn_km)
+    rho_q = sqrt(fma(qn_km, qn_km, qe_km*qe_km))
     R_total_q = R_km + qelev_m * 0.001f0
     u_q = rho_q / (2.0f0 * R_km)
     u2_q = u_q * u_q

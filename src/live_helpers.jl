@@ -113,7 +113,9 @@ Float32 polar-stereographic pixel → MOON_ME cartesian.
 @inline function _stereo_to_moonme_f32(cx::Float32, cy::Float32, elev_m::Float32)
     e_km = (cx - LDEM_S0_F32) * 0.02f0
     n_km = (LDEM_L0_F32 - cy) * 0.02f0
-    rho = sqrt(muladd(n_km, n_km, e_km * e_km))
+    # fma (not muladd) so ARM and x86 Julia backends both emit hardware FMA
+    # rather than letting LLVM's heuristic decide per-target.
+    rho = sqrt(fma(n_km, n_km, e_km * e_km))
     R_total = R_KM_F32 + elev_m * 0.001f0
     u = rho / (2.0f0 * R_KM_F32)
     u2 = u * u
@@ -134,7 +136,7 @@ Query-pixel Float32 3D position + ENU rotation matrix.
 @inline function _live_query_setup_f32(cx::Float32, cy::Float32, elev_m::Float32)
     qe_km = (cx - LDEM_S0_F32) * 0.02f0
     qn_km = (LDEM_L0_F32 - cy) * 0.02f0
-    rho = sqrt(muladd(qn_km, qn_km, qe_km * qe_km))
+    rho = sqrt(fma(qn_km, qn_km, qe_km * qe_km))
     R_total = R_KM_F32 + elev_m * 0.001f0
     u = rho / (2.0f0 * R_KM_F32)
     u2 = u * u
@@ -205,21 +207,25 @@ function _compute_azel_at_pixel(ldem_col::Int, ldem_row::Int,
     sun_x = Float32(sun_pos_km[1]);  sun_y = Float32(sun_pos_km[2]);  sun_z = Float32(sun_pos_km[3])
     earth_x = Float32(earth_pos_km[1]); earth_y = Float32(earth_pos_km[2]); earth_z = Float32(earth_pos_km[3])
 
+    # Explicit fma for every a*b+c chain: both ARM64 and x86_64 Julia LLVM
+    # backends must emit the same single-rounded hardware FMA. muladd is
+    # "may or may not fuse" — its LLVM target-specific heuristic was the
+    # source of Mac↔Windows az/el drift that propagated into GPU outputs.
     sdx = sun_x - qx; sdy = sun_y - qy; sdz = sun_z - qz
-    sun_lx = muladd(M13, sdz, muladd(M12, sdy, M11*sdx))
-    sun_ly = muladd(M23, sdz, muladd(M22, sdy, M21*sdx))
-    sun_lz = muladd(M33, sdz, muladd(M32, sdy, M31*sdx)) - observer_km
+    sun_lx = fma(M13, sdz, fma(M12, sdy, M11*sdx))
+    sun_ly = fma(M23, sdz, fma(M22, sdy, M21*sdx))
+    sun_lz = fma(M33, sdz, fma(M32, sdy, M31*sdx)) - observer_km
     sun_az_rad = atan2_lut(sun_ly, sun_lx) + F32_PI
-    sun_el_rad = atan2_lut(sun_lz, sqrt(muladd(sun_ly, sun_ly, sun_lx*sun_lx)))
+    sun_el_rad = atan2_lut(sun_lz, sqrt(fma(sun_ly, sun_ly, sun_lx*sun_lx)))
     sun_az_deg = sun_az_rad * F32_RAD2DEG
     sun_el_deg = sun_el_rad * F32_RAD2DEG
 
     edx = earth_x - qx; edy = earth_y - qy; edz = earth_z - qz
-    e_lx = muladd(M13, edz, muladd(M12, edy, M11*edx))
-    e_ly = muladd(M23, edz, muladd(M22, edy, M21*edx))
-    e_lz = muladd(M33, edz, muladd(M32, edy, M31*edx)) - observer_km
+    e_lx = fma(M13, edz, fma(M12, edy, M11*edx))
+    e_ly = fma(M23, edz, fma(M22, edy, M21*edx))
+    e_lz = fma(M33, edz, fma(M32, edy, M31*edx)) - observer_km
     earth_az_rad = atan2_lut(e_ly, e_lx) + F32_PI
-    earth_el_deg = atan2_lut(e_lz, sqrt(muladd(e_ly, e_ly, e_lx*e_lx))) * F32_RAD2DEG
+    earth_el_deg = atan2_lut(e_lz, sqrt(fma(e_ly, e_ly, e_lx*e_lx))) * F32_RAD2DEG
 
     return (sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg)
 end

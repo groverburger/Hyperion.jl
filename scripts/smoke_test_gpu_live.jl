@@ -71,3 +71,13 @@ dsn_sha = bytes2hex(sha256(reinterpret(UInt8, vec(dsn_gpu))))
 @printf("dsn SHA-256: %s\n", dsn_sha)
 @printf("\nCompare these SHAs across hardware. Byte-exactness means the\n")
 @printf("same PNGs regardless of Apple Silicon / NVIDIA / AMD / CPU.\n")
+
+# ── Save PNGs for cross-platform visual comparison ───────────────────────
+outdir = joinpath(REPO, "data", "outputs", "smoke_compare", BACKEND_NAME)
+mkpath(outdir)
+JM.save_indexed_png(sun_gpu, JM.SUN_PALETTE, joinpath(outdir, "sun.png"))
+JM.save_indexed_png(dsn_gpu, JM.DSN_PALETTE, joinpath(outdir, "dsn.png"))
+# Also dump raw UInt8 matrices so we can diff without palette influence
+open(joinpath(outdir, "sun_raw.bin"), "w") do f; write(f, sun_gpu); end
+open(joinpath(outdir, "dsn_raw.bin"), "w") do f; write(f, dsn_gpu); end
+@info "Saved comparison images" dir=outdir
