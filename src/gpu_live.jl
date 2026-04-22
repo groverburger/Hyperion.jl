@@ -236,6 +236,7 @@ end
 
 @kernel function _gpu_live_pixel_kernel!(
     sun_out, dsn_out,
+    dsn_debug,                          # (H, W, 2) Float32: [de, df] for diagnostics
     @Const(max0), @Const(max1), @Const(max2), @Const(max3), @Const(max4),
     @Const(min1), @Const(min2), @Const(min3), @Const(min4),
     @Const(azel_packed),                # (H, W, 6): [sun_az, sun_el, earth_az, earth_el, sun_tan, dsn_tan]
@@ -454,6 +455,10 @@ end
     dsn_u8 = UInt8(clamp(unsafe_trunc(Int32, floor(over_hz_deg * 10.0f0)), Int32(0), Int32(250)))
     sun_out[local_row + Int32(1), local_col + Int32(1)] = sun_u8
     dsn_out[local_row + Int32(1), local_col + Int32(1)] = dsn_u8
+    # Diagnostic: expose de/df so we can SHA-compare just the DSN ray-cast
+    # outputs across platforms without the over_hz integration on top.
+    dsn_debug[local_row + Int32(1), local_col + Int32(1), Int32(1)] = de
+    dsn_debug[local_row + Int32(1), local_col + Int32(1), Int32(2)] = df
     end  # close if local_row < H
 end
 
@@ -515,9 +520,12 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     d_atan = DeviceArray(ATAN_LUT)
     d_sun_out = DeviceArray(zeros(UInt8, H, W))
     d_dsn_out = DeviceArray(zeros(UInt8, H, W))
+    # Debug buffer: raw Float32 [de, df] per pixel for cross-platform
+    # diagnosis of the DSN-only residual divergence.
+    d_dsn_dbg = DeviceArray(zeros(Float32, H, W, 2))
 
     kernel = _gpu_live_pixel_kernel!(backend, workgroup_size)
-    kernel(d_sun_out, d_dsn_out,
+    kernel(d_sun_out, d_dsn_out, d_dsn_dbg,
            d_max[1], d_max[2], d_max[3], d_max[4], d_max[5],
            d_min[2], d_min[3], d_min[4], d_min[5],   # levels 1..4 (skip 0)
            d_azel,
@@ -533,5 +541,5 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 
-    return Array(d_sun_out), Array(d_dsn_out)
+    return Array(d_sun_out), Array(d_dsn_out), Array(d_dsn_dbg)
 end

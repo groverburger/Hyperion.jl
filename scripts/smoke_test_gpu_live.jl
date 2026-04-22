@@ -51,13 +51,14 @@ H, W = 128, 128
 origin_r, origin_c = 9000, 18600
 
 # Warmup (first kernel launch compiles)
-JM.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
-    sun_t, earth_t, 0.0; max_mipmaps=max_mm, min_mipmaps=min_mm,
-    backend=BACKEND, DeviceArray=DEVICE_ARR)
+let _ = JM.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
+        sun_t, earth_t, 0.0; max_mipmaps=max_mm, min_mipmaps=min_mm,
+        backend=BACKEND, DeviceArray=DEVICE_ARR)
+end
 
 @info "GPU run"
 t0 = time()
-sun_gpu, dsn_gpu = JM.generate_live_shadow_frame_gpu(ldem.data,
+sun_gpu, dsn_gpu, dsn_dbg = JM.generate_live_shadow_frame_gpu(ldem.data,
     origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
     max_mipmaps=max_mm, min_mipmaps=min_mm,
     backend=BACKEND, DeviceArray=DEVICE_ARR)
@@ -65,10 +66,14 @@ t_gpu = time() - t0
 
 sun_sha = bytes2hex(sha256(reinterpret(UInt8, vec(sun_gpu))))
 dsn_sha = bytes2hex(sha256(reinterpret(UInt8, vec(dsn_gpu))))
+# SHA of raw de/df Float32 values — isolates the DSN ray cast output from
+# the subsequent over_hz integration + UInt8 rounding.
+dedf_sha = bytes2hex(sha256(reinterpret(UInt8, vec(dsn_dbg))))
 
 @printf("wall: %.3fs\n", t_gpu)
-@printf("sun SHA-256: %s\n", sun_sha)
-@printf("dsn SHA-256: %s\n", dsn_sha)
+@printf("sun SHA-256:  %s\n", sun_sha)
+@printf("dsn SHA-256:  %s\n", dsn_sha)
+@printf("dedf SHA-256: %s   (raw de,df Float32 from DSN ray cast)\n", dedf_sha)
 @printf("\nCompare these SHAs across hardware. Byte-exactness means the\n")
 @printf("same PNGs regardless of Apple Silicon / NVIDIA / AMD / CPU.\n")
 
@@ -79,6 +84,7 @@ JM.save_indexed_png(sun_gpu, JM.SUN_PALETTE, joinpath(outdir, "sun.png"))
 JM.save_indexed_png(dsn_gpu, JM.DSN_PALETTE, joinpath(outdir, "dsn.png"))
 open(joinpath(outdir, "sun_raw.bin"), "w") do f; write(f, sun_gpu); end
 open(joinpath(outdir, "dsn_raw.bin"), "w") do f; write(f, dsn_gpu); end
+open(joinpath(outdir, "dedf_raw.bin"), "w") do f; write(f, dsn_dbg); end
 
 # ── Also dump the CPU-side az/el precompute buffer ────────────────────────
 # This is the input to the GPU kernel. Comparing it across platforms tells
