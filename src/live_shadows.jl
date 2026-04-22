@@ -140,7 +140,7 @@ end
 
 @inline function _slope_to_deg_f(slope::Float32)
     rad = atan2_lut(slope, 1.0f0)
-    return Float32(Float64(rad) * 180.0 / π)
+    return rad * Float32(180.0 / π)  # Float32 throughout — matches GPU byte-exactly
 end
 
 # ─── Mipmap pyramid ───────────────────────────────────────────────────────
@@ -281,7 +281,8 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
                               override_sun_az_deg::Float32=Float32(NaN),
                               override_sun_el_deg::Float32=Float32(NaN),
                               override_earth_az_rad::Float32=Float32(NaN),
-                              override_earth_el_deg::Float32=Float32(NaN))
+                              override_earth_el_deg::Float32=Float32(NaN),
+                              trace::Union{Nothing, Vector{Float32}}=nothing)
     ldem = mipmaps[1]   # native resolution
     hierarchical = (min_mipmaps !== nothing)
 
@@ -473,10 +474,29 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
     end
 
     # ── DSN ────────────────────────────────────────────────────────────
+    # Rearrange to a single fma-friendly form:
+    #   over_hz = earth_el - (de + e_fr*(df-de)) = (earth_el-de) + e_fr*(de-df)
+    #          = fma(e_fr, de-df, earth_el-de)
     over_hz_deg = if earth_below
         Float32(-90.0)  # clamps to 0 in palette
     else
-        earth_el_deg - (de + e_fr * (df - de))
+        fma(e_fr, de - df, earth_el_deg - de)
+    end
+
+    if trace !== nothing
+        trace[1] = sun_az_deg; trace[2] = sun_el_deg
+        trace[3] = earth_az_rad; trace[4] = earth_el_deg
+        trace[5] = sun_useful_slope; trace[6] = dsn_useful_slope
+        trace[7] = sun_max_d; trace[8] = dsn_max_d
+        trace[9] = off_bucket_f
+        trace[10] = Float32(b0); trace[11] = Float32(b1); trace[12] = Float32(b2)
+        trace[13] = Float32(b3); trace[14] = Float32(b4); trace[15] = Float32(b5)
+        trace[16] = Float32(e_left); trace[17] = Float32(e_right); trace[18] = e_fr
+        trace[19] = d0; trace[20] = d1; trace[21] = d2
+        trace[22] = d3; trace[23] = d4; trace[24] = d5
+        trace[25] = de; trace[26] = df
+        trace[27] = sun_frac; trace[28] = over_hz_deg
+        trace[29] = Float32(sun_below); trace[30] = Float32(earth_below)
     end
 
     return sun_frac, over_hz_deg

@@ -205,7 +205,7 @@ end
     sun_out, dsn_out,
     @Const(max0), @Const(max1), @Const(max2), @Const(max3), @Const(max4),
     @Const(min1), @Const(min2), @Const(min3), @Const(min4),
-    @Const(azel_packed),                # (H, W, 4): [sun_az, sun_el, earth_az, earth_el]
+    @Const(azel_packed),                # (H, W, 6): [sun_az, sun_el, earth_az, earth_el, sun_tan, dsn_tan]
     @Const(ray_cossin_packed),          # (4320, 2): [cos, sin] — ray direction table
     @Const(atan_lut),
     atan_scale::Float32,
@@ -407,8 +407,9 @@ end
         sun_frac = px / max_photons
     end
 
-    # ── DSN over-horizon ──────────────────────────────────────────────
-    over_hz_deg = earth_below ? Float32(-90.0) : (earth_el_deg - (de + e_fr * (df - de)))
+    # ── DSN over-horizon — single fma-friendly form ──────────────────
+    over_hz_deg = earth_below ? Float32(-90.0) :
+                  fma(e_fr, de - df, earth_el_deg - de)
 
     # ── Emit UInt8 ────────────────────────────────────────────────────
     sun_u8 = UInt8(clamp(unsafe_trunc(Int32, 255.0f0 * sun_frac), Int32(0), Int32(255)))
