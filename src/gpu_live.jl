@@ -67,8 +67,7 @@ end
         threshold::Float32,
         max_d_pixels::Float32,
         ldem_s0::Float32, ldem_l0::Float32,
-        R_km::Float32, R_m::Float32,
-        four_R2::Float32)
+        R_km::Float32, R_m::Float32)
     max_slope = Float32(-Inf)
     base_step = Float32(0.70710698)
     mipmap_base = Float32(100.0)
@@ -181,7 +180,7 @@ end
         observer_km::Float32,
         atan_lut, atan_scale::Float32,
         ldem_s0::Float32, ldem_l0::Float32,
-        R_km::Float32, R_m::Float32, four_R2::Float32)::Float32
+        R_km::Float32, R_m::Float32)::Float32
     HSF = 1440.0f0
     adjB = mod(off_bucket_f - Float32(B), HSF) * 3.0f0
     ray_i = unsafe_trunc(Int32, adjB + 2.0f0)
@@ -195,7 +194,7 @@ end
         q_elev_m, qx, qy, qz,
         M11, M12, M13, M21, M22, M23, M31, M32, M33,
         rc, rs, observer_km, thr, mxd,
-        ldem_s0, ldem_l0, R_km, R_m, four_R2)
+        ldem_s0, ldem_l0, R_km, R_m)
     _gpu_slope_to_deg(s, atan_lut, atan_scale)
 end
 
@@ -213,7 +212,7 @@ end
     ldem_origin_row::Int32, ldem_origin_col::Int32,
     observer_km::Float32,
     ldem_s0::Float32, ldem_l0::Float32,
-    R_km::Float32, R_m::Float32, four_R2::Float32,
+    R_km::Float32, R_m::Float32,
     sun_half_angle_deg::Float32, max_terrain_m::Float32,
     max_photons::Float32)
 
@@ -307,42 +306,42 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
             observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m, four_R2)
+            ldem_s0, ldem_l0, R_km, R_m)
         d1 = _gpu_run_bucket(b1, sun_slope_thresh, sun_max_d,
             off_bucket_f, ray_cossin_packed,
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
             observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m, four_R2)
+            ldem_s0, ldem_l0, R_km, R_m)
         d2 = _gpu_run_bucket(b2, sun_slope_thresh, sun_max_d,
             off_bucket_f, ray_cossin_packed,
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
             observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m, four_R2)
+            ldem_s0, ldem_l0, R_km, R_m)
         d3 = _gpu_run_bucket(b3, sun_slope_thresh, sun_max_d,
             off_bucket_f, ray_cossin_packed,
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
             observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m, four_R2)
+            ldem_s0, ldem_l0, R_km, R_m)
         d4 = _gpu_run_bucket(b4, sun_slope_thresh, sun_max_d,
             off_bucket_f, ray_cossin_packed,
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
             observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m, four_R2)
+            ldem_s0, ldem_l0, R_km, R_m)
         d5 = _gpu_run_bucket(b5, sun_slope_thresh, sun_max_d,
             off_bucket_f, ray_cossin_packed,
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
             observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m, four_R2)
+            ldem_s0, ldem_l0, R_km, R_m)
     end
 
     if !earth_below
@@ -352,14 +351,14 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
             observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m, four_R2)
+            ldem_s0, ldem_l0, R_km, R_m)
         df = _gpu_run_bucket(e_right, dsn_slope_thresh, dsn_max_d,
             off_bucket_f, ray_cossin_packed,
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
             observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m, four_R2)
+            ldem_s0, ldem_l0, R_km, R_m)
     end
 
     # ── Sun fraction integration ──────────────────────────────────────
@@ -439,7 +438,8 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
                                          earth_pos_km::NTuple{3, Float64},
                                          observer_height_m::Float64;
                                          max_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
-                                         min_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}})
+                                         min_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
+                                         workgroup_size::Int=512)
     observer_km = Float32(observer_height_m / 1000.0)
     ldem_H, ldem_W = size(ldem)
 
@@ -470,7 +470,7 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     d_sun_out = Metal.MtlArray(zeros(UInt8, H, W))
     d_dsn_out = Metal.MtlArray(zeros(UInt8, H, W))
 
-    kernel = _gpu_live_pixel_kernel!(backend, 256)
+    kernel = _gpu_live_pixel_kernel!(backend, workgroup_size)
     kernel(d_sun_out, d_dsn_out,
            d_max[1], d_max[2], d_max[3], d_max[4], d_max[5],
            d_min[2], d_min[3], d_min[4], d_min[5],   # levels 1..4 (skip 0)
@@ -482,7 +482,6 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
            observer_km,
            Float32(LDEM_S0), Float32(LDEM_L0),
            Float32(R_KM_F64), Float32(R_M_F64),
-           Float32(4.0 * R_KM_F64 * R_KM_F64),
            SUN_HALF_ANGLE_DEG, MAX_TERRAIN_M_F32,
            MAX_PHOTONS;
            ndrange = H * W)
