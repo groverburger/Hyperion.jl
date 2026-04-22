@@ -568,20 +568,14 @@ end
         row_i = unsafe_trunc(Int32, cy)
         (col_i < 0 || col_i >= ldem_W || row_i < 0 || row_i >= ldem_H) && break
 
-        # Read min and max at this level
+        # Read max at this level first — most cells skip, so we avoid the
+        # min read on those. Min only read when we can't skip.
         shift = lvl
         mm_col = (col_i >> shift) + Int32(1)
         mm_row = (row_i >> shift) + Int32(1)
-        max_pyr_lvl = max_pyr[lvl + 1]
-        min_pyr_lvl = min_pyr[lvl + 1]
-        max_elev_m = Float32(max_pyr_lvl[mm_row, mm_col]) * 0.5f0
-        min_elev_m = Float32(min_pyr_lvl[mm_row, mm_col]) * 0.5f0
-
-        # Cell half-diagonal (in base pixels); 0 for level 0.
         cell_w = Float32(1 << lvl)
         half_diag = cell_w * 0.707107f0
         d_near = max(0.5f0, d - half_diag)
-        d_far  = d + half_diag
 
         # Skip mipmap skip/terminate at level 0 — at that level the "cell"
         # is a single pixel, but the base-level ray cast uses bilinear over
@@ -589,13 +583,20 @@ end
         # value isn't a valid bound on the bilinear result, so approximate
         # slope bounds would be unsound here.
         if lvl > 0
+            max_pyr_lvl = max_pyr[lvl + 1]
+            max_elev_m = Float32(max_pyr_lvl[mm_row, mm_col]) * 0.5f0
             cell_max_slope = _approx_slope_from_query(max_elev_m, d_near, q_elev_m)
-            cell_min_slope = _approx_slope_from_query(min_elev_m, d_far,  q_elev_m)
 
             if cell_max_slope < max_slope
                 d += cell_w
                 continue
             end
+
+            # Only now do we need the min pool for termination.
+            min_pyr_lvl = min_pyr[lvl + 1]
+            min_elev_m = Float32(min_pyr_lvl[mm_row, mm_col]) * 0.5f0
+            d_far = d + half_diag
+            cell_min_slope = _approx_slope_from_query(min_elev_m, d_far, q_elev_m)
 
             if cell_min_slope >= threshold
                 return threshold

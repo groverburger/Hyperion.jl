@@ -94,28 +94,32 @@ end
             shift = lvl
             mm_col = (col_i >> shift) + Int32(1)
             mm_row = (row_i >> shift) + Int32(1)
+            # Read max only — most cells skip, saves the min read on those.
             mx_v = lvl == Int32(1) ? max1[mm_row, mm_col] :
                    lvl == Int32(2) ? max2[mm_row, mm_col] :
                    lvl == Int32(3) ? max3[mm_row, mm_col] :
                                      max4[mm_row, mm_col]
-            mn_v = lvl == Int32(1) ? min1[mm_row, mm_col] :
-                   lvl == Int32(2) ? min2[mm_row, mm_col] :
-                   lvl == Int32(3) ? min3[mm_row, mm_col] :
-                                     min4[mm_row, mm_col]
             max_elev_m = Float32(mx_v) * 0.5f0
-            min_elev_m = Float32(mn_v) * 0.5f0
             cell_w = Float32(Int32(1) << lvl)
             half_diag = cell_w * 0.707107f0
             d_near = max(0.5f0, d - half_diag)
-            d_far  = d + half_diag
             cmax = _gpu_approx_slope(max_elev_m, d_near, q_elev_m, R_m)
-            cmin = _gpu_approx_slope(min_elev_m, d_far,  q_elev_m, R_m)
             if cmax < max_slope
                 d += cell_w
                 skip_to_next = true
-            elseif cmin >= threshold
-                max_slope = threshold
-                terminated = true
+            else
+                # Only now read the min — needed for termination check.
+                mn_v = lvl == Int32(1) ? min1[mm_row, mm_col] :
+                       lvl == Int32(2) ? min2[mm_row, mm_col] :
+                       lvl == Int32(3) ? min3[mm_row, mm_col] :
+                                         min4[mm_row, mm_col]
+                min_elev_m = Float32(mn_v) * 0.5f0
+                d_far = d + half_diag
+                cmin = _gpu_approx_slope(min_elev_m, d_far, q_elev_m, R_m)
+                if cmin >= threshold
+                    max_slope = threshold
+                    terminated = true
+                end
             end
         end
 
