@@ -45,7 +45,9 @@ end
 
 @printf("\n%-6s  %-12s  %-12s  %-12s  %-8s\n", "wg", "high-sun", "mid-sun", "night", "total")
 println("-" ^ 60)
-for wg in [32, 64, 128, 256, 512]
+# Keep well below Metal's maxTotalThreadsPerThreadgroup (1024) to avoid
+# register spill / watchdog-timeout crashes on the unified M-series GPU.
+for wg in [128, 256, 512]
     times = bench(wg, 3)
     total = sum(times)
     @printf("%-6d  %-12.3f  %-12.3f  %-12.3f  %-8.3f\n",
