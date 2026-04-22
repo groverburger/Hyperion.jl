@@ -6,3 +6,6 @@ Manifest.toml
 data/inputs/
 data/outputs/
 # data/reference/ IS tracked (pinned test fixtures)
+
+# Local-only script: Windows verification harness (untracked by design)
+verify_windows.ps1
