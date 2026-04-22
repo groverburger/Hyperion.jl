@@ -116,6 +116,15 @@ end
 # is a conservative upper bound for dynamic-max-d capping.
 const MAX_TERRAIN_M_F32 = Float32(10000.0)
 
+# Twilight skip threshold: if sun/earth disk top is below this angle, even
+# a pixel on the highest peak looking at the deepest visible terrain can't
+# see it — so we can safely skip the ray cast and output zero.
+# Derivation: the most-negative local horizon for a peak of height Δh above
+# the lowest surrounding terrain is  -2·sqrt(Δh / (2R))  (minimizing over
+# horizontal distance d with the d²/(2R) curvature drop term). For the Moon,
+# worst-case Δh ≈ 20 km and R = 1737.4 km gives ≈ -8.7°. -10° gives safety.
+const TWILIGHT_SKIP_DEG = Float32(-10.0)
+
 # Mipmap levels. Level 0 = native LDEM; each subsequent level halves
 # dimensions (max-pooled). 5 levels covers step-size doubling 0.707 →
 # ~11.3 pixels, enough for typical ray distances.
@@ -328,13 +337,14 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
     end
 
     # ── SKIP-BELOW-HORIZON ─────────────────────────────────────────────
-    # If the sun DISK TOP is below the ENU horizontal, the pixel is fully
-    # shadowed by geometry — no ray-cast needed.
+    # Twilight skip: if disk top is below TWILIGHT_SKIP_DEG (≈ -10°), even
+    # the highest peak looking at the deepest terrain can't see the body, so
+    # we can safely skip the ray cast. Using 0° would clip mountain peaks
+    # that genuinely see the sun at grazing angles (bright speckle across
+    # the terminator in the reference).
     sun_top_el_deg = sun_el_deg + SUN_HALF_ANGLE_DEG
-    sun_below = sun_top_el_deg <= Float32(0.0)
-    # For DSN the signal is `earth_el_deg - horizon`; if Earth is already
-    # below horizontal, output clamps to 0 regardless of terrain.
-    earth_below = earth_el_deg <= Float32(0.0)
+    sun_below = sun_top_el_deg <= TWILIGHT_SKIP_DEG
+    earth_below = earth_el_deg <= TWILIGHT_SKIP_DEG
 
     # ── Frame-rotation offset ──────────────────────────────────────────
     r_pix = rho_q

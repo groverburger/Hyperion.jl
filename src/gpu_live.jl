@@ -253,9 +253,10 @@ end
     earth_az_rad = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(3)]
     earth_el_deg = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(4)]
 
+    # Twilight skip at -10° (see live_shadows.jl TWILIGHT_SKIP_DEG comment).
     sun_top_el_deg = sun_el_deg + sun_half_angle_deg
-    sun_below = sun_top_el_deg <= 0.0f0
-    earth_below = earth_el_deg <= 0.0f0
+    sun_below = sun_top_el_deg <= -10.0f0
+    earth_below = earth_el_deg <= -10.0f0
 
     # Frame offset
     r_pix = rho_q
