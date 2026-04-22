@@ -371,8 +371,15 @@ function _live_pixel_opt(mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
     # (a) is disabled by setting threshold=Inf (early_return=false).
     # (b) is always active and uses the useful-elevation slope (which is
     #     the TRUE physical bound, independent of early_return).
-    sun_useful_slope = tan(sun_top_el_deg * Float32(π / 180.0))
-    dsn_useful_slope = tan(earth_el_deg   * Float32(π / 180.0))
+    # Deterministic tan via cos_sin_lut (IEEE sqrt and div) — byte-exact
+    # across CPU/GPU. Plain `tan()` is a transcendental whose Float32
+    # implementation differs by up to ~1 ULP between Julia and Metal.
+    θs = sun_top_el_deg * Float32(π / 180.0)
+    _cs_s, _sn_s = cos_sin_lut(θs)
+    sun_useful_slope = _sn_s / _cs_s
+    θe = earth_el_deg * Float32(π / 180.0)
+    _cs_e, _sn_e = cos_sin_lut(θe)
+    dsn_useful_slope = _sn_e / _cs_e
 
     sun_slope_thresh = early_return ? sun_useful_slope : Float32(Inf)
     dsn_slope_thresh = early_return ? dsn_useful_slope : Float32(Inf)
@@ -517,18 +524,13 @@ end
     base_step = Float32(NEAR_FIELD_RAY_STEP)
 
     @inbounds while d <= max_d_pixels
-        # Natural mipmap level for this distance: lvl such that
-        # 2^(lvl+1) * MIPMAP_BASE_THRESH > d >= 2^lvl * MIPMAP_BASE_THRESH.
-        # Fast version: find lvl from d via log2.
-        dm = d / MIPMAP_BASE_THRESH
-        lvl = if dm < 1.0f0
-            0
-        else
-            # At MIPMAP_BASE_THRESH pixels → lvl 0; each doubling → lvl+1
-            # Cap at N_MIPMAP_LEVELS - 1
-            lvl_raw = unsafe_trunc(Int, log2(dm)) + 1
-            lvl_raw > N_MIPMAP_LEVELS - 1 ? N_MIPMAP_LEVELS - 1 : lvl_raw
-        end
+        # Mipmap level via direct comparisons (no log2 — Metal's log2 differs
+        # from CPU's by ~3 ULP, enough to push trunc() across a level
+        # boundary for dm just below a power of 2).
+        lvl = d < MIPMAP_BASE_THRESH ? 0 :
+              d < 2.0f0*MIPMAP_BASE_THRESH ? 1 :
+              d < 4.0f0*MIPMAP_BASE_THRESH ? 2 :
+              d < 8.0f0*MIPMAP_BASE_THRESH ? 3 : 4
 
         cx = query_col + ray_cos * d
         cy = query_row + ray_sin * d
@@ -723,10 +725,12 @@ function _precompute_azel(ldem::Matrix{Int16},
                           sun_pos_km::NTuple{3, Float64},
                           earth_pos_km::NTuple{3, Float64},
                           observer_km::Float32)
-    sun_az_deg   = Matrix{Float32}(undef, H, W)
-    sun_el_deg   = Matrix{Float32}(undef, H, W)
-    earth_az_rad = Matrix{Float32}(undef, H, W)
-    earth_el_deg = Matrix{Float32}(undef, H, W)
+    sun_az_deg    = Matrix{Float32}(undef, H, W)
+    sun_el_deg    = Matrix{Float32}(undef, H, W)
+    earth_az_rad  = Matrix{Float32}(undef, H, W)
+    earth_el_deg  = Matrix{Float32}(undef, H, W)
+    sun_slope_tan = Matrix{Float32}(undef, H, W)  # tan(sun_el + SUN_HALF_ANGLE)
+    dsn_slope_tan = Matrix{Float32}(undef, H, W)  # tan(earth_el)
 
     @threads for c in 1:W
         @inbounds for r in 1:H
@@ -734,13 +738,21 @@ function _precompute_azel(ldem::Matrix{Int16},
             ldem_r = ldem_origin_row + (r - 1)
             (az_s, el_s, az_e, el_e) = _compute_azel_at_pixel(
                 ldem_c, ldem_r, ldem, sun_pos_km, earth_pos_km, observer_km)
-            sun_az_deg[r, c]   = az_s
-            sun_el_deg[r, c]   = el_s
-            earth_az_rad[r, c] = az_e
-            earth_el_deg[r, c] = el_e
+            sun_az_deg[r, c]    = az_s
+            sun_el_deg[r, c]    = el_s
+            earth_az_rad[r, c]  = az_e
+            earth_el_deg[r, c]  = el_e
+            # Deterministic tan via cos_sin_lut + IEEE divide → byte-exact CPU/GPU.
+            θs = (el_s + SUN_HALF_ANGLE_DEG) * Float32(π / 180.0)
+            cs_s, sn_s = cos_sin_lut(θs)
+            sun_slope_tan[r, c] = sn_s / cs_s
+            θe = el_e * Float32(π / 180.0)
+            cs_e, sn_e = cos_sin_lut(θe)
+            dsn_slope_tan[r, c] = sn_e / cs_e
         end
     end
-    return sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg
+    return (sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg,
+            sun_slope_tan, dsn_slope_tan)
 end
 
 function generate_live_shadow_frame(ldem::Matrix{Int16},
@@ -765,7 +777,7 @@ function generate_live_shadow_frame(ldem::Matrix{Int16},
     eff_use_mipmap = (mipmaps !== nothing) && use_mipmap
 
     # Per-pixel az/el (CPU and GPU use the same map → byte-exact).
-    sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg = _precompute_azel(
+    sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg, _, _ = _precompute_azel(
         ldem, ldem_origin_row, ldem_origin_col, H, W,
         sun_pos_km, earth_pos_km, observer_km)
 

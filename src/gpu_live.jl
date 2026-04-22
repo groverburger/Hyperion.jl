@@ -75,12 +75,12 @@ end
     d = 1.0f0
     terminated = false
     @inbounds while d <= max_d_pixels && !terminated
-        dm = d / mipmap_base
-        lvl = if dm < 1.0f0; Int32(0)
-        else
-            lr = unsafe_trunc(Int32, log2(dm)) + Int32(1)
-            lr > Int32(4) ? Int32(4) : lr
-        end
+        # Direct compares — log2 differs across compilers (CPU vs Metal
+        # log2 diverges ~3 ULP, crossing integer boundaries at dm≈2^n-ε).
+        lvl = d < mipmap_base         ? Int32(0) :
+              d < 2.0f0*mipmap_base   ? Int32(1) :
+              d < 4.0f0*mipmap_base   ? Int32(2) :
+              d < 8.0f0*mipmap_base   ? Int32(3) : Int32(4)
 
         cx = query_col + ray_cos * d
         cy = query_row + ray_sin * d
@@ -283,9 +283,10 @@ end
     e_right = mod(e_left + Int32(1), S)
     e_left = mod(e_left, S)
 
-    # Thresholds + max_d
-    sun_useful_slope = tan(sun_top_el_deg * Float32(π / 180.0))
-    dsn_useful_slope = tan(earth_el_deg  * Float32(π / 180.0))
+    # Thresholds + max_d — slopes precomputed on CPU via cos_sin_lut (Metal's
+    # tan() would differ by ~1 ULP). Stored in azel_packed channels 5 & 6.
+    sun_useful_slope = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(5)]
+    dsn_useful_slope = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(6)]
     sun_slope_thresh = sun_useful_slope
     dsn_slope_thresh = dsn_useful_slope
     HARD_CAP = 15000.0f0
@@ -440,17 +441,20 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     observer_km = Float32(observer_height_m / 1000.0)
     ldem_H, ldem_W = size(ldem)
 
-    # Phase 1: full per-pixel az/el on CPU (same as CPU driver, byte-exact)
-    sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg = _precompute_azel(
-        ldem, ldem_origin_row, ldem_origin_col, H, W,
-        sun_pos_km, earth_pos_km, observer_km)
+    # Phase 1: full per-pixel az/el + deterministic tan slopes on CPU.
+    # CPU and GPU use the same values → byte-exact.
+    sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg, sun_slope_tan, dsn_slope_tan =
+        _precompute_azel(ldem, ldem_origin_row, ldem_origin_col, H, W,
+                         sun_pos_km, earth_pos_km, observer_km)
 
-    # Pack az/el into single H×W×4 array to save buffer slots
-    azel = Array{Float32, 3}(undef, H, W, 4)
+    # Pack into H×W×6: [sun_az, sun_el, earth_az, earth_el, sun_tan, dsn_tan]
+    azel = Array{Float32, 3}(undef, H, W, 6)
     azel[:, :, 1] .= sun_az_deg
     azel[:, :, 2] .= sun_el_deg
     azel[:, :, 3] .= earth_az_rad
     azel[:, :, 4] .= earth_el_deg
+    azel[:, :, 5] .= sun_slope_tan
+    azel[:, :, 6] .= dsn_slope_tan
 
     # Pack ray cos/sin into one (4320, 2) array
     ray_cossin = hcat(RAY_COS_TABLE, RAY_SIN_TABLE)
