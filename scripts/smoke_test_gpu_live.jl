@@ -29,7 +29,7 @@ t0 = time()
 sun_cpu, dsn_cpu = JM.generate_live_shadow_frame(ldem.data,
     origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
     mipmaps=max_mm, min_mipmaps=min_mm, use_mipmap=true,
-    subsample_azel=true, progress=false)
+    progress=false)
 t_cpu = time() - t0
 
 @info "GPU"

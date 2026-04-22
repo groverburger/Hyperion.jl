@@ -440,8 +440,8 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     observer_km = Float32(observer_height_m / 1000.0)
     ldem_H, ldem_W = size(ldem)
 
-    # Phase 1: subsampled az/el on CPU (same as CPU driver)
-    sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg = _precompute_subsampled_azel(
+    # Phase 1: full per-pixel az/el on CPU (same as CPU driver, byte-exact)
+    sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg = _precompute_azel(
         ldem, ldem_origin_row, ldem_origin_col, H, W,
         sun_pos_km, earth_pos_km, observer_km)
 

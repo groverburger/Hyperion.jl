@@ -42,7 +42,7 @@ for dt in timestamps
     sun_cpu, dsn_cpu = JM.generate_live_shadow_frame(ldem.data,
         8960, 18432, 512, 896, sun_t, earth_t, 0.0;
         mipmaps=max_mm, min_mipmaps=min_mm, use_mipmap=true,
-        subsample_azel=true, progress=false)
+        progress=false)
     t_cpu = time() - t0
 
     # GPU

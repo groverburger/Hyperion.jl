@@ -708,56 +708,37 @@ function _compute_azel_at_pixel(ldem_col::Int, ldem_row::Int,
 end
 
 """
-Precompute sun/earth az/el at subsampled grid (every SKIP-th target pixel),
-then replicate to full (H, W) via nearest-neighbor — matches the precompute's
-`compute_azel_subsampled` exactly, same nearest-neighbor rule (`cld(r, skip)`).
+    _precompute_azel(ldem, origin_r, origin_c, H, W, sun_pos, earth_pos, observer_km)
+      -> (sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg)
 
-Returns 4 matrices of size (H, W): sun_az_deg, sun_el_deg, earth_az_rad,
-earth_el_deg.
+Per-pixel sun/earth az/el for an H×W patch. Full resolution (no subsampling):
+block-grid artifacts at the terminator that a 16×16 NN subsample produces
+would otherwise be visible when the sun is grazing the horizon. Benchmarks
+show this costs ~1–5 ms per frame vs the subsampled path, which is
+negligible compared to per-pixel ray casting.
 """
-function _precompute_subsampled_azel(ldem::Matrix{Int16},
-                                     ldem_origin_row::Int, ldem_origin_col::Int,
-                                     H::Int, W::Int,
-                                     sun_pos_km::NTuple{3, Float64},
-                                     earth_pos_km::NTuple{3, Float64},
-                                     observer_km::Float32)
-    SKIP = 16
-    sh = cld(H, SKIP)
-    sw = cld(W, SKIP)
-    sub_sun_az = Matrix{Float32}(undef, sh, sw)
-    sub_sun_el = Matrix{Float32}(undef, sh, sw)
-    sub_earth_az = Matrix{Float32}(undef, sh, sw)
-    sub_earth_el = Matrix{Float32}(undef, sh, sw)
-
-    @threads for sc in 1:sw
-        @inbounds for sr in 1:sh
-            # Source pixel (0-indexed in target) = ((sr-1)*SKIP, (sc-1)*SKIP)
-            target_r = (sr - 1) * SKIP
-            target_c = (sc - 1) * SKIP
-            ldem_r = ldem_origin_row + target_r
-            ldem_c = ldem_origin_col + target_c
-            (az_s, el_s, az_e, el_e) = _compute_azel_at_pixel(
-                ldem_c, ldem_r, ldem, sun_pos_km, earth_pos_km, observer_km)
-            sub_sun_az[sr, sc]   = az_s
-            sub_sun_el[sr, sc]   = el_s
-            sub_earth_az[sr, sc] = az_e
-            sub_earth_el[sr, sc] = el_e
-        end
-    end
-
-    # Replicate via nearest-neighbor using compute_azel_subsampled's rule:
-    #   sr_g = min(cld(r, skip), sh)  (for 1-indexed r)
+function _precompute_azel(ldem::Matrix{Int16},
+                          ldem_origin_row::Int, ldem_origin_col::Int,
+                          H::Int, W::Int,
+                          sun_pos_km::NTuple{3, Float64},
+                          earth_pos_km::NTuple{3, Float64},
+                          observer_km::Float32)
     sun_az_deg   = Matrix{Float32}(undef, H, W)
     sun_el_deg   = Matrix{Float32}(undef, H, W)
     earth_az_rad = Matrix{Float32}(undef, H, W)
     earth_el_deg = Matrix{Float32}(undef, H, W)
-    @inbounds for r in 1:H, c in 1:W
-        sr = min(cld(r, SKIP), sh)
-        sc = min(cld(c, SKIP), sw)
-        sun_az_deg[r, c]   = sub_sun_az[sr, sc]
-        sun_el_deg[r, c]   = sub_sun_el[sr, sc]
-        earth_az_rad[r, c] = sub_earth_az[sr, sc]
-        earth_el_deg[r, c] = sub_earth_el[sr, sc]
+
+    @threads for c in 1:W
+        @inbounds for r in 1:H
+            ldem_c = ldem_origin_col + (c - 1)
+            ldem_r = ldem_origin_row + (r - 1)
+            (az_s, el_s, az_e, el_e) = _compute_azel_at_pixel(
+                ldem_c, ldem_r, ldem, sun_pos_km, earth_pos_km, observer_km)
+            sun_az_deg[r, c]   = az_s
+            sun_el_deg[r, c]   = el_s
+            earth_az_rad[r, c] = az_e
+            earth_el_deg[r, c] = el_e
+        end
     end
     return sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg
 end
@@ -772,8 +753,7 @@ function generate_live_shadow_frame(ldem::Matrix{Int16},
                                   min_mipmaps::Union{Nothing, NTuple{N_MIPMAP_LEVELS, Matrix{Int16}}}=nothing,
                                   early_return::Bool=true,
                                   use_mipmap::Bool=true,
-                                  progress::Bool=false,
-                                  subsample_azel::Bool=true)
+                                  progress::Bool=false)
     observer_km = Float32(observer_height_m / 1000.0)
     ldem_H, ldem_W = size(ldem)
 
@@ -784,13 +764,10 @@ function generate_live_shadow_frame(ldem::Matrix{Int16},
     end
     eff_use_mipmap = (mipmaps !== nothing) && use_mipmap
 
-    # Precompute subsampled az/el (matches compute_azel_subsampled in reference)
-    if subsample_azel
-        sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg = _precompute_subsampled_azel(
-            ldem, ldem_origin_row, ldem_origin_col, H, W,
-            sun_pos_km, earth_pos_km, observer_km)
-        progress && @info "  precomputed subsampled az/el (16× subsample, NN replication)"
-    end
+    # Per-pixel az/el (CPU and GPU use the same map → byte-exact).
+    sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg = _precompute_azel(
+        ldem, ldem_origin_row, ldem_origin_col, H, W,
+        sun_pos_km, earth_pos_km, observer_km)
 
     sun_data = zeros(UInt8, H, W)
     dsn_data = zeros(UInt8, H, W)
@@ -807,21 +784,14 @@ function generate_live_shadow_frame(ldem::Matrix{Int16},
             for c in 0:(W - 1)
                 ldc = ldem_origin_col + c
                 ldr = ldem_origin_row + r
-                if subsample_azel
-                    sun_frac, over_hz = _live_pixel_opt(mm, ldem_H, ldem_W,
-                        ldc, ldr, sun_pos_km, earth_pos_km, observer_km,
-                        early_return, eff_use_mipmap;
-                        min_mipmaps=min_mipmaps,
-                        override_sun_az_deg=sun_az_deg[r + 1, c + 1],
-                        override_sun_el_deg=sun_el_deg[r + 1, c + 1],
-                        override_earth_az_rad=earth_az_rad[r + 1, c + 1],
-                        override_earth_el_deg=earth_el_deg[r + 1, c + 1])
-                else
-                    sun_frac, over_hz = _live_pixel_opt(mm, ldem_H, ldem_W,
-                        ldc, ldr, sun_pos_km, earth_pos_km, observer_km,
-                        early_return, eff_use_mipmap;
-                        min_mipmaps=min_mipmaps)
-                end
+                sun_frac, over_hz = _live_pixel_opt(mm, ldem_H, ldem_W,
+                    ldc, ldr, sun_pos_km, earth_pos_km, observer_km,
+                    early_return, eff_use_mipmap;
+                    min_mipmaps=min_mipmaps,
+                    override_sun_az_deg=sun_az_deg[r + 1, c + 1],
+                    override_sun_el_deg=sun_el_deg[r + 1, c + 1],
+                    override_earth_az_rad=earth_az_rad[r + 1, c + 1],
+                    override_earth_el_deg=earth_el_deg[r + 1, c + 1])
                 sun_u8 = UInt8(clamp(unsafe_trunc(Int, Float32(255.0) * sun_frac), 0, 255))
                 dsn_u8 = UInt8(clamp(floor(Int, over_hz * 10.0f0), 0, 250))
                 sun_data[r + 1, c + 1] = sun_u8
