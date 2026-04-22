@@ -1,29 +1,35 @@
 #!/usr/bin/env julia
-# Fast smoke test: single timestamp, small patch. Prints wall time and a
-# SHA-256 of the output so you can compare across hardware.
+# Fast GPU smoke test: single timestamp, small 128×128 patch.
+# Prints wall time + SHA-256 of the output so you can compare across hardware.
 #
-# Pick your backend at the top. Same PNG/SHA is expected on Metal (Apple),
-# CUDA (NVIDIA), ROCm (AMD), and CPU.
+# Backend selection via the JM_BACKEND env var (default: metal).
+#   JM_BACKEND=metal   Apple Silicon (requires `Pkg.add("Metal")` in global env)
+#   JM_BACKEND=cuda    NVIDIA GPU   (requires `Pkg.add("CUDA")`)
+#   JM_BACKEND=amdgpu  AMD GPU      (requires `Pkg.add("AMDGPU")`)
+#   JM_BACKEND=cpu     CPU fallback (requires `Pkg.add("KernelAbstractions")`)
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Dates, Printf, SHA
 import JuliaMapbuilder as JM
 
-# ─── Pick backend ──────────────────────────────────────────────────────────
-# Uncomment the block that matches your hardware.
+const BACKEND_NAME = lowercase(get(ENV, "JM_BACKEND", "metal"))
 
-using Metal
-const BACKEND     = Metal.MetalBackend()
-const DEVICE_ARR  = Metal.MtlArray
+BACKEND, DEVICE_ARR = if BACKEND_NAME == "metal"
+    @eval using Metal
+    (Metal.MetalBackend(), Metal.MtlArray)
+elseif BACKEND_NAME == "cuda"
+    @eval using CUDA
+    (CUDA.CUDABackend(), CUDA.CuArray)
+elseif BACKEND_NAME == "amdgpu"
+    @eval using AMDGPU
+    (AMDGPU.ROCBackend(), AMDGPU.ROCArray)
+elseif BACKEND_NAME == "cpu"
+    @eval using KernelAbstractions
+    (KernelAbstractions.CPU(), Array)
+else
+    error("Unknown JM_BACKEND='$BACKEND_NAME' — use metal|cuda|amdgpu|cpu")
+end
 
-# using CUDA
-# const BACKEND     = CUDA.CUDABackend()
-# const DEVICE_ARR  = CUDA.CuArray
-
-# using KernelAbstractions
-# const BACKEND     = CPU()
-# const DEVICE_ARR  = Array
-
-# ───────────────────────────────────────────────────────────────────────────
+@info "Backend" name=BACKEND_NAME backend=BACKEND
 
 const REPO = dirname(@__DIR__)
 const DATA = joinpath(REPO, "data", "inputs")
