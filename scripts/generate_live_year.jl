@@ -7,6 +7,14 @@ using Dates, Printf, Statistics
 using Images, FileIO
 import JuliaMapbuilder as JM
 
+using Metal
+const BACKEND    = Metal.MetalBackend()
+const DEVICE_ARR = Metal.MtlArray
+
+# using CUDA
+# const BACKEND    = CUDA.CUDABackend()
+# const DEVICE_ARR = CUDA.CuArray
+
 const REPO = dirname(@__DIR__)
 const DATA = joinpath(REPO, "data", "inputs")
 const KERNELS = joinpath(REPO, "kernels")
@@ -70,7 +78,7 @@ let et = JM.datetime_to_et(timestamps[1])
     s_t = Tuple(JM.get_body_position(JM.NAIF_SUN,   et))
     e_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
     JM.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
-        s_t, e_t, 0.0; max_mipmaps=max_mm, min_mipmaps=min_mm)
+        s_t, e_t, 0.0; max_mipmaps=max_mm, min_mipmaps=min_mm, backend=BACKEND, DeviceArray=DEVICE_ARR)
 end
 @info "Starting full year"
 
@@ -84,7 +92,7 @@ for (i, dt) in enumerate(timestamps)
     t_gpu = @elapsed begin
         sun_gpu, dsn_gpu = JM.generate_live_shadow_frame_gpu(ldem.data,
             origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
-            max_mipmaps=max_mm, min_mipmaps=min_mm)
+            max_mipmaps=max_mm, min_mipmaps=min_mm, backend=BACKEND, DeviceArray=DEVICE_ARR)
     end
     push!(gpu_times, t_gpu)
 

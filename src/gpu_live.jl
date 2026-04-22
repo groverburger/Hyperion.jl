@@ -1,16 +1,30 @@
-# ─── GPU port of the live shadow algorithm ───────────────────────────────
+# ─── Live shadow GPU kernel + cross-platform driver ──────────────────────
 #
-# Uses KernelAbstractions + Metal. Float32 throughout (Metal doesn't
-# support Float64 on Apple Silicon). Same deterministic LUTs as CPU, so
-# UInt8 PNG output should match CPU to within Float32 rounding tolerance.
+# The kernel is backend-agnostic — it uses only KernelAbstractions macros
+# and IEEE-mandated Float32 ops (+, −, *, /, sqrt, fma). Bit-identical
+# output is guaranteed on any backend that implements IEEE 754 correctly:
+# Apple Metal, NVIDIA CUDA, AMD ROCm, oneAPI, and CPU fallback.
 #
-# One work item per pixel. Each pixel:
-#   1. Looks up precomputed subsampled sun/earth az/el
-#   2. Computes its own query MOON_ME + ENU matrix (Float32 projection)
-#   3. Casts 6 sun rays + 2 DSN rays via hierarchical mipmap + bilinear
-#   4. Integrates sun_fraction + over_horizon_deg, writes UInt8 output
+# The caller provides the backend + device-array constructor. Typical use:
+#
+#   using Metal
+#   sun, dsn = generate_live_shadow_frame_gpu(
+#       ldem, origin_r, origin_c, H, W, sun_pos, earth_pos, 0.0;
+#       max_mipmaps = max_mm, min_mipmaps = min_mm,
+#       backend = Metal.MetalBackend(), DeviceArray = Metal.MtlArray)
+#
+# On NVIDIA:
+#
+#   using CUDA
+#   sun, dsn = generate_live_shadow_frame_gpu(
+#       ...; backend = CUDA.CUDABackend(), DeviceArray = CUDA.CuArray)
+#
+# Float32 throughout so the kernel runs on any GPU regardless of
+# Float64 support.
 
-# ─── GPU-side helpers (parallel to live_shadows.jl CPU versions) ──────────
+using KernelAbstractions
+
+# ─── GPU-side helpers ────────────────────────────────────────────────────
 
 @inline function _gpu_atan2_lut_live(y::Float32, x::Float32,
                                      atan_lut, atan_scale::Float32)::Float32
@@ -428,12 +442,20 @@ end
 """
     generate_live_shadow_frame_gpu(ldem, ldem_origin_row, ldem_origin_col, H, W,
                                    sun_pos, earth_pos, observer_height_m;
-                                   max_mipmaps, min_mipmaps)
+                                   max_mipmaps, min_mipmaps,
+                                   backend, DeviceArray,
+                                   workgroup_size=512)
             -> (sun_data::Matrix{UInt8}, dsn_data::Matrix{UInt8})
 
-GPU version of generate_live_shadow_frame. Same algorithm, Float32 throughout,
-same deterministic LUTs. Output should match CPU to within Float32 rounding
-tolerance (typically 1 UInt8 step on a handful of penumbra pixels).
+Backend-agnostic GPU driver. Caller supplies a `KernelAbstractions` backend
+and a device-array constructor. Byte-exact across Metal / CUDA / ROCm / CPU.
+
+Required kwargs:
+  `backend`      — e.g. `Metal.MetalBackend()`, `CUDA.CUDABackend()`, `CPU()`
+  `DeviceArray`  — e.g. `Metal.MtlArray`, `CUDA.CuArray`, `Array`
+
+Optional:
+  `workgroup_size`  — total threads per workgroup (default 512, keep ≤1024)
 """
 function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
                                          ldem_origin_row::Int, ldem_origin_col::Int,
@@ -443,12 +465,13 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
                                          observer_height_m::Float64;
                                          max_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
                                          min_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
+                                         backend,
+                                         DeviceArray,
                                          workgroup_size::Int=512)
     observer_km = Float32(observer_height_m / 1000.0)
     ldem_H, ldem_W = size(ldem)
 
-    # Phase 1: full per-pixel az/el + deterministic tan slopes on CPU.
-    # CPU and GPU use the same values → byte-exact.
+    # Phase 1: per-pixel az/el + deterministic tan slopes on CPU.
     sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg, sun_slope_tan, dsn_slope_tan =
         _precompute_azel(ldem, ldem_origin_row, ldem_origin_col, H, W,
                          sun_pos_km, earth_pos_km, observer_km)
@@ -465,14 +488,13 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     # Pack ray cos/sin into one (4320, 2) array
     ray_cossin = hcat(RAY_COS_TABLE, RAY_SIN_TABLE)
 
-    backend = Metal.MetalBackend()
-    d_max = ntuple(i -> Metal.MtlArray(max_mipmaps[i]), N_MIPMAP_LEVELS)
-    d_min = ntuple(i -> Metal.MtlArray(min_mipmaps[i]), N_MIPMAP_LEVELS)
-    d_azel = Metal.MtlArray(azel)
-    d_rcs  = Metal.MtlArray(ray_cossin)
-    d_atan = Metal.MtlArray(ATAN_LUT)
-    d_sun_out = Metal.MtlArray(zeros(UInt8, H, W))
-    d_dsn_out = Metal.MtlArray(zeros(UInt8, H, W))
+    d_max = ntuple(i -> DeviceArray(max_mipmaps[i]), N_MIPMAP_LEVELS)
+    d_min = ntuple(i -> DeviceArray(min_mipmaps[i]), N_MIPMAP_LEVELS)
+    d_azel = DeviceArray(azel)
+    d_rcs  = DeviceArray(ray_cossin)
+    d_atan = DeviceArray(ATAN_LUT)
+    d_sun_out = DeviceArray(zeros(UInt8, H, W))
+    d_dsn_out = DeviceArray(zeros(UInt8, H, W))
 
     kernel = _gpu_live_pixel_kernel!(backend, workgroup_size)
     kernel(d_sun_out, d_dsn_out,

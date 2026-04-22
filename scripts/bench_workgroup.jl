@@ -1,8 +1,17 @@
 #!/usr/bin/env julia
-# A/B benchmark for Metal workgroup size on the live shadow kernel.
+# A/B benchmark for GPU workgroup size on the live shadow kernel.
+# Pick your backend below.
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Dates, Printf, Statistics
 import JuliaMapbuilder as JM
+
+using Metal
+const BACKEND    = Metal.MetalBackend()
+const DEVICE_ARR = Metal.MtlArray
+
+# using CUDA
+# const BACKEND    = CUDA.CUDABackend()
+# const DEVICE_ARR = CUDA.CuArray
 
 ldem = JM.load_ldem(joinpath(dirname(@__DIR__), "data", "inputs", "ldem_80s_20m.img"))
 JM.init_spice(joinpath(dirname(@__DIR__), "kernels"))
@@ -35,7 +44,8 @@ function bench(wg_size::Int, n_reps::Int=3)
         for _ in 1:n_reps
             t = @elapsed JM.generate_live_shadow_frame_gpu(ldem.data,
                 origin_r, origin_c, H, W, s_t, e_t, 0.0;
-                max_mipmaps=max_mm, min_mipmaps=min_mm, workgroup_size=wg_size)
+                max_mipmaps=max_mm, min_mipmaps=min_mm, workgroup_size=wg_size,
+            backend=BACKEND, DeviceArray=DEVICE_ARR)
             push!(times, t)
         end
         push!(total_t, median(times))

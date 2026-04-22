@@ -2,6 +2,8 @@
 
 import ArchGDAL
 import Mmap
+import FileIO
+using Images: RGB, N0f8
 
 """
 Affine transform from a GeoTIFF — matches rasterio's (a, b, c, d, e, f).
@@ -127,4 +129,61 @@ function load_ldem(path::AbstractString;
     elevation = permutedims(raw, (2, 1))  # → (H, W) row-major view
 
     return LDEM(elevation, H, W)
+end
+
+# ─── PNG output palettes ──────────────────────────────────────────────────
+
+"""
+    SUN_PALETTE — grayscale 0..255. UInt8 index → (v, v, v).
+    DSN_PALETTE — signal-strength colormap per DSN spec (0..70+ deg).
+"""
+function _make_sun_palette()
+    pal = Matrix{UInt8}(undef, 256, 3)
+    for i in 0:255
+        pal[i+1, :] .= UInt8(i)
+    end
+    return pal
+end
+
+function _make_dsn_palette()
+    pal = zeros(UInt8, 256, 3)
+    spec = [
+        (0, 0, (0, 0, 0)),
+        (1, 10, (139, 0, 0)),
+        (11, 20, (205, 92, 92)),
+        (21, 30, (max(0, 255-10), max(0, 215-10), max(0, 0-10))),
+        (31, 40, (255, 215, 0)),
+        (41, 50, (max(0, 255-10), max(0, 255-10), max(0, 0-10))),
+        (51, 60, (max(0, 238-10), max(0, 232-10), max(0, 170-10))),
+        (61, 70, (238, 232, 170)),
+        (71, 255, (255, 255, 255)),
+    ]
+    for (lo, hi, (r, g, b)) in spec
+        for i in lo:hi
+            pal[i+1, :] .= UInt8.((r, g, b))
+        end
+    end
+    return pal
+end
+
+const SUN_PALETTE = _make_sun_palette()
+const DSN_PALETTE = _make_dsn_palette()
+
+"""
+    save_indexed_png(data::Matrix{UInt8}, palette, path)
+
+Write UInt8 index matrix as a palette-mapped RGB PNG.
+"""
+function save_indexed_png(data::Matrix{UInt8}, palette::Matrix{UInt8}, path::AbstractString)
+    H, W = size(data)
+    img = Array{RGB{N0f8}}(undef, H, W)
+    @inbounds for r in 1:H, c in 1:W
+        idx = data[r, c] + 1
+        img[r, c] = RGB{N0f8}(
+            reinterpret(N0f8, palette[idx, 1]),
+            reinterpret(N0f8, palette[idx, 2]),
+            reinterpret(N0f8, palette[idx, 3]),
+        )
+    end
+    FileIO.save(path, img)
 end
