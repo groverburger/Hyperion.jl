@@ -58,7 +58,7 @@ end
 
 @info "GPU run"
 t0 = time()
-sun_gpu, dsn_gpu, de_gpu, d0_gpu = JM.generate_live_shadow_frame_gpu(ldem.data,
+sun_gpu, dsn_gpu, de_gpu, sun_rays_gpu = JM.generate_live_shadow_frame_gpu(ldem.data,
     origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
     max_mipmaps=max_mm, min_mipmaps=min_mm,
     backend=BACKEND, DeviceArray=DEVICE_ARR)
@@ -67,7 +67,7 @@ t_gpu = time() - t0
 sun_sha = bytes2hex(sha256(reinterpret(UInt8, vec(sun_gpu))))
 dsn_sha = bytes2hex(sha256(reinterpret(UInt8, vec(dsn_gpu))))
 de_sha  = bytes2hex(sha256(reinterpret(UInt8, vec(de_gpu))))
-d0_sha  = bytes2hex(sha256(reinterpret(UInt8, vec(d0_gpu))))
+d0_sha  = bytes2hex(sha256(reinterpret(UInt8, vec(view(sun_rays_gpu, :, :, 1)))))
 
 @printf("wall: %.3fs\n", t_gpu)
 @printf("sun SHA-256:  %s\n", sun_sha)
@@ -85,7 +85,7 @@ JM.save_indexed_png(dsn_gpu, JM.DSN_PALETTE, joinpath(outdir, "dsn.png"))
 open(joinpath(outdir, "sun_raw.bin"), "w") do f; write(f, sun_gpu); end
 open(joinpath(outdir, "dsn_raw.bin"), "w") do f; write(f, dsn_gpu); end
 open(joinpath(outdir, "de_raw.bin"),  "w") do f; write(f, de_gpu); end
-open(joinpath(outdir, "d0_raw.bin"),  "w") do f; write(f, d0_gpu); end
+open(joinpath(outdir, "sun_rays_raw.bin"), "w") do f; write(f, sun_rays_gpu); end
 
 # ── Also dump the CPU-side precompute buffer ─────────────────────────────
 # Channels 1..8 = [sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el,

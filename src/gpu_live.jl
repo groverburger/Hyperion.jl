@@ -206,8 +206,8 @@ end
 
 @kernel function _gpu_live_pixel_kernel!(
     sun_out, dsn_out,
-    de_debug,                           # (H, W) Float32 — de (horizon deg) pre-floor
-    d0_debug,                           # (H, W) Float32 — sun ray 1 horizon deg (pre-integration)
+    de_debug,                           # (H, W) Float32 — DSN horizon deg (pre-floor)
+    sun_rays_debug,                     # (H, W, 8) Float32 — d_0..d_7 pre-integration
     @Const(max0), @Const(max1), @Const(max2), @Const(max3), @Const(max4),
     @Const(min1), @Const(min2), @Const(min3), @Const(min4),
     @Const(azel_packed),                # (H, W, 8) — see reads below
@@ -455,10 +455,17 @@ end
     # diff isolate whether remaining DSN drift is in the ray cast output or
     # only in the floor rounding.
     de_debug[local_row + Int32(1), local_col + Int32(1)] = de
-    # Diagnostic: d_0 (sun ray 1 horizon degrees, pre-integration). Tests
-    # whether sun's bit-exactness is "real" or accidental (integration
-    # absorbing per-ray drift).
-    d0_debug[local_row + Int32(1), local_col + Int32(1)] = d_0
+    # Diagnostic: all 8 sun-ray horizons (pre-integration). Lets us diff
+    # individual sun rays across vendors, to locate exactly which pixels
+    # and which rays drift before the sun-disk integration absorbs it.
+    @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(1)] = d_0
+    @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(2)] = d_1
+    @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(3)] = d_2
+    @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(4)] = d_3
+    @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(5)] = d_4
+    @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(6)] = d_5
+    @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(7)] = d_6
+    @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(8)] = d_7
     end  # close if local_row < H
 end
 
@@ -517,13 +524,13 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     d_min = ntuple(i -> DeviceArray(min_mipmaps[i]), N_MIPMAP_LEVELS)
     d_azel = DeviceArray(azel)
     d_atan = DeviceArray(ATAN_LUT)
-    d_sun_out = DeviceArray(zeros(UInt8, H, W))
-    d_dsn_out = DeviceArray(zeros(UInt8, H, W))
-    d_de_dbg  = DeviceArray(zeros(Float32, H, W))
-    d_d0_dbg  = DeviceArray(zeros(Float32, H, W))
+    d_sun_out     = DeviceArray(zeros(UInt8, H, W))
+    d_dsn_out     = DeviceArray(zeros(UInt8, H, W))
+    d_de_dbg      = DeviceArray(zeros(Float32, H, W))
+    d_sun_rays_dbg = DeviceArray(zeros(Float32, H, W, 8))
 
     kernel = _gpu_live_pixel_kernel!(backend, workgroup_size)
-    kernel(d_sun_out, d_dsn_out, d_de_dbg, d_d0_dbg,
+    kernel(d_sun_out, d_dsn_out, d_de_dbg, d_sun_rays_dbg,
            d_max[1], d_max[2], d_max[3], d_max[4], d_max[5],
            d_min[2], d_min[3], d_min[4], d_min[5],   # levels 1..4 (skip 0)
            d_azel, d_atan,
@@ -538,5 +545,5 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 
-    return Array(d_sun_out), Array(d_dsn_out), Array(d_de_dbg), Array(d_d0_dbg)
+    return Array(d_sun_out), Array(d_dsn_out), Array(d_de_dbg), Array(d_sun_rays_dbg)
 end
