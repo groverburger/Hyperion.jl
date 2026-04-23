@@ -90,7 +90,7 @@ for (i, dt) in enumerate(timestamps)
 
     # GPU timed
     t_gpu = @elapsed begin
-        sun_gpu, dsn_gpu = JM.generate_live_shadow_frame_gpu(ldem.data,
+        sun_gpu, dsn_gpu, _ = JM.generate_live_shadow_frame_gpu(ldem.data,
             origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
             max_mipmaps=max_mm, min_mipmaps=min_mm, backend=BACKEND, DeviceArray=DEVICE_ARR)
     end

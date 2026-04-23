@@ -14,20 +14,14 @@ function load_u8(path)
 end
 
 # ── CPU-side az/el buffer diff (isolates CPU-precompute drift) ───────────
-# Layout: H*W Float32 per channel × 6 channels
-#   [sun_az, sun_el, earth_az, earth_el, sun_slope_tan, dsn_slope_tan]
+# Layout: H*W Float32 per channel × 8 channels (post bucket-free refactor)
+#   [sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el,
+#    sun_slope_tan, dsn_slope_tan]
+const N_AZEL_CH = 8
 function load_azel(path)
-    nbytes = H * W * 6 * sizeof(Float32)
     data = reinterpret(Float32, read(path))
-    @assert length(data) == H * W * 6
-    channels = (
-        reshape(data[1*H*W + 1 - H*W : 1*H*W], (H, W)),
-        reshape(data[2*H*W + 1 - H*W : 2*H*W], (H, W)),
-        reshape(data[3*H*W + 1 - H*W : 3*H*W], (H, W)),
-        reshape(data[4*H*W + 1 - H*W : 4*H*W], (H, W)),
-        reshape(data[5*H*W + 1 - H*W : 5*H*W], (H, W)),
-        reshape(data[6*H*W + 1 - H*W : 6*H*W], (H, W)),
-    )
+    @assert length(data) == H * W * N_AZEL_CH
+    channels = ntuple(i -> reshape(data[(i-1)*H*W + 1 : i*H*W], (H, W)), N_AZEL_CH)
     return channels
 end
 
@@ -37,7 +31,8 @@ if isfile(azel_m_path) && isfile(azel_c_path)
     println("\n═══ CPU-side azel buffer diff (isolates CPU precompute) ═══")
     metal_ch = load_azel(azel_m_path)
     cuda_ch  = load_azel(azel_c_path)
-    for (i, name) in enumerate(["sun_az", "sun_el", "earth_az", "earth_el",
+    for (i, name) in enumerate(["sun_rc", "sun_rs", "sun_el",
+                                 "earth_rc", "earth_rs", "earth_el",
                                  "sun_slope_tan", "dsn_slope_tan"])
         m, c = metal_ch[i], cuda_ch[i]
         # Float32 bit-compare

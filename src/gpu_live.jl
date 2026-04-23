@@ -206,6 +206,7 @@ end
 
 @kernel function _gpu_live_pixel_kernel!(
     sun_out, dsn_out,
+    de_debug,                           # (H, W) Float32 — de (horizon deg) pre-floor
     @Const(max0), @Const(max1), @Const(max2), @Const(max3), @Const(max4),
     @Const(min1), @Const(min2), @Const(min3), @Const(min4),
     @Const(azel_packed),                # (H, W, 8) — see reads below
@@ -437,6 +438,11 @@ end
     dsn_u8 = UInt8(clamp(unsafe_trunc(Int32, floor(over_hz_deg * 10.0f0)), Int32(0), Int32(250)))
     sun_out[local_row + Int32(1), local_col + Int32(1)] = sun_u8
     dsn_out[local_row + Int32(1), local_col + Int32(1)] = dsn_u8
+    # Diagnostic: raw `de` (horizon elev in degrees) from the DSN ray cast,
+    # before the over_hz subtraction and floor-to-UInt8. Lets cross-platform
+    # diff isolate whether remaining DSN drift is in the ray cast output or
+    # only in the floor rounding.
+    de_debug[local_row + Int32(1), local_col + Int32(1)] = de
     end  # close if local_row < H
 end
 
@@ -497,9 +503,10 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     d_atan = DeviceArray(ATAN_LUT)
     d_sun_out = DeviceArray(zeros(UInt8, H, W))
     d_dsn_out = DeviceArray(zeros(UInt8, H, W))
+    d_de_dbg  = DeviceArray(zeros(Float32, H, W))
 
     kernel = _gpu_live_pixel_kernel!(backend, workgroup_size)
-    kernel(d_sun_out, d_dsn_out,
+    kernel(d_sun_out, d_dsn_out, d_de_dbg,
            d_max[1], d_max[2], d_max[3], d_max[4], d_max[5],
            d_min[2], d_min[3], d_min[4], d_min[5],   # levels 1..4 (skip 0)
            d_azel, d_atan,
@@ -514,5 +521,5 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 
-    return Array(d_sun_out), Array(d_dsn_out)
+    return Array(d_sun_out), Array(d_dsn_out), Array(d_de_dbg)
 end
