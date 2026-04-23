@@ -50,6 +50,16 @@ test_dts = [
 
 hex(buf) = bytes2hex(sha256(reinterpret(UInt8, vec(buf))))
 
+# ─── Structured SHAs.txt for no-copy-paste cross-platform comparison ─────
+sha_path = joinpath(OUT, "SHAs.txt")
+sha_io = open(sha_path, "w")
+println(sha_io, "# big_smoke_test — cross-platform bit-exactness audit")
+println(sha_io, "# backend=$(BACKEND_NAME)")
+println(sha_io, "# julia=$(VERSION)")
+println(sha_io, "# runtime: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
+println(sha_io, "# region: origin=($(origin_r),$(origin_c)) size=$(H)x$(W)")
+println(sha_io, "")
+
 # Warmup so the first frame doesn't include kernel compile time in its SHA
 # (SHAs aren't time-dependent, just for timing cleanliness)
 let et = JM.datetime_to_et(test_dts[1])
@@ -83,16 +93,30 @@ for dt in test_dts
                       vec(earth_rc), vec(earth_rs), vec(earth_el),
                       vec(sun_tan), vec(dsn_tan))
 
+    sun_h = hex(sun); dsn_h = hex(dsn); de_h = hex(de)
+    azel_h = bytes2hex(sha256(reinterpret(UInt8, azel_bytes)))
+    d_hs  = [hex(view(sun_rays, :, :, k)) for k in 1:8]
+
     @printf("  wall: %.3fs\n", t_gpu)
-    @printf("  sun   SHA-256: %s\n", hex(sun))
-    @printf("  dsn   SHA-256: %s\n", hex(dsn))
-    @printf("  de    SHA-256: %s\n", hex(de))
-    @printf("  azel  SHA-256: %s\n", bytes2hex(sha256(reinterpret(UInt8, azel_bytes))))
-    # Per-ray SHAs: tells us which sun rays drift
+    @printf("  sun   SHA-256: %s\n", sun_h)
+    @printf("  dsn   SHA-256: %s\n", dsn_h)
+    @printf("  de    SHA-256: %s\n", de_h)
+    @printf("  azel  SHA-256: %s\n", azel_h)
     for k in 1:8
-        slab = view(sun_rays, :, :, k)
-        @printf("  d_%d   SHA-256: %s\n", k-1, hex(slab))
+        @printf("  d_%d   SHA-256: %s\n", k-1, d_hs[k])
     end
+
+    # Also write structured entry to SHAs.txt
+    println(sha_io, "[$tag]")
+    println(sha_io, "sun  = $sun_h")
+    println(sha_io, "dsn  = $dsn_h")
+    println(sha_io, "de   = $de_h")
+    println(sha_io, "azel = $azel_h")
+    for k in 1:8
+        println(sha_io, "d_$(k-1)  = $(d_hs[k])")
+    end
+    println(sha_io, "")
+    flush(sha_io)
 
     # Dump raw buffers for offline diff
     outdir = joinpath(OUT, tag)
@@ -109,4 +133,5 @@ for dt in test_dts
     println()
 end
 
-@info "All SHAs above should be identical across Metal and CUDA. Raw buffers" dir=OUT
+close(sha_io)
+@info "Done — all SHAs above should be identical across Metal and CUDA" dir=OUT sha_file=sha_path
