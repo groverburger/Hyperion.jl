@@ -48,8 +48,8 @@ const MIPMAP_BASE_THRESH = Float32(100.0)
 # (same photon-density as the old 6-ray / bucket-aligned scheme, but now
 # aligned to the sun disk instead of to an external bucket grid).
 
-const N_SUN_RAYS    = 4
-const SUN_TICK_STEP = Float32(3.0) / Float32(16.0)  # 0.1875 anchor-widths/tick
+const N_SUN_RAYS    = 8
+const SUN_TICK_STEP = Float32(7.0) / Float32(16.0)  # 0.4375 anchor-widths/tick
 const SUN_TICK_FRAC_INITIAL = SUN_TICK_STEP * Float32(0.5)  # center first tick
 
 # 16 chord-height weights across the sun disk (unchanged from the old
@@ -68,10 +68,9 @@ const MAX_PHOTONS  = Float32(2.0 * sum(HALF_CIRCLE))
 # so both ARM64 and x86_64 Julia, and both Metal and CUDA kernels, see
 # identical Float32 literals.
 function _sun_ray_offset_cossin()
-    offsets_deg = (-SUN_HALF_ANGLE_DEG,
-                   -SUN_HALF_ANGLE_DEG / Float32(3.0),
-                    SUN_HALF_ANGLE_DEG / Float32(3.0),
-                    SUN_HALF_ANGLE_DEG)
+    s = SUN_HALF_ANGLE_DEG
+    offsets_deg = (-s, -s * Float32(5/7), -s * Float32(3/7), -s * Float32(1/7),
+                    s * Float32(1/7),  s * Float32(3/7),  s * Float32(5/7),  s)
     coss = ntuple(k -> cos_sin_lut(offsets_deg[k] * Float32(π / 180.0))[1], N_SUN_RAYS)
     sins = ntuple(k -> cos_sin_lut(offsets_deg[k] * Float32(π / 180.0))[2], N_SUN_RAYS)
     return coss, sins

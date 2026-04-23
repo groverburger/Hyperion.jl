@@ -286,10 +286,11 @@ end
     # DSN: 1 ray at the exact earth direction (no interpolation).
     d_0 = Float32(-90.0); d_1 = Float32(-90.0)
     d_2 = Float32(-90.0); d_3 = Float32(-90.0)
+    d_4 = Float32(-90.0); d_5 = Float32(-90.0)
+    d_6 = Float32(-90.0); d_7 = Float32(-90.0)
     de = Float32(-90.0)
 
     if !sun_below
-        # Ray 1: offset = -SUN_HALF_ANGLE_DEG
         c_k = SUN_RAY_OFFSET_COS[1]; s_k = SUN_RAY_OFFSET_SIN[1]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
@@ -324,6 +325,46 @@ end
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
         d_3 = _gpu_slope_to_deg(_gpu_cast_ray(
+            max0, max1, max2, max3, max4, min1, min2, min3, min4,
+            ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
+            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            rc, rs, observer_km, sun_slope_thresh, sun_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+
+        c_k = SUN_RAY_OFFSET_COS[5]; s_k = SUN_RAY_OFFSET_SIN[5]
+        rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
+        rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
+        d_4 = _gpu_slope_to_deg(_gpu_cast_ray(
+            max0, max1, max2, max3, max4, min1, min2, min3, min4,
+            ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
+            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            rc, rs, observer_km, sun_slope_thresh, sun_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+
+        c_k = SUN_RAY_OFFSET_COS[6]; s_k = SUN_RAY_OFFSET_SIN[6]
+        rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
+        rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
+        d_5 = _gpu_slope_to_deg(_gpu_cast_ray(
+            max0, max1, max2, max3, max4, min1, min2, min3, min4,
+            ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
+            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            rc, rs, observer_km, sun_slope_thresh, sun_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+
+        c_k = SUN_RAY_OFFSET_COS[7]; s_k = SUN_RAY_OFFSET_SIN[7]
+        rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
+        rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
+        d_6 = _gpu_slope_to_deg(_gpu_cast_ray(
+            max0, max1, max2, max3, max4, min1, min2, min3, min4,
+            ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
+            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            rc, rs, observer_km, sun_slope_thresh, sun_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+
+        c_k = SUN_RAY_OFFSET_COS[8]; s_k = SUN_RAY_OFFSET_SIN[8]
+        rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
+        rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
+        d_7 = _gpu_slope_to_deg(_gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
@@ -376,7 +417,11 @@ end
             if frac >= 1.0f0
                 pos += Int32(1)
                 left_el = right_el
-                right_el = pos == Int32(1) ? d_2 : d_3
+                right_el = pos == Int32(1) ? d_2 :
+                           pos == Int32(2) ? d_3 :
+                           pos == Int32(3) ? d_4 :
+                           pos == Int32(4) ? d_5 :
+                           pos == Int32(5) ? d_6 : d_7
                 bucket_delta = right_el - left_el
                 frac -= 1.0f0
             end
