@@ -58,7 +58,7 @@ end
 
 @info "GPU run"
 t0 = time()
-sun_gpu, dsn_gpu, dsn_dbg = JM.generate_live_shadow_frame_gpu(ldem.data,
+sun_gpu, dsn_gpu = JM.generate_live_shadow_frame_gpu(ldem.data,
     origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
     max_mipmaps=max_mm, min_mipmaps=min_mm,
     backend=BACKEND, DeviceArray=DEVICE_ARR)
@@ -66,14 +66,10 @@ t_gpu = time() - t0
 
 sun_sha = bytes2hex(sha256(reinterpret(UInt8, vec(sun_gpu))))
 dsn_sha = bytes2hex(sha256(reinterpret(UInt8, vec(dsn_gpu))))
-# SHA of raw de/df Float32 values — isolates the DSN ray cast output from
-# the subsequent over_hz integration + UInt8 rounding.
-dedf_sha = bytes2hex(sha256(reinterpret(UInt8, vec(dsn_dbg))))
 
 @printf("wall: %.3fs\n", t_gpu)
 @printf("sun SHA-256:  %s\n", sun_sha)
 @printf("dsn SHA-256:  %s\n", dsn_sha)
-@printf("dedf SHA-256: %s   (raw de,df Float32 from DSN ray cast)\n", dedf_sha)
 @printf("\nCompare these SHAs across hardware. Byte-exactness means the\n")
 @printf("same PNGs regardless of Apple Silicon / NVIDIA / AMD / CPU.\n")
 
@@ -84,20 +80,22 @@ JM.save_indexed_png(sun_gpu, JM.SUN_PALETTE, joinpath(outdir, "sun.png"))
 JM.save_indexed_png(dsn_gpu, JM.DSN_PALETTE, joinpath(outdir, "dsn.png"))
 open(joinpath(outdir, "sun_raw.bin"), "w") do f; write(f, sun_gpu); end
 open(joinpath(outdir, "dsn_raw.bin"), "w") do f; write(f, dsn_gpu); end
-open(joinpath(outdir, "dedf_raw.bin"), "w") do f; write(f, dsn_dbg); end
 
-# ── Also dump the CPU-side az/el precompute buffer ────────────────────────
-# This is the input to the GPU kernel. Comparing it across platforms tells
-# us whether residual output drift is CPU-precompute-side or GPU-kernel-side.
-# Channels 1..6 = [sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg,
-#                  sun_slope_tan, dsn_slope_tan].
-sun_az, sun_el, earth_az, earth_el, sun_tan, dsn_tan = JM._precompute_azel(
-    ldem.data, origin_r, origin_c, H, W, sun_t, earth_t, Float32(0.0))
+# ── Also dump the CPU-side precompute buffer ─────────────────────────────
+# Channels 1..8 = [sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el,
+#                  sun_slope_tan, dsn_slope_tan].  Sun/earth rays are given
+# directly as (cos, sin) in LDEM-grid frame (what the kernel ray cast uses).
+sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
+    JM._precompute_azel(ldem.data, origin_r, origin_c, H, W,
+                        sun_t, earth_t, Float32(0.0))
 open(joinpath(outdir, "azel_raw.bin"), "w") do f
-    write(f, sun_az); write(f, sun_el); write(f, earth_az); write(f, earth_el)
+    write(f, sun_rc); write(f, sun_rs); write(f, sun_el)
+    write(f, earth_rc); write(f, earth_rs); write(f, earth_el)
     write(f, sun_tan); write(f, dsn_tan)
 end
-azel_sha = bytes2hex(sha256(reinterpret(UInt8, vcat(vec(sun_az), vec(sun_el),
-    vec(earth_az), vec(earth_el), vec(sun_tan), vec(dsn_tan)))))
+azel_sha = bytes2hex(sha256(reinterpret(UInt8, vcat(
+    vec(sun_rc), vec(sun_rs), vec(sun_el),
+    vec(earth_rc), vec(earth_rs), vec(earth_el),
+    vec(sun_tan), vec(dsn_tan)))))
 @printf("azel SHA-256: %s\n", azel_sha)
 @info "Saved comparison images + azel buffer" dir=outdir

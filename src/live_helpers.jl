@@ -39,16 +39,21 @@ const TWILIGHT_SKIP_DEG = Float32(-10.0)
 const N_MIPMAP_LEVELS    = 5
 const MIPMAP_BASE_THRESH = Float32(100.0)
 
-# Precomputed at module load — NOT evaluated inline in the kernel.
-# `1440.0f0 / TWO_PI_F32` written in the kernel body can be constant-folded
-# by different vendor compilers (Metal vs CUDA) to Float32 bit patterns
-# that differ by 1 ULP, which flips `unsafe_trunc(Int32, norm_ea * const)`
-# to a neighboring bucket → totally different DSN ray direction. Folding
-# once at Julia module load gives a single canonical Float32 that's a
-# literal constant at kernel compile time.
-const BUCKETS_PER_RAD = Float32(HORIZON_SAMPLES) / F32_TWO_PI
+# ─── Sun disk sampling ───────────────────────────────────────────────────
+#
+# We cast 4 rays across the sun disk and integrate visibility with 16 ticks.
+# The 4 anchors sit at offsets {-1, -1/3, +1/3, +1} × SUN_HALF_ANGLE from
+# the sun center, spanning the full disk in 3 equal intervals.
+# 16 ticks cover the disk with step 3/16 = 0.1875 anchor-widths per tick
+# (same photon-density as the old 6-ray / bucket-aligned scheme, but now
+# aligned to the sun disk instead of to an external bucket grid).
 
-# Sun disk sampling weights (16 ticks across the disk diameter).
+const N_SUN_RAYS    = 4
+const SUN_TICK_STEP = Float32(3.0) / Float32(16.0)  # 0.1875 anchor-widths/tick
+const SUN_TICK_FRAC_INITIAL = SUN_TICK_STEP * Float32(0.5)  # center first tick
+
+# 16 chord-height weights across the sun disk (unchanged from the old
+# bucket scheme — independent of ray count).
 function _make_half_circle()
     ticks = 8
     hc = [sqrt(64.0 - (ticks - 0.5 - i)^2) / ticks for i in 0:(2*ticks - 1)]
@@ -57,17 +62,21 @@ end
 const HALF_CIRCLE  = _make_half_circle()
 const MAX_PHOTONS  = Float32(2.0 * sum(HALF_CIRCLE))
 
-# Ray-direction lookup tables at 3× horizon-bucket resolution.
-function _make_ray_table()
-    cos_table = Vector{Float32}(undef, NEAR_FIELD_RAY_COUNT)
-    sin_table = Vector{Float32}(undef, NEAR_FIELD_RAY_COUNT)
-    for k in 0:(NEAR_FIELD_RAY_COUNT - 1)
-        angle = Float32(2.0) * F32_PI * Float32(k) / Float32(NEAR_FIELD_RAY_COUNT)
-        cos_table[k + 1], sin_table[k + 1] = cos_sin_lut(angle)
-    end
-    return cos_table, sin_table
+# 4 ray offsets (radians) relative to sun center, equally spaced across
+# the disk. Rotating the sun-center direction by each gives that ray's
+# azimuth. The (cos, sin) are precomputed at module load via cos_sin_lut
+# so both ARM64 and x86_64 Julia, and both Metal and CUDA kernels, see
+# identical Float32 literals.
+function _sun_ray_offset_cossin()
+    offsets_deg = (-SUN_HALF_ANGLE_DEG,
+                   -SUN_HALF_ANGLE_DEG / Float32(3.0),
+                    SUN_HALF_ANGLE_DEG / Float32(3.0),
+                    SUN_HALF_ANGLE_DEG)
+    coss = ntuple(k -> cos_sin_lut(offsets_deg[k] * Float32(π / 180.0))[1], N_SUN_RAYS)
+    sins = ntuple(k -> cos_sin_lut(offsets_deg[k] * Float32(π / 180.0))[2], N_SUN_RAYS)
+    return coss, sins
 end
-const RAY_COS_TABLE, RAY_SIN_TABLE = _make_ray_table()
+const SUN_RAY_OFFSET_COS, SUN_RAY_OFFSET_SIN = _sun_ray_offset_cossin()
 
 # ─── SPICE ephemeris helpers ──────────────────────────────────────────────
 
@@ -202,7 +211,16 @@ end
 # ─── Per-pixel az/el precompute (CPU → GPU buffer) ───────────────────────
 
 """
-Compute sun/earth az/el at a specific pixel.
+Compute per-pixel ray direction and elevation for sun and earth.
+
+Returns ray directions as precomputed (cos, sin) unit vectors **in LDEM-grid
+frame** — the same frame the ray cast operates in. Combines the pixel's
+local ENU azimuth with the ENU→LDEM-grid rotation (what used to be called
+`off_rad`) into a single rotation, so the kernel does not need to fiddle
+with bucket indices or runtime angle subtraction.
+
+Returns: (sun_ray_cos, sun_ray_sin, sun_el_deg,
+          earth_ray_cos, earth_ray_sin, earth_el_deg)
 """
 function _compute_azel_at_pixel(ldem_col::Int, ldem_row::Int,
                                 ldem::Matrix{Int16},
@@ -210,44 +228,54 @@ function _compute_azel_at_pixel(ldem_col::Int, ldem_row::Int,
                                 earth_pos_km::NTuple{3, Float64},
                                 observer_km::Float32)
     qelev_m = Float32(ldem[ldem_row + 1, ldem_col + 1]) * 0.5f0
-    (qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33, _, _, _) =
+    (qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+     rho_q, qn_km, qe_km) =
         _live_query_setup_f32(Float32(ldem_col), Float32(ldem_row), qelev_m)
 
     sun_x = Float32(sun_pos_km[1]);  sun_y = Float32(sun_pos_km[2]);  sun_z = Float32(sun_pos_km[3])
     earth_x = Float32(earth_pos_km[1]); earth_y = Float32(earth_pos_km[2]); earth_z = Float32(earth_pos_km[3])
 
-    # Explicit fma for every a*b+c chain: both ARM64 and x86_64 Julia LLVM
-    # backends must emit the same single-rounded hardware FMA. muladd is
-    # "may or may not fuse" — its LLVM target-specific heuristic was the
-    # source of Mac↔Windows az/el drift that propagated into GPU outputs.
+    # Explicit fma throughout — both ARM64 and x86_64 Julia LLVM backends
+    # emit the same single-rounded hardware FMA (unlike `muladd` which is
+    # target-heuristic and was the source of Mac↔Windows drift).
     sdx = sun_x - qx; sdy = sun_y - qy; sdz = sun_z - qz
     sun_lx = fma(M13, sdz, fma(M12, sdy, M11*sdx))
     sun_ly = fma(M23, sdz, fma(M22, sdy, M21*sdx))
     sun_lz = fma(M33, sdz, fma(M32, sdy, M31*sdx)) - observer_km
-    sun_az_rad = atan2_lut(sun_ly, sun_lx) + F32_PI
+    sun_az_rad_enu = atan2_lut(sun_ly, sun_lx) + F32_PI
     sun_el_rad = atan2_lut(sun_lz, sqrt(fma(sun_ly, sun_ly, sun_lx*sun_lx)))
-    sun_az_deg = sun_az_rad * F32_RAD2DEG
     sun_el_deg = sun_el_rad * F32_RAD2DEG
 
     edx = earth_x - qx; edy = earth_y - qy; edz = earth_z - qz
     e_lx = fma(M13, edz, fma(M12, edy, M11*edx))
     e_ly = fma(M23, edz, fma(M22, edy, M21*edx))
     e_lz = fma(M33, edz, fma(M32, edy, M31*edx)) - observer_km
-    earth_az_rad = atan2_lut(e_ly, e_lx) + F32_PI
+    earth_az_rad_enu = atan2_lut(e_ly, e_lx) + F32_PI
     earth_el_deg = atan2_lut(e_lz, sqrt(fma(e_ly, e_ly, e_lx*e_lx))) * F32_RAD2DEG
 
-    return (sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg)
+    # ENU-frame azimuth → LDEM-grid frame rotation (pixel-specific).
+    # Same math as the old `off_rad` computation, only used on CPU now.
+    inv_rho = 1.0f0 / rho_q
+    off_rad = atan2_lut(qn_km * inv_rho, -qe_km * inv_rho) + F32_PI
+
+    # Ray direction in LDEM-grid frame = rotation by (off_rad - az_enu).
+    sun_ray_cos, sun_ray_sin     = cos_sin_lut(off_rad - sun_az_rad_enu)
+    earth_ray_cos, earth_ray_sin = cos_sin_lut(off_rad - earth_az_rad_enu)
+
+    return (sun_ray_cos, sun_ray_sin, sun_el_deg,
+            earth_ray_cos, earth_ray_sin, earth_el_deg)
 end
 
 """
     _precompute_azel(ldem, origin_r, origin_c, H, W, sun_pos, earth_pos, observer_km)
-      -> (sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg,
+      -> (sun_ray_cos, sun_ray_sin, sun_el_deg,
+          earth_ray_cos, earth_ray_sin, earth_el_deg,
           sun_slope_tan, dsn_slope_tan)
 
-Per-pixel sun/earth az/el map plus deterministic tan(top_el) / tan(earth_el)
-slopes (via cos_sin_lut + IEEE divide). All six buffers are packed into
-the GPU kernel's azel buffer so the GPU kernel itself sees byte-identical
-values on any backend.
+Per-pixel precompute: sun and earth ray directions in LDEM-grid frame
+(unit vectors, directly usable in the kernel ray cast), plus elevation
+angles and deterministic tan slopes for early-return thresholds. All
+eight Float32 maps get packed into the GPU buffer.
 """
 function _precompute_azel(ldem::Matrix{Int16},
                           ldem_origin_row::Int, ldem_origin_col::Int,
@@ -255,9 +283,11 @@ function _precompute_azel(ldem::Matrix{Int16},
                           sun_pos_km::NTuple{3, Float64},
                           earth_pos_km::NTuple{3, Float64},
                           observer_km::Float32)
-    sun_az_deg    = Matrix{Float32}(undef, H, W)
+    sun_ray_cos   = Matrix{Float32}(undef, H, W)
+    sun_ray_sin   = Matrix{Float32}(undef, H, W)
     sun_el_deg    = Matrix{Float32}(undef, H, W)
-    earth_az_rad  = Matrix{Float32}(undef, H, W)
+    earth_ray_cos = Matrix{Float32}(undef, H, W)
+    earth_ray_sin = Matrix{Float32}(undef, H, W)
     earth_el_deg  = Matrix{Float32}(undef, H, W)
     sun_slope_tan = Matrix{Float32}(undef, H, W)
     dsn_slope_tan = Matrix{Float32}(undef, H, W)
@@ -266,11 +296,13 @@ function _precompute_azel(ldem::Matrix{Int16},
         @inbounds for r in 1:H
             ldem_c = ldem_origin_col + (c - 1)
             ldem_r = ldem_origin_row + (r - 1)
-            (az_s, el_s, az_e, el_e) = _compute_azel_at_pixel(
+            (src, srs, el_s, erc, ers, el_e) = _compute_azel_at_pixel(
                 ldem_c, ldem_r, ldem, sun_pos_km, earth_pos_km, observer_km)
-            sun_az_deg[r, c]    = az_s
+            sun_ray_cos[r, c]   = src
+            sun_ray_sin[r, c]   = srs
             sun_el_deg[r, c]    = el_s
-            earth_az_rad[r, c]  = az_e
+            earth_ray_cos[r, c] = erc
+            earth_ray_sin[r, c] = ers
             earth_el_deg[r, c]  = el_e
             θs = (el_s + SUN_HALF_ANGLE_DEG) * Float32(π / 180.0)
             cs_s, sn_s = cos_sin_lut(θs)
@@ -280,6 +312,7 @@ function _precompute_azel(ldem::Matrix{Int16},
             dsn_slope_tan[r, c] = sn_e / cs_e
         end
     end
-    return (sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg,
+    return (sun_ray_cos, sun_ray_sin, sun_el_deg,
+            earth_ray_cos, earth_ray_sin, earth_el_deg,
             sun_slope_tan, dsn_slope_tan)
 end

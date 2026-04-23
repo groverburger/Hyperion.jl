@@ -202,45 +202,13 @@ end
     return max_slope
 end
 
-@inline function _gpu_run_bucket(B::Int32, thr::Float32, mxd::Float32,
-        off_bucket_f::Float32, ray_cossin_packed,
-        max0, max1, max2, max3, max4, min1, min2, min3, min4,
-        ldem_H::Int32, ldem_W::Int32,
-        query_col::Float32, query_row::Float32,
-        q_elev_m::Float32, qx::Float32, qy::Float32, qz::Float32,
-        M11::Float32, M12::Float32, M13::Float32,
-        M21::Float32, M22::Float32, M23::Float32,
-        M31::Float32, M32::Float32, M33::Float32,
-        observer_km::Float32,
-        atan_lut, atan_scale::Float32,
-        ldem_s0::Float32, ldem_l0::Float32,
-        R_km::Float32, R_m::Float32)::Float32
-    HSF = 1440.0f0
-    adjB = mod(off_bucket_f - Float32(B), HSF) * 3.0f0
-    ray_i = unsafe_trunc(Int32, adjB + 2.0f0)
-    ray_i = mod(ray_i, Int32(4320)) + Int32(1)
-    rc = ray_cossin_packed[ray_i, Int32(1)]
-    rs = ray_cossin_packed[ray_i, Int32(2)]
-    s = _gpu_cast_ray(
-        max0, max1, max2, max3, max4,
-        min1, min2, min3, min4,
-        ldem_H, ldem_W, query_col, query_row,
-        q_elev_m, qx, qy, qz,
-        M11, M12, M13, M21, M22, M23, M31, M32, M33,
-        rc, rs, observer_km, thr, mxd,
-        ldem_s0, ldem_l0, R_km, R_m)
-    _gpu_slope_to_deg(s, atan_lut, atan_scale)
-end
-
 # ─── Main kernel: one work item per pixel ────────────────────────────────
 
 @kernel function _gpu_live_pixel_kernel!(
     sun_out, dsn_out,
-    dsn_debug,                          # (H, W, 2) Float32: [de, df] for diagnostics
     @Const(max0), @Const(max1), @Const(max2), @Const(max3), @Const(max4),
     @Const(min1), @Const(min2), @Const(min3), @Const(min4),
-    @Const(azel_packed),                # (H, W, 6): [sun_az, sun_el, earth_az, earth_el, sun_tan, dsn_tan]
-    @Const(ray_cossin_packed),          # (4320, 2): [cos, sin] — ray direction table
+    @Const(azel_packed),                # (H, W, 8) — see reads below
     @Const(atan_lut),
     atan_scale::Float32,
     ldem_H::Int32, ldem_W::Int32, H::Int32, W::Int32,
@@ -281,140 +249,109 @@ end
     M21 = -qslon;      M22 = qclon;       M23 = 0.0f0
     M31 = qclat*qclon; M32 = qclat*qslon; M33 = qslat
 
-    # Sun/earth az/el from precomputed (subsampled) map (packed H×W×4)
-    sun_az_deg   = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(1)]
-    sun_el_deg   = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(2)]
-    earth_az_rad = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(3)]
-    earth_el_deg = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(4)]
+    # ── Read 8 precomputed channels (CPU-side; cross-platform bit-exact) ──
+    # 1: sun_ray_cos     (sun direction in LDEM-grid frame, unit cos)
+    # 2: sun_ray_sin     (unit sin)
+    # 3: sun_el_deg
+    # 4: earth_ray_cos
+    # 5: earth_ray_sin
+    # 6: earth_el_deg
+    # 7: sun_slope_tan   (tan of sun-disk-top elevation, early-return threshold)
+    # 8: dsn_slope_tan   (tan of earth elevation)
+    sun_rc_base   = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(1)]
+    sun_rs_base   = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(2)]
+    sun_el_deg    = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(3)]
+    earth_rc      = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(4)]
+    earth_rs      = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(5)]
+    earth_el_deg  = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(6)]
+    sun_slope_thresh = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(7)]
+    dsn_slope_thresh = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(8)]
 
-    # Twilight skip at -10° (see live_shadows.jl TWILIGHT_SKIP_DEG comment).
+    # Twilight skip at -10° (see live_helpers.jl TWILIGHT_SKIP_DEG).
     sun_top_el_deg = sun_el_deg + sun_half_angle_deg
     sun_below = sun_top_el_deg <= -10.0f0
     earth_below = earth_el_deg <= -10.0f0
 
-    # Frame offset
-    r_pix = rho_q
-    off_rad = _gpu_atan2_lut_live(qn_km / r_pix, -qe_km / r_pix, atan_lut, atan_scale) + PI_F32
-    off_bucket_f = off_rad * 1440.0f0 / TWO_PI_F32
-
-    # Bucket indices
-    bw = 360.0f0 / 1440.0f0
-    sun_left_deg = sun_az_deg - sun_half_angle_deg - bw * 0.5f0
-    sun_left_bucket_f = sun_left_deg * (1440.0f0/360.0f0)
-    sun_left_bucket = unsafe_trunc(Int32, sun_left_bucket_f)
-    S = Int32(1440)
-    b0 = mod(sun_left_bucket + Int32(0), S)
-    b1 = mod(sun_left_bucket + Int32(1), S)
-    b2 = mod(sun_left_bucket + Int32(2), S)
-    b3 = mod(sun_left_bucket + Int32(3), S)
-    b4 = mod(sun_left_bucket + Int32(4), S)
-    b5 = mod(sun_left_bucket + Int32(5), S)
-
-    norm_ea = mod(earth_az_rad, TWO_PI_F32)
-    if norm_ea < 0f0; norm_ea += TWO_PI_F32; end
-    # Use the module-load-time constant `BUCKETS_PER_RAD`. Writing
-    # `norm_ea * (1440.0f0 / TWO_PI_F32)` inline still let Metal vs CUDA
-    # compilers fold the division to different Float32 bit patterns by
-    # 1 ULP → `unsafe_trunc` flipped to a neighboring bucket → totally
-    # different ray direction on some pixels (we measured Δdf up to 0.20
-    # rad in an earlier cross-platform diff). The named constant is a
-    # single Float32 literal at kernel compile time.
-    e_idx = norm_ea * BUCKETS_PER_RAD
-    e_left = unsafe_trunc(Int32, e_idx)
-    e_fr = e_idx - Float32(e_left)
-    e_right = mod(e_left + Int32(1), S)
-    e_left = mod(e_left, S)
-
-    # Thresholds + max_d — slopes precomputed on CPU via cos_sin_lut (Metal's
-    # tan() would differ by ~1 ULP). Stored in azel_packed channels 5 & 6.
-    sun_useful_slope = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(5)]
-    dsn_useful_slope = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(6)]
-    sun_slope_thresh = sun_useful_slope
-    dsn_slope_thresh = dsn_useful_slope
+    # Dynamic max ray distance — explicit fma form throughout.
     HARD_CAP = 15000.0f0
-    sun_max_d = sun_useful_slope > 0.005f0 ?
-        min(HARD_CAP, max_terrain_m / sun_useful_slope / 20.0f0 * 1.5f0) : HARD_CAP
-    dsn_max_d = dsn_useful_slope > 0.005f0 ?
-        min(HARD_CAP, max_terrain_m / dsn_useful_slope / 20.0f0 * 1.5f0) : HARD_CAP
+    sun_max_d = sun_slope_thresh > 0.005f0 ?
+        min(HARD_CAP, max_terrain_m / sun_slope_thresh / 20.0f0 * 1.5f0) : HARD_CAP
+    dsn_max_d = dsn_slope_thresh > 0.005f0 ?
+        min(HARD_CAP, max_terrain_m / dsn_slope_thresh / 20.0f0 * 1.5f0) : HARD_CAP
 
-    d0 = Float32(-90.0); d1 = Float32(-90.0); d2 = Float32(-90.0)
-    d3 = Float32(-90.0); d4 = Float32(-90.0); d5 = Float32(-90.0)
-    de = Float32(-90.0); df = Float32(-90.0)
+    # ── Ray direction helpers ────────────────────────────────────────
+    # Sun: 4 rays at ±SUN_HALF_ANGLE and ±SUN_HALF_ANGLE/3. Each ray is
+    # the sun-center direction rotated by a small, compile-time offset.
+    # Rotation: (rc, rs) = R(θ_k) · (sun_rc_base, sun_rs_base).
+    # DSN: 1 ray at the exact earth direction (no interpolation).
+    d_0 = Float32(-90.0); d_1 = Float32(-90.0)
+    d_2 = Float32(-90.0); d_3 = Float32(-90.0)
+    de = Float32(-90.0)
 
     if !sun_below
-        d0 = _gpu_run_bucket(b0, sun_slope_thresh, sun_max_d,
-            off_bucket_f, ray_cossin_packed,
+        # Ray 1: offset = -SUN_HALF_ANGLE_DEG
+        c_k = SUN_RAY_OFFSET_COS[1]; s_k = SUN_RAY_OFFSET_SIN[1]
+        rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
+        rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
+        d_0 = _gpu_slope_to_deg(_gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m)
-        d1 = _gpu_run_bucket(b1, sun_slope_thresh, sun_max_d,
-            off_bucket_f, ray_cossin_packed,
+            rc, rs, observer_km, sun_slope_thresh, sun_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+
+        c_k = SUN_RAY_OFFSET_COS[2]; s_k = SUN_RAY_OFFSET_SIN[2]
+        rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
+        rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
+        d_1 = _gpu_slope_to_deg(_gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m)
-        d2 = _gpu_run_bucket(b2, sun_slope_thresh, sun_max_d,
-            off_bucket_f, ray_cossin_packed,
+            rc, rs, observer_km, sun_slope_thresh, sun_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+
+        c_k = SUN_RAY_OFFSET_COS[3]; s_k = SUN_RAY_OFFSET_SIN[3]
+        rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
+        rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
+        d_2 = _gpu_slope_to_deg(_gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m)
-        d3 = _gpu_run_bucket(b3, sun_slope_thresh, sun_max_d,
-            off_bucket_f, ray_cossin_packed,
+            rc, rs, observer_km, sun_slope_thresh, sun_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+
+        c_k = SUN_RAY_OFFSET_COS[4]; s_k = SUN_RAY_OFFSET_SIN[4]
+        rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
+        rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
+        d_3 = _gpu_slope_to_deg(_gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m)
-        d4 = _gpu_run_bucket(b4, sun_slope_thresh, sun_max_d,
-            off_bucket_f, ray_cossin_packed,
-            max0, max1, max2, max3, max4, min1, min2, min3, min4,
-            ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m)
-        d5 = _gpu_run_bucket(b5, sun_slope_thresh, sun_max_d,
-            off_bucket_f, ray_cossin_packed,
-            max0, max1, max2, max3, max4, min1, min2, min3, min4,
-            ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m)
+            rc, rs, observer_km, sun_slope_thresh, sun_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
     end
 
     if !earth_below
-        de = _gpu_run_bucket(e_left, dsn_slope_thresh, dsn_max_d,
-            off_bucket_f, ray_cossin_packed,
+        de = _gpu_slope_to_deg(_gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m)
-        df = _gpu_run_bucket(e_right, dsn_slope_thresh, dsn_max_d,
-            off_bucket_f, ray_cossin_packed,
-            max0, max1, max2, max3, max4, min1, min2, min3, min4,
-            ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            observer_km, atan_lut, atan_scale,
-            ldem_s0, ldem_l0, R_km, R_m)
+            earth_rc, earth_rs, observer_km, dsn_slope_thresh, dsn_max_d,
+            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
     end
 
-    # ── Sun fraction integration ──────────────────────────────────────
+    # ── Sun fraction integration (16 ticks across sun disk, 4 anchors) ──
+    # Ticks are centered within their sub-intervals; frac starts at
+    # half the step size and advances by SUN_TICK_STEP each tick.
+    # The 16 ticks span 3 anchor-intervals (= full sun disk).
     sun_frac = 0.0f0
     if !sun_below
-        frac_step = sun_half_angle_deg / bw / 8.0f0
-        frac = sun_left_bucket_f - Float32(sun_left_bucket)
+        frac = SUN_TICK_FRAC_INITIAL
         pos = Int32(0)
-        left_el = d0
-        right_el = d1
+        left_el  = d_0
+        right_el = d_1
         bucket_delta = right_el - left_el
         px = 0.0f0
-        # half_circle table inlined (16 Float32 constants) to avoid spending
-        # a buffer slot at Metal's 31-buffer limit.
         @inbounds for i in Int32(1):Int32(16)
             sc = i == Int32(1)  ? 0.09395602f0 :
                  i == Int32(2)  ? 0.15739954f0 :
@@ -435,13 +372,11 @@ end
             horizon_el = fma(frac, bucket_delta, left_el)
             delta = (sun_el_deg + sc) - horizon_el
             px += clamp(delta, 0.0f0, 2.0f0 * sc)
-            frac += frac_step
+            frac += SUN_TICK_STEP
             if frac >= 1.0f0
                 pos += Int32(1)
                 left_el = right_el
-                right_el = pos == Int32(1) ? d2 :
-                           pos == Int32(2) ? d3 :
-                           pos == Int32(3) ? d4 : d5
+                right_el = pos == Int32(1) ? d_2 : d_3
                 bucket_delta = right_el - left_el
                 frac -= 1.0f0
             end
@@ -449,19 +384,14 @@ end
         sun_frac = px / max_photons
     end
 
-    # ── DSN over-horizon — single fma-friendly form ──────────────────
-    over_hz_deg = earth_below ? Float32(-90.0) :
-                  fma(e_fr, de - df, earth_el_deg - de)
+    # ── DSN over-horizon — single ray, direct difference ─────────────
+    over_hz_deg = earth_below ? Float32(-90.0) : (earth_el_deg - de)
 
     # ── Emit UInt8 ────────────────────────────────────────────────────
     sun_u8 = UInt8(clamp(unsafe_trunc(Int32, 255.0f0 * sun_frac), Int32(0), Int32(255)))
     dsn_u8 = UInt8(clamp(unsafe_trunc(Int32, floor(over_hz_deg * 10.0f0)), Int32(0), Int32(250)))
     sun_out[local_row + Int32(1), local_col + Int32(1)] = sun_u8
     dsn_out[local_row + Int32(1), local_col + Int32(1)] = dsn_u8
-    # Diagnostic: expose de/df so we can SHA-compare just the DSN ray-cast
-    # outputs across platforms without the over_hz integration on top.
-    dsn_debug[local_row + Int32(1), local_col + Int32(1), Int32(1)] = de
-    dsn_debug[local_row + Int32(1), local_col + Int32(1), Int32(2)] = df
     end  # close if local_row < H
 end
 
@@ -499,40 +429,35 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     observer_km = Float32(observer_height_m / 1000.0)
     ldem_H, ldem_W = size(ldem)
 
-    # Phase 1: per-pixel az/el + deterministic tan slopes on CPU.
-    sun_az_deg, sun_el_deg, earth_az_rad, earth_el_deg, sun_slope_tan, dsn_slope_tan =
+    # Phase 1: per-pixel ray directions + slopes on CPU.
+    # 8 channels: (sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el,
+    #              sun_tan, dsn_tan).
+    sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
         _precompute_azel(ldem, ldem_origin_row, ldem_origin_col, H, W,
                          sun_pos_km, earth_pos_km, observer_km)
 
-    # Pack into H×W×6: [sun_az, sun_el, earth_az, earth_el, sun_tan, dsn_tan]
-    azel = Array{Float32, 3}(undef, H, W, 6)
-    azel[:, :, 1] .= sun_az_deg
-    azel[:, :, 2] .= sun_el_deg
-    azel[:, :, 3] .= earth_az_rad
-    azel[:, :, 4] .= earth_el_deg
-    azel[:, :, 5] .= sun_slope_tan
-    azel[:, :, 6] .= dsn_slope_tan
-
-    # Pack ray cos/sin into one (4320, 2) array
-    ray_cossin = hcat(RAY_COS_TABLE, RAY_SIN_TABLE)
+    azel = Array{Float32, 3}(undef, H, W, 8)
+    azel[:, :, 1] .= sun_rc
+    azel[:, :, 2] .= sun_rs
+    azel[:, :, 3] .= sun_el
+    azel[:, :, 4] .= earth_rc
+    azel[:, :, 5] .= earth_rs
+    azel[:, :, 6] .= earth_el
+    azel[:, :, 7] .= sun_tan
+    azel[:, :, 8] .= dsn_tan
 
     d_max = ntuple(i -> DeviceArray(max_mipmaps[i]), N_MIPMAP_LEVELS)
     d_min = ntuple(i -> DeviceArray(min_mipmaps[i]), N_MIPMAP_LEVELS)
     d_azel = DeviceArray(azel)
-    d_rcs  = DeviceArray(ray_cossin)
     d_atan = DeviceArray(ATAN_LUT)
     d_sun_out = DeviceArray(zeros(UInt8, H, W))
     d_dsn_out = DeviceArray(zeros(UInt8, H, W))
-    # Debug buffer: raw Float32 [de, df] per pixel for cross-platform
-    # diagnosis of the DSN-only residual divergence.
-    d_dsn_dbg = DeviceArray(zeros(Float32, H, W, 2))
 
     kernel = _gpu_live_pixel_kernel!(backend, workgroup_size)
-    kernel(d_sun_out, d_dsn_out, d_dsn_dbg,
+    kernel(d_sun_out, d_dsn_out,
            d_max[1], d_max[2], d_max[3], d_max[4], d_max[5],
            d_min[2], d_min[3], d_min[4], d_min[5],   # levels 1..4 (skip 0)
-           d_azel,
-           d_rcs, d_atan,
+           d_azel, d_atan,
            ATAN_LUT_SCALE,
            Int32(ldem_H), Int32(ldem_W), Int32(H), Int32(W),
            Int32(ldem_origin_row), Int32(ldem_origin_col),
@@ -544,5 +469,5 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 
-    return Array(d_sun_out), Array(d_dsn_out), Array(d_dsn_dbg)
+    return Array(d_sun_out), Array(d_dsn_out)
 end

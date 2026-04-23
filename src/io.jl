@@ -41,65 +41,6 @@ function load_dem(path::AbstractString)
 end
 
 """
-    read_horizon_bin(path) -> (header, data)
-
-Read a horizon .bin file.
-header: NamedTuple with row, col, w, h, step, obs fields.
-data: Array{Float32, 3} of shape (h, w, 1440).
-"""
-function read_horizon_bin(path::AbstractString)
-    open(path, "r") do f
-        row  = read(f, Int32)
-        col  = read(f, Int32)
-        w    = read(f, Int32)
-        h    = read(f, Int32)
-        step = read(f, Int32)
-        obs  = read(f, Int32)
-        n    = read(f, Int32)   # number of floats
-        header = (; row, col, w, h, step, obs, n)
-
-        flat = Vector{Float32}(undef, Int(n))
-        read!(f, flat)
-
-        # .bin is row-major [pixel_row, pixel_col, bin].
-        # Julia is column-major, so reshape + permute.
-        data = reshape(flat, (HORIZON_SAMPLES, Int(w), Int(h)))
-        data = permutedims(data, (3, 2, 1))  # → (h, w, 1440)
-
-        return header, data
-    end
-end
-
-"""
-    write_horizon_bin(path, patch, observer_height_m, horizon_array)
-
-Write a horizon .bin file.
-patch: (row, col, h, w) tuple.
-horizon_array: Array{Float32, 3} of shape (h, w, 1440).
-"""
-function write_horizon_bin(path::AbstractString, patch, observer_height_m::Real,
-                           horizon_array::Array{Float32, 3})
-    row, col, h, w = patch
-    obs_tag = Int32(round(observer_height_m * 10))
-    step = Int32(1)
-
-    # Permute from Julia's (h, w, 1440) to flat row-major
-    data = permutedims(horizon_array, (3, 2, 1))  # (1440, w, h)
-    n = Int32(length(data))
-
-    open(path, "w") do f
-        write(f, Int32(row))
-        write(f, Int32(col))
-        write(f, Int32(w))
-        write(f, Int32(h))
-        write(f, step)
-        write(f, obs_tag)
-        write(f, n)
-        write(f, data)
-    end
-end
-
-"""
     LDEM
 
 Raw int16 south-polar DEM (LDEM format). Header-less binary file with

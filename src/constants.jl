@@ -8,13 +8,6 @@ const LDEM_S0       = 15199.5        # column corresponding to 0° easting
 const LDEM_L0       = 15199.5        # row corresponding to 0° northing
 const LDEM_SCALE_KM = 20.0 / 1000.0  # km per pixel
 
-const HORIZON_SAMPLES         = 1440          # 360° × 4 bins/degree
-const NEAR_HORIZON_OVERSAMPLE = 3
-const NEAR_FIELD_RAY_COUNT    = HORIZON_SAMPLES * NEAR_HORIZON_OVERSAMPLE  # 4320
-const NEAR_FIELD_RAY_STEP     = Float32(0.70710698)
-const RAY_CAST_DISTANCE_PIXELS = 230
-const PATCH_SIZE              = 128
-
 const F32_PI     = Float32(3.141592653589)
 const F32_TWO_PI = Float32(2.0) * F32_PI
 const F32_RAD2DEG = Float32(180.0) / F32_PI  # derived from hardcoded F32_PI, not Julia's π
