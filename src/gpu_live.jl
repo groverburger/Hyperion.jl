@@ -374,11 +374,22 @@ end
     end
 
     if !earth_below
+        # Identity-rotation wrapper on DSN ray direction. Mathematically a
+        # no-op (fma(a, 0, b*1) = b), but structurally the call site now
+        # matches the sun call sites (which are explicit fma rotations).
+        # Hypothesis: CUDA's ptxas may specialize inlined ray-cast code
+        # differently based on caller structure. Making DSN look like sun
+        # forces the same specialization. If this changes Metal SHA, the
+        # fma isn't actually being folded to identity (and we learn
+        # something). If it doesn't change Metal SHA but fixes CUDA, we
+        # confirm the specialization hypothesis.
+        rc_dsn = fma(-earth_rs, 0.0f0, earth_rc * 1.0f0)
+        rs_dsn = fma( earth_rc, 0.0f0, earth_rs * 1.0f0)
         de = _gpu_slope_to_deg(_gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            earth_rc, earth_rs, observer_km, dsn_slope_thresh, dsn_max_d,
+            rc_dsn, rs_dsn, observer_km, dsn_slope_thresh, dsn_max_d,
             ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
     end
 
