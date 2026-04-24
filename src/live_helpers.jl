@@ -21,6 +21,13 @@ const R_M_F64      = Float64(MOON_RADIUS_M)
 const R_KM_F64     = Float64(MOON_RADIUS_KM)
 const R_KM_F32     = Float32(MOON_RADIUS_KM)
 const R_M_F32      = Float32(MOON_RADIUS_M)
+# Reciprocals of R precomputed on CPU so the GPU per-ray-step stereographic
+# projection uses multiplies instead of variable-denominator divisions (the
+# div's default rounding can diverge between Metal's IEEE-rn and CUDA's
+# `div.approx.f32`, causing cross-platform UInt8 drift).
+const INV_2R_M_F32   = Float32(1.0 / (2.0 * MOON_RADIUS_M))
+const INV_R_KM_F32   = Float32(1.0 / MOON_RADIUS_KM)
+const INV_4R_KM2_F32 = Float32(1.0 / (4.0 * MOON_RADIUS_KM * MOON_RADIUS_KM))
 const LDEM_PIX_M   = 20.0
 const LDEM_S0_F32  = Float32(LDEM_S0)
 const LDEM_L0_F32  = Float32(LDEM_L0)
@@ -61,6 +68,7 @@ function _make_half_circle()
 end
 const HALF_CIRCLE  = _make_half_circle()
 const MAX_PHOTONS  = Float32(2.0 * sum(HALF_CIRCLE))
+const INV_MAX_PHOTONS = Float32(1.0 / (2.0 * sum(HALF_CIRCLE)))
 
 # 4 ray offsets (radians) relative to sun center, equally spaced across
 # the disk. Rotating the sun-center direction by each gives that ray's

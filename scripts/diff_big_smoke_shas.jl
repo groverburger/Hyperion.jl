@@ -1,24 +1,24 @@
 #!/usr/bin/env julia
-# Compare data/outputs/big_smoke/metal/SHAs.txt vs .../cuda/SHAs.txt
-# and print a side-by-side report of matching / differing entries.
+# Compare SHAs.txt across every backend directory present in
+# data/outputs/big_smoke/ (metal/, cuda/, cpu/). Prints the toolchain
+# triplet per backend (so regressions can be localized to a version bump)
+# then an all-pairs MATCH / DIFFER report.
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Printf
 
 const BASE = joinpath(dirname(@__DIR__), "data", "outputs", "big_smoke")
-const M = joinpath(BASE, "metal", "SHAs.txt")
-const C = joinpath(BASE, "cuda",  "SHAs.txt")
 
-if !isfile(M); error("Missing $M — run big_smoke_test.jl on Mac first"); end
-if !isfile(C); error("Missing $C — run big_smoke_test.jl on Windows with JM_BACKEND=cuda"); end
-
-"Parse a SHAs.txt file into OrderedDict of (section => Dict(key => sha))."
+"Parse a SHAs.txt file into (header_lines, Vector{(section, Dict(key => sha))})."
 function parse_shas(path)
+    headers = String[]
     sections = Tuple{String, Dict{String, String}}[]
     cur = nothing
     for line in eachline(path)
         line = strip(line)
-        if isempty(line) || startswith(line, "#")
+        if isempty(line)
             continue
+        elseif startswith(line, "#")
+            push!(headers, line)
         elseif startswith(line, "[") && endswith(line, "]")
             cur = (line[2:end-1], Dict{String, String}())
             push!(sections, cur)
@@ -27,38 +27,77 @@ function parse_shas(path)
             cur[2][strip(k)] = strip(v)
         end
     end
-    return sections
+    return headers, sections
 end
 
-m = parse_shas(M); c = parse_shas(C)
+# Discover which backends have SHAs.txt on disk.
+backends = String[]
+for b in ("cpu", "metal", "cuda")
+    isfile(joinpath(BASE, b, "SHAs.txt")) && push!(backends, b)
+end
 
-@printf("%-22s  %-6s  %-10s\n", "timestamp", "key", "status")
-println("─" ^ 50)
+if length(backends) < 2
+    error("Need at least two backends with SHAs.txt under $BASE. " *
+          "Found: $backends. Run big_smoke_test.jl with JM_BACKEND={cpu,metal,cuda}.")
+end
 
-total = 0; matching = 0
-for (sec_name, m_shas) in m
-    c_section = findfirst(x -> x[1] == sec_name, c)
-    c_shas = c_section === nothing ? Dict{String, String}() : c[c_section][2]
-    for (k, v_m) in m_shas
-        total += 1
-        v_c = get(c_shas, k, "")
-        status = if v_c == ""
-            "MISSING"
-        elseif v_c == v_m
-            matching += 1
-            "MATCH"
-        else
-            "DIFFER"
-        end
-        @printf("%-22s  %-6s  %-10s%s\n", sec_name, k, status,
-                status == "DIFFER" ? "  $(first(v_m, 10))… vs $(first(v_c, 10))…" : "")
+parsed = Dict(b => parse_shas(joinpath(BASE, b, "SHAs.txt")) for b in backends)
+
+# ─── Toolchain report ─────────────────────────────────────────────────────
+println("Backends discovered: $(join(backends, ", "))")
+println()
+for b in backends
+    println("── $b ──")
+    for h in parsed[b][1]
+        println("  $h")
     end
+    println()
 end
+
+# ─── All-pairs comparison ────────────────────────────────────────────────
+function compare_pair(a_name, a_secs, b_name, b_secs)
+    @printf("\n═══ %s ↔ %s ═══\n", a_name, b_name)
+    @printf("%-22s  %-6s  %-10s\n", "timestamp", "key", "status")
+    println("─" ^ 50)
+    total = 0; matching = 0
+    for (sec_name, a_shas) in a_secs
+        b_idx = findfirst(x -> x[1] == sec_name, b_secs)
+        b_shas = b_idx === nothing ? Dict{String, String}() : b_secs[b_idx][2]
+        for (k, v_a) in a_shas
+            total += 1
+            v_b = get(b_shas, k, "")
+            status = if v_b == ""
+                "MISSING"
+            elseif v_b == v_a
+                matching += 1
+                "MATCH"
+            else
+                "DIFFER"
+            end
+            if status != "MATCH"
+                @printf("%-22s  %-6s  %-10s%s\n", sec_name, k, status,
+                        status == "DIFFER" ? "  $(first(v_a, 10))… vs $(first(v_b, 10))…" : "")
+            end
+        end
+    end
+    @printf("\n  %d / %d SHAs match\n", matching, total)
+    matching == total
+end
+
+# Pair (cpu, metal, cuda) → compare each pair.
+function run_all_pairs(backends, parsed)
+    ok = true
+    for i in 1:length(backends), j in (i+1):length(backends)
+        ok &= compare_pair(backends[i], parsed[backends[i]][2],
+                           backends[j], parsed[backends[j]][2])
+    end
+    ok
+end
+all_ok = run_all_pairs(backends, parsed)
 
 println()
-@printf("%d / %d SHAs match\n", matching, total)
-if matching == total
-    println("✓ Fully bit-exact across Metal ↔ CUDA")
+if all_ok
+    println("✓ Fully bit-exact across: $(join(backends, " ↔ "))")
 else
-    println("✗ Cross-platform divergence")
+    println("✗ Cross-backend divergence detected — see DIFFERs above")
 end

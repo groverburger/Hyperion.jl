@@ -118,7 +118,9 @@ All IEEE-spec'd operations — byte-identical output on every compliant platform
     frac = scaled - Float32(i0)
     @inbounds v0 = ATAN_LUT[i0 + 1]    # Julia is 1-indexed
     @inbounds v1 = ATAN_LUT[i0 + 2]
-    angle = v0 + frac * (v1 - v0)
+    # Explicit fma to remove vendor-dependent `(a*b) + c` fusion (mirrors
+    # the GPU-side `_gpu_atan2_lut_live` fix in src/gpu_live.jl).
+    angle = fma(frac, v1 - v0, v0)
 
     # Undo swap
     if swap
@@ -171,8 +173,11 @@ Deterministic (cos θ, sin θ) via quadrant reduction + 1D LUT + linear interp.
     frac = scaled - Float32(i0)
     @inbounds s0 = SIN_LUT[i0 + 1]; @inbounds s1 = SIN_LUT[i0 + 2]
     @inbounds c0 = COS_LUT[i0 + 1]; @inbounds c1 = COS_LUT[i0 + 2]
-    s_local = s0 + frac * (s1 - s0)
-    c_local = c0 + frac * (c1 - c0)
+    # Explicit fma on the LUT interpolations to match the fix in atan2_lut
+    # above and `_gpu_atan2_lut_live`. Currently CPU-only, but the same rule
+    # applies: `(a*b) + c` is a vendor-dependent fusion coin flip.
+    s_local = fma(frac, s1 - s0, s0)
+    c_local = fma(frac, c1 - c0, c0)
 
     # Apply quadrant signs
     if quad == 0

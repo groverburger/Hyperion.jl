@@ -1,9 +1,19 @@
 # ─── Live shadow GPU kernel + cross-platform driver ──────────────────────
 #
 # The kernel is backend-agnostic — it uses only KernelAbstractions macros
-# and IEEE-mandated Float32 ops (+, −, *, /, sqrt, fma). Bit-identical
-# output is guaranteed on any backend that implements IEEE 754 correctly:
-# Apple Metal, NVIDIA CUDA, AMD ROCm, oneAPI, and CPU fallback.
+# and IEEE-mandated Float32 ops (+, −, *, /, sqrt, fma), with transcendentals
+# replaced by deterministic LUTs. Every output stage is verified byte-exact
+# across Apple Silicon CPU ↔ Metal ↔ NVIDIA CUDA on 15 representative
+# timestamps at 896×512 scale (630 SHAs, 100% match — kernel raw UInt8,
+# palette-applied RGB, PNG roundtrip, and Float32 diagnostics). By
+# construction the same guarantees extend to any IEEE 754 + hardware-FMA
+# backend (AMD ROCm, Intel oneAPI, Linux x86 CPU).
+#
+# Before modifying the arithmetic in this file, read
+# docs/cross-vendor-determinism.md — especially the `(a*b) ± c` rule
+# (items 5 + 8): any mul-then-add/sub pattern reconstructible from
+# connected statements must be wrapped in explicit `fma` or it becomes
+# a per-vendor fusion coin flip.
 #
 # The caller provides the backend + device-array constructor. Typical use:
 #
@@ -39,7 +49,12 @@ using KernelAbstractions
     i0 = clamp(i0, Int32(0), Int32(ATAN_LUT_SIZE - 2))
     frac = scaled - Float32(i0)
     v0 = atan_lut[i0 + 1]; v1 = atan_lut[i0 + 2]
-    angle = v0 + frac * (v1 - v0)
+    # Linear interpolation: explicit fma so neither Metal nor CUDA can pick
+    # `(a*b) + c` fusion independently. Without this, NVPTX (fp-contract=fast)
+    # fuses while Apple Air does not, producing a 1-ULP drift in `angle` that
+    # propagates to the per-ray Float32 horizon hashes (de, d_0..d_7). Both
+    # vendors emit air.fma.f32 / fma.rn.f32 from the explicit form.
+    angle = fma(frac, v1 - v0, v0)
     swap && (angle = PI_HALF_F32 - angle)
     if neg_x && neg_y; angle = -(PI_F32 - angle)
     elseif neg_x;      angle = PI_F32 - angle
@@ -48,9 +63,13 @@ using KernelAbstractions
     return angle
 end
 
-@inline function _gpu_slope_to_deg(slope::Float32,
-                                   atan_lut, atan_scale::Float32)::Float32
-    rad = _gpu_atan2_lut_live(slope, 1.0f0, atan_lut, atan_scale)
+# Convert a (num, den_sq) slope representation to degrees via the atan LUT.
+# slope = num/sqrt(den_sq). One sqrt + one division (inside the LUT) total —
+# moved out of the ray-cast inner loop to keep that hot path div/sqrt-free.
+# The den_sq=0 sentinel maps to atan2(-1, 0) = -π/2 exactly (= -90°).
+@inline function _gpu_slope_to_deg_sq(num::Float32, den_sq::Float32,
+                                       atan_lut, atan_scale::Float32)::Float32
+    rad = _gpu_atan2_lut_live(num, sqrt(den_sq), atan_lut, atan_scale)
     return rad * Float32(180.0 / π)
 end
 
@@ -58,12 +77,46 @@ end
 # Mipmaps are passed as 5 separate Int16 arrays (KernelAbstractions doesn't
 # take tuples-of-arrays well for Metal). Levels are always 5.
 
-@inline function _gpu_approx_slope(elev_m::Float32, dist_pix::Float32,
-                                   q_elev_m::Float32, R_m::Float32)::Float32
+# Approximate slope in (num, den_sq) form so the caller can compare via
+# squared cross-multiplication — no in-loop division by a variable. The
+# constant `(2*R_m)` division from the flat-Earth drop term is replaced by
+# multiplication with the CPU-precomputed `inv_2R_m`.
+@inline function _gpu_approx_slope_sq(elev_m::Float32, dist_pix::Float32,
+                                       q_elev_m::Float32)
     horizontal_m = dist_pix * 20.0f0
-    drop_m = horizontal_m * horizontal_m / (2.0f0 * R_m)
-    delta = elev_m - q_elev_m - drop_m
-    horizontal_m > 0.5f0 ? delta / horizontal_m : Float32(-Inf)
+    hsq = horizontal_m * horizontal_m
+    # delta = (elev_m − q_elev_m) − hsq·INV_2R_M as a single fma so vendor
+    # fp-contract defaults can't differ on the `(a*b) − c` fold.
+    delta = fma(-hsq, INV_2R_M_F32, elev_m - q_elev_m)
+    return delta, hsq
+end
+
+# slope_a > slope_b, where each slope = num/sqrt(den_sq). Cross-multiplied
+# squared form avoids the in-loop sqrt+div that diverges between Metal's
+# IEEE-precise ops and CUDA's approximate `div.approx.f32` / `sqrt.approx.f32`.
+# Sentinel: (num=-1, den_sq=0) represents -Inf and is strictly less than any
+# slope with den_sq > 0 (handled by the sign-split below).
+@inline function _gpu_gt_slope_sq(an::Float32, ad::Float32,
+                                   bn::Float32, bd::Float32)::Bool
+    a_pos = an >= 0f0
+    b_pos = bn >= 0f0
+    a_pos && !b_pos && return true
+    !a_pos && b_pos && return false
+    lhs = (an * an) * bd
+    rhs = (bn * bn) * ad
+    return a_pos ? (lhs > rhs) : (lhs < rhs)
+end
+
+# num/sqrt(den_sq) >= threshold. Split on threshold sign so we compare
+# squared quantities only when signs agree; opposite signs resolve trivially.
+@inline function _gpu_ge_threshold_sq(num::Float32, den_sq::Float32,
+                                       thr::Float32, thr_sq::Float32)::Bool
+    if thr >= 0f0
+        return (num >= 0f0) && ((num * num) >= thr_sq * den_sq)
+    else
+        num >= 0f0 && return true
+        return (num * num) <= thr_sq * den_sq
+    end
 end
 
 @inline function _gpu_cast_ray(
@@ -73,16 +126,21 @@ end
         query_col::Float32, query_row::Float32,
         q_elev_m::Float32,
         qx::Float32, qy::Float32, qz::Float32,
-        M11::Float32, M12::Float32, M13::Float32,
-        M21::Float32, M22::Float32, M23::Float32,
         M31::Float32, M32::Float32, M33::Float32,
         ray_cos::Float32, ray_sin::Float32,
         observer_km::Float32,
         threshold::Float32,
         max_d_pixels::Float32,
         ldem_s0::Float32, ldem_l0::Float32,
-        R_km::Float32, R_m::Float32)
-    max_slope = Float32(-Inf)
+        R_km::Float32,
+        atan_lut, atan_scale::Float32)
+    # Track the running max slope in (num, den_sq) form so the hot path uses
+    # only *, +, fma, and <. The one sqrt+div (inside the atan LUT) happens
+    # once, after the loop — not once per ray step. Sentinel (-1, 0) encodes
+    # "-Inf slope" and is strictly less than any real (num, den_sq>0) pair.
+    max_num = -1.0f0
+    max_den_sq = 0.0f0
+    threshold_sq = threshold * threshold
     base_step = Float32(0.70710698)
     mipmap_base = Float32(100.0)
     d = 1.0f0
@@ -123,8 +181,9 @@ end
             cell_w = Float32(Int32(1) << lvl)
             half_diag = cell_w * 0.707107f0
             d_near = max(0.5f0, d - half_diag)
-            cmax = _gpu_approx_slope(max_elev_m, d_near, q_elev_m, R_m)
-            if cmax < max_slope
+            cmax_num, cmax_den_sq = _gpu_approx_slope_sq(max_elev_m, d_near, q_elev_m)
+            # cmax < max_slope iff max_slope > cmax — reuse the gt helper.
+            if _gpu_gt_slope_sq(max_num, max_den_sq, cmax_num, cmax_den_sq)
                 d += cell_w
                 skip_to_next = true
             else
@@ -135,9 +194,10 @@ end
                                          min4[mm_row, mm_col]
                 min_elev_m = Float32(mn_v) * 0.5f0
                 d_far = d + half_diag
-                cmin = _gpu_approx_slope(min_elev_m, d_far, q_elev_m, R_m)
-                if cmin >= threshold
-                    max_slope = threshold
+                cmin_num, cmin_den_sq = _gpu_approx_slope_sq(min_elev_m, d_far, q_elev_m)
+                if _gpu_ge_threshold_sq(cmin_num, cmin_den_sq, threshold, threshold_sq)
+                    max_num = threshold
+                    max_den_sq = 1.0f0
                     terminated = true
                 end
             end
@@ -164,33 +224,46 @@ end
                                 fma(w21, e21, w11 * e11)))
                 telev_m = telev_raw * 0.5f0
 
-                # Numerically-stable u-formulation (matches CPU _stereo_to_moonme_f32)
+                # Stereographic projection — zero sqrt, one division per step.
+                # Both `dn = 1 + u²` and `u² - 1` are written as explicit fmas
+                # so neither Metal nor CUDA can decide independently whether to
+                # contract `mul + add` patterns into fma (that contraction is
+                # per-platform and was the dominant drift source after we
+                # cleared the inner-loop sqrt/div).
                 e_km = (cx - ldem_s0) * 0.02f0
                 n_km = (ldem_l0 - cy) * 0.02f0
-                rho = sqrt(fma(n_km, n_km, e_km * e_km))
+                rho2 = fma(n_km, n_km, e_km * e_km)
                 R_total = fma(telev_m, 0.001f0, R_km)
-                u = rho / (2.0f0 * R_km)
-                u2 = u * u
-                dn = 1.0f0 + u2
-                common = R_total / (R_km * dn)
-                tx = common * n_km
-                ty = common * e_km
-                tz = R_total * (u2 - 1.0f0) / dn
+                dn = fma(rho2, INV_4R_KM2_F32, 1.0f0)
+                u2_m1 = fma(rho2, INV_4R_KM2_F32, -1.0f0)
+                inv_dn = 1.0f0 / dn
+                scale = R_total * inv_dn
+                common = scale * INV_R_KM_F32
+                # Fold `tx = common*n_km; dx = tx - qx` into a single explicit
+                # fma so neither Metal nor CUDA can decide independently to
+                # contract the `(a*b) - c` pattern. (LLVM NVPTX and Apple
+                # Air both have `fp-contract=fast` as a common default; a
+                # difference of one fusion here is 1 ULP per ray step —
+                # accumulating to the ~50k-pixel drift we still see.)
+                dx = fma(common, n_km, -qx)
+                dy = fma(common, e_km, -qy)
+                dz = fma(scale,  u2_m1, -qz)
+                # Only compute the radial ENU component (lz). Horizontal
+                # distance² follows from orthonormality of the ENU frame:
+                # |d|² = lx² + ly² + lz², so alen_sq = |d|² − lz². This skips
+                # M11..M23 entirely and halves the M-matrix fma work.
+                lz_geom = fma(M33, dz, fma(M32, dy, M31*dx))
+                lz = lz_geom - observer_km
 
-                dx = tx - qx; dy = ty - qy; dz = tz - qz
-                # Explicit fma so Metal (air.fma.f32) and CUDA (fma.rn.f32)
-                # produce bit-identical single-rounded results. Plain `a*b+c`
-                # lets each vendor's compiler decide contraction independently.
-                lx = fma(M13, dz, fma(M12, dy, M11*dx))
-                ly = fma(M23, dz, fma(M22, dy, M21*dx))
-                lz = fma(M33, dz, fma(M32, dy, M31*dx)) - observer_km
-
-                alen_sq = fma(ly, ly, lx*lx)
+                d_sq = fma(dz, dz, fma(dy, dy, dx * dx))
+                # Explicit fma form of `d_sq - lz_geom²`: single-rounded, so
+                # both vendors compute the same bit pattern.
+                alen_sq = fma(-lz_geom, lz_geom, d_sq)
                 if alen_sq > 0.0f0
-                    slope = lz / sqrt(alen_sq)
-                    if slope > max_slope
-                        max_slope = slope
-                        if slope >= threshold
+                    if _gpu_gt_slope_sq(lz, alen_sq, max_num, max_den_sq)
+                        max_num = lz
+                        max_den_sq = alen_sq
+                        if _gpu_ge_threshold_sq(lz, alen_sq, threshold, threshold_sq)
                             terminated = true
                         end
                     end
@@ -199,7 +272,8 @@ end
             end
         end
     end
-    return max_slope
+    # One-shot conversion back to degrees — the only sqrt+div in this call.
+    return _gpu_slope_to_deg_sq(max_num, max_den_sq, atan_lut, atan_scale)
 end
 
 # ─── Main kernel: one work item per pixel ────────────────────────────────
@@ -217,9 +291,8 @@ end
     ldem_origin_row::Int32, ldem_origin_col::Int32,
     observer_km::Float32,
     ldem_s0::Float32, ldem_l0::Float32,
-    R_km::Float32, R_m::Float32,
-    sun_half_angle_deg::Float32, max_terrain_m::Float32,
-    max_photons::Float32)
+    R_km::Float32,
+    sun_half_angle_deg::Float32, max_terrain_m::Float32)
 
     idx = @index(Global)
     local_row = (idx - Int32(1)) ÷ W
@@ -228,28 +301,31 @@ end
     ldem_col = ldem_origin_col + local_col
     ldem_row = ldem_origin_row + local_row
 
-    # Query pixel 3D + ENU — numerically-stable u=rho/(2R) formulation,
-    # matches CPU `_live_query_setup_f32` byte-exactly.
+    # Query pixel 3D + ENU — sqrt-free, fma-explicit formulation. Only the
+    # ENU row-3 (up) entries are needed because `alen_sq` is computed via
+    # orthonormality inside the ray cast. Note this no longer matches the
+    # CPU `_live_query_setup_f32` byte-for-byte; the CPU version is kept as
+    # the source of truth for `_precompute_azel` and tests.
     qelev_raw = Float32(max0[ldem_row + Int32(1), ldem_col + Int32(1)])
     qelev_m = qelev_raw * 0.5f0
     qe_km = (Float32(ldem_col) - ldem_s0) * 0.02f0
     qn_km = (ldem_l0 - Float32(ldem_row)) * 0.02f0
-    rho_q = sqrt(fma(qn_km, qn_km, qe_km*qe_km))
+    rho2_q = fma(qn_km, qn_km, qe_km * qe_km)
     R_total_q = fma(qelev_m, 0.001f0, R_km)
-    u_q = rho_q / (2.0f0 * R_km)
-    u2_q = u_q * u_q
-    denom_q = 1.0f0 + u2_q
-    qclat = 2.0f0 * u_q / denom_q
-    qslat = (u2_q - 1.0f0) / denom_q
-    qclon = rho_q > 0.0f0 ? qn_km / rho_q : 1.0f0
-    qslon = rho_q > 0.0f0 ? qe_km / rho_q : 0.0f0
-    common_q = R_total_q / (R_km * denom_q)
-    qx = common_q * qn_km
-    qy = common_q * qe_km
-    qz = R_total_q * (u2_q - 1.0f0) / denom_q
-    M11 = qslat*qclon; M12 = qslat*qslon; M13 = -qclat
-    M21 = -qslon;      M22 = qclon;       M23 = 0.0f0
-    M31 = qclat*qclon; M32 = qclat*qslon; M33 = qslat
+    denom_q = fma(rho2_q, INV_4R_KM2_F32, 1.0f0)
+    u2_q_m1 = fma(rho2_q, INV_4R_KM2_F32, -1.0f0)
+    inv_denom_q = 1.0f0 / denom_q
+
+    # Simplified via qclat*qclon = qn/(R·denom), qclat*qslon = qe/(R·denom),
+    # qslat = (u²−1)/denom. All without rho_q or qclon/qslon.
+    factor_M = INV_R_KM_F32 * inv_denom_q
+    M31 = qn_km * factor_M
+    M32 = qe_km * factor_M
+    M33 = u2_q_m1 * inv_denom_q
+
+    qx = R_total_q * M31
+    qy = R_total_q * M32
+    qz = R_total_q * M33
 
     # ── Read 8 precomputed channels (CPU-side; cross-platform bit-exact) ──
     # 1: sun_ray_cos     (sun direction in LDEM-grid frame, unit cos)
@@ -274,12 +350,14 @@ end
     sun_below = sun_top_el_deg <= -10.0f0
     earth_below = earth_el_deg <= -10.0f0
 
-    # Dynamic max ray distance — explicit fma form throughout.
+    # Dynamic max ray distance. Consolidated to one mul + one div (was two
+    # divs + one mul) so vendor-specific `/ const` rounding can't accumulate.
     HARD_CAP = 15000.0f0
+    max_terrain_scaled = max_terrain_m * 0.075f0    # = 1.5 / 20
     sun_max_d = sun_slope_thresh > 0.005f0 ?
-        min(HARD_CAP, max_terrain_m / sun_slope_thresh / 20.0f0 * 1.5f0) : HARD_CAP
+        min(HARD_CAP, max_terrain_scaled / sun_slope_thresh) : HARD_CAP
     dsn_max_d = dsn_slope_thresh > 0.005f0 ?
-        min(HARD_CAP, max_terrain_m / dsn_slope_thresh / 20.0f0 * 1.5f0) : HARD_CAP
+        min(HARD_CAP, max_terrain_scaled / dsn_slope_thresh) : HARD_CAP
 
     # ── Ray direction helpers ────────────────────────────────────────
     # Sun: 4 rays at ±SUN_HALF_ANGLE and ±SUN_HALF_ANGLE/3. Each ray is
@@ -296,102 +374,91 @@ end
         c_k = SUN_RAY_OFFSET_COS[1]; s_k = SUN_RAY_OFFSET_SIN[1]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
-        d_0 = _gpu_slope_to_deg(_gpu_cast_ray(
+        d_0 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[2]; s_k = SUN_RAY_OFFSET_SIN[2]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
-        d_1 = _gpu_slope_to_deg(_gpu_cast_ray(
+        d_1 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[3]; s_k = SUN_RAY_OFFSET_SIN[3]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
-        d_2 = _gpu_slope_to_deg(_gpu_cast_ray(
+        d_2 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[4]; s_k = SUN_RAY_OFFSET_SIN[4]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
-        d_3 = _gpu_slope_to_deg(_gpu_cast_ray(
+        d_3 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[5]; s_k = SUN_RAY_OFFSET_SIN[5]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
-        d_4 = _gpu_slope_to_deg(_gpu_cast_ray(
+        d_4 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[6]; s_k = SUN_RAY_OFFSET_SIN[6]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
-        d_5 = _gpu_slope_to_deg(_gpu_cast_ray(
+        d_5 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[7]; s_k = SUN_RAY_OFFSET_SIN[7]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
-        d_6 = _gpu_slope_to_deg(_gpu_cast_ray(
+        d_6 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[8]; s_k = SUN_RAY_OFFSET_SIN[8]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
         rs = fma( sun_rc_base, s_k, sun_rs_base * c_k)
-        d_7 = _gpu_slope_to_deg(_gpu_cast_ray(
+        d_7 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
+            qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
     end
 
     if !earth_below
-        # Identity-rotation wrapper on DSN ray direction. Mathematically a
-        # no-op (fma(a, 0, b*1) = b), but structurally the call site now
-        # matches the sun call sites (which are explicit fma rotations).
-        # Hypothesis: CUDA's ptxas may specialize inlined ray-cast code
-        # differently based on caller structure. Making DSN look like sun
-        # forces the same specialization. If this changes Metal SHA, the
-        # fma isn't actually being folded to identity (and we learn
-        # something). If it doesn't change Metal SHA but fixes CUDA, we
-        # confirm the specialization hypothesis.
-        rc_dsn = fma(-earth_rs, 0.0f0, earth_rc * 1.0f0)
-        rs_dsn = fma( earth_rc, 0.0f0, earth_rs * 1.0f0)
-        de = _gpu_slope_to_deg(_gpu_cast_ray(
+        de = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
-            rc_dsn, rs_dsn, observer_km, dsn_slope_thresh, dsn_max_d,
-            ldem_s0, ldem_l0, R_km, R_m), atan_lut, atan_scale)
+            qelev_m, qx, qy, qz, M31, M32, M33,
+            earth_rc, earth_rs, observer_km, dsn_slope_thresh, dsn_max_d,
+            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
     end
 
     # ── Sun fraction integration (16 ticks across sun disk, 4 anchors) ──
@@ -439,7 +506,7 @@ end
                 frac -= 1.0f0
             end
         end
-        sun_frac = px / max_photons
+        sun_frac = px * INV_MAX_PHOTONS
     end
 
     # ── DSN over-horizon — single ray, direct difference ─────────────
@@ -539,9 +606,8 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
            Int32(ldem_origin_row), Int32(ldem_origin_col),
            observer_km,
            Float32(LDEM_S0), Float32(LDEM_L0),
-           Float32(R_KM_F64), Float32(R_M_F64),
-           SUN_HALF_ANGLE_DEG, MAX_TERRAIN_M_F32,
-           MAX_PHOTONS;
+           Float32(R_KM_F64),
+           SUN_HALF_ANGLE_DEG, MAX_TERRAIN_M_F32;
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 

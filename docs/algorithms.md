@@ -553,17 +553,30 @@ pixels).
 | 16×16 az/el NN replication | Rectangular stair-step at terminator | Per-pixel az/el |
 | Twilight skip at 0° | Mountain-peak speckle erased | Skip at −10° (worst-case local horizon) |
 
-**Result: 6.4M pixel comparisons, zero bit divergence** across Apple
-Silicon CPU and Metal GPU. The same guarantees extend by construction
-to any IEEE 754 platform with correct `fma` — NVIDIA H100/V100, AMD
-MI250/MI300, ARM server CPUs, x86 CPUs with AVX2+FMA.
-| Sub-pixel at `sun_top_el_deg ≤ 0` dropped mountain-peak speckle | Threshold at `−10°` (derived from worst-case local-horizon depression) |
+**Result (intra-vendor): 6.4M pixel comparisons, zero bit divergence**
+between Apple Silicon CPU and Metal GPU. That established intra-vendor
+determinism on a single machine.
 
-After these fixes, 7 representative 2026 timestamps across 458k × 2
-channels = 6.4M pixel comparisons showed **zero** CPU/GPU divergence.
-Given that H100, V100, CUDA-class GPUs all implement IEEE 754 and a
-correctly-rounded `fma`, the live pipeline output is reproducible bit-
-for-bit across Apple Silicon, x86 CPU, and NVIDIA/AMD GPUs.
+Making the same kernel bit-exact across *different* GPU vendors
+(Metal ↔ CUDA) turned up seven more classes of divergence that the
+CPU↔Metal audit didn't exercise — compiler fp-contract defaults differ
+per vendor, `div.approx.f32` / `sqrt.approx.f32` may replace IEEE
+rounding in the hot loop, LUT-interpolation helpers have the same
+`(a*b) ± c` fusion problem as the outer kernel, and so on. See
+[`cross-vendor-determinism.md`](cross-vendor-determinism.md) for the
+full story (items 8-14), the design patterns that emerged
+(squared-form comparisons, orthonormality, module-const reciprocals,
+explicit fma on `(a*b) ± c` across statements), and the verification
+harness (IEEE-math guard, palette-applied RGB audit, PNG lossless
+roundtrip check).
+
+**🎯 Current verified status: fully closed.** 15 representative 2027
+timestamps × 14 intermediates × 3 backend pairs = **630 SHAs, all
+matching** across Apple Silicon CPU ↔ Metal ↔ NVIDIA CUDA. Every
+stage of the pipeline — kernel raw UInt8 output, palette-applied RGB,
+PNG roundtrip, Float32 diagnostics, and CPU precompute — is byte-exact.
+By construction the same guarantees extend to any IEEE 754 +
+hardware-FMA backend (AMD ROCm, Intel oneAPI, Linux x86 CPU).
 
 ## Deployment: supercomputer batch generation
 
@@ -621,14 +634,24 @@ dense year-scale run at 20m. Everything else points the other way:
 3. **Live is more accurate.** Continuous per-pixel sun position instead
    of 1440-bucket (0.25°) quantization. No binning artifact at the
    terminator. Observer-height changes are free.
-4. **Live is bit-reproducible across heterogeneous hardware.** Apple
-   M-series developer laptop, x86 CPU, NVIDIA H100/V100, AMD MI-series —
-   all produce the identical PNG given identical inputs, because the
-   pipeline uses only IEEE-mandated basic ops plus explicit `fma()`.
-   Take the SHA-256 of an output directory; it's a deterministic
-   function of (DEM, SPICE kernels, git SHA). Precompute required a
-   separate validation step to establish the same property and remains
-   sensitive to horizon-regeneration across hardware changes.
+4. **Live is bit-reproducible across heterogeneous hardware.** 🎯
+   Verified byte-exact output across Apple Silicon CPU ↔ Metal ↔ NVIDIA
+   CUDA at 896×512 × 15 representative timestamps: **630 SHAs across
+   every pipeline stage, 100% match** (kernel raw UInt8, palette-applied
+   RGB, PNG roundtrip, Float32 diagnostics, CPU precompute). The
+   pipeline uses only IEEE-mandated basic ops (`* + − / sqrt fma`),
+   explicit `fma()` on every mul-add / mul-sub pattern (including
+   across connected statements and inside every LUT helper — see the
+   cross-vendor doc), squared-form comparisons to eliminate in-loop
+   sqrt+div, orthonormality tricks to skip matrix rows, and LUT-based
+   transcendentals. An IEEE-math guard runs before every frame and
+   hard-aborts on any `fma`/`/`/`sqrt` bit-pattern drift. By construction
+   the same guarantees extend to any IEEE 754 + hardware-FMA backend
+   (AMD MI-series, Intel oneAPI, ARM/x86 CPU). Take the SHA-256 of an
+   output directory; it's a deterministic function of (DEM, SPICE
+   kernels, git SHA). Precompute required a separate validation step to
+   establish the same property and remains sensitive to horizon-
+   regeneration across hardware changes.
 5. **Supercomputer access collapses the throughput gap.** Timestep
    parallelism is embarrassingly parallel — no inter-GPU communication,
    dynamic work queue handles the 3× cost variance between night and
