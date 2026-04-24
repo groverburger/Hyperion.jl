@@ -31,18 +31,34 @@ first — it establishes the foundation this extends.
 
 ## Verification protocol
 
-Catching cross-vendor drift requires a test that exercises the full code
-path at realistic scale and hashes the raw output. Small smoke tests
-(128×128) miss drift that only manifests at full frame scale because
-different pixel content triggers different code paths and rounding
-pileups.
+The canonical regression check is **`] test` / `julia --project -e 'using Pkg; Pkg.test()'`**.
+It runs `test/bitexact.jl` on the KernelAbstractions CPU backend, which
+(a) runs the IEEE-math guard, (b) computes every stage of the pipeline
+for 20 representative timestamps, (c) asserts every SHA matches a
+hardcoded known-good table, and (d) decodes the 40 committed PNG
+fixtures and verifies pixel equality against the kernel's palette-applied
+RGB output. A regression fails the test and points at specific
+timestamps you can then visually diff via the reference PNG.
+
+Runtime on CPU backend: ~10-15 min for the 20-timestamp regression.
+
+For cross-vendor audits (actual Metal or CUDA hardware) and for
+regenerating baselines after an intentional algorithm change,
+`scripts/bitexact_test.jl` is the forensic harness. It produces the
+same 20-timestamp SHA table the test checks against, plus raw .bin
+buffers for byte-level diffing via `diff_bitexact_shas.jl` /
+`diff_bitexact_pixels.jl`. To refresh committed baselines after a
+deliberate change: run on every backend, confirm cross-vendor match,
+copy `data/outputs/bitexact/metal/<ts>/{sun,dsn}.png` to
+`test/fixtures/bitexact/<ts>_{sun,dsn}.png`, and update the
+`KNOWN_GOOD` table in `test/bitexact.jl`.
 
 The harness spans three parts: an IEEE-math guard, SHA/raw-buffer
 production, and N-way pairwise diffing.
 
 ### IEEE-math guard
 
-Before any frames are generated, `big_smoke_test.jl` runs a tiny kernel
+Before any frames are generated, `bitexact_test.jl` runs a tiny kernel
 on the target backend that computes three known-tricky operations and
 compares bit patterns against hard-coded IEEE-rn expectations:
 
@@ -59,7 +75,7 @@ so a broken host doesn't mask a broken backend.
 
 ### Production + cross-vendor shuttle
 
-1. **`scripts/big_smoke_test.jl`** runs 15 representative timestamps
+1. **`scripts/bitexact_test.jl`** runs 20 representative timestamps
    spread across 2027 × full 896×512 frames: night (full-frame
    twilight-skip), twilight (terminator crossing the frame, hardest case
    for bit-exactness), high-sun (long rays), plus a dozen more spread by
@@ -74,7 +90,7 @@ so a broken host doesn't mask a broken backend.
    - **`de`, `d_0..d_7`, `azel`** — Float32 diagnostic buffers for
      debugging.
 
-   Plus raw `.bin` buffers to `data/outputs/big_smoke/<backend>/<tag>/`
+   Plus raw `.bin` buffers to `data/outputs/bitexact/<backend>/<tag>/`
    for offline pixel-level diff. Toolchain triplet (julia, platform,
    KernelAbstractions, backend pkg) is recorded in the SHAs.txt header
    for regression localization.
@@ -90,21 +106,21 @@ so a broken host doesn't mask a broken backend.
    metadata chunks) are not vendor-stable — but PNG is lossless, so
    decoded content equals `sun_rgb` / `dsn_rgb` on any platform that
    reads the file.
-2. Run on all three backends: `julia --project scripts/big_smoke_test.jl`
+2. Run on all three backends: `julia --project scripts/bitexact_test.jl`
    with `JM_BACKEND ∈ {metal, cuda, cpu}`. Metal and cpu run on Mac;
-   cuda runs on Windows via **`./big_verify_windows.ps1`**. A removable
-   drive shuttles outputs between the two machines.
+   cuda runs on Windows (plug the drive in, `JM_BACKEND=cuda julia
+   --project scripts/bitexact_test.jl`). A removable drive shuttles
+   outputs between the two machines.
 
 ### N-way comparison
 
-3. **`scripts/diff_big_smoke_shas.jl`** — auto-discovers every backend
-   present in `data/outputs/big_smoke/`, echoes each toolchain header
+3. **`scripts/diff_bitexact_shas.jl`** — auto-discovers every backend
+   present in `data/outputs/bitexact/`, echoes each toolchain header
    (so a regression can be pinned to a specific version bump), then
    reports all-pairs MATCH/DIFFER per intermediate per timestamp. For
    three backends that's three pairs (cpu↔metal, cpu↔cuda, metal↔cuda)
-   × 15 timestamps × 11 intermediates = 495 comparisons per backend
-   pair.
-4. **`scripts/diff_big_smoke_pixels.jl`** — for each pair of backends
+   × 20 timestamps × 14 intermediates = 840 comparisons total.
+4. **`scripts/diff_bitexact_pixels.jl`** — for each pair of backends
    with UInt8 buffers on disk, per-timestamp diff stats: count of
    differing pixels, min / median / mean / max |Δ|. Essential for
    distinguishing three different fix paths: *bit-exact*, *isolated
@@ -441,7 +457,7 @@ log2(x))` with a comparison ladder. See algorithms.md #3.
 in the hot path. See algorithms.md #4.
 
 **Test at realistic scale.** 128×128 smoke tests miss drift that only
-manifests at full 896×512. `big_smoke_test.jl` exercises the full code
+manifests at full 896×512. `bitexact_test.jl` exercises the full code
 path with representative timestamps.
 
 **Hash the raw buffers, diff the hashes.** SHA-256 on raw `.bin` output
@@ -488,20 +504,29 @@ After algorithms.md §§ 1-7 and this doc §§ 8-14, verified on:
 
 ### Final verification ledger
 
-- **SHA level**: 15 timestamps × 14 intermediates = 210 SHAs per backend
-  pair × 3 pairs = **630 SHAs, 100% match**. A single bit of drift
-  anywhere would surface as at least one differing SHA.
-- **Raw-buffer pixel level**: 15 timestamps × (sun, dsn, sun_rgb, dsn_rgb)
-  × 3 pairs = **180 buffer comparisons, all BIT-EXACT** on both byte
-  count and |Δ|.
+- **`] test` regression**: `test/bitexact.jl` runs 20 representative
+  timestamps × 14 intermediates + 2 PNG fixture pixel checks each =
+  **320 assertions per run** on the KA CPU backend. CPU ↔ Metal
+  baseline empirically bit-exact at this full 20-timestamp scope;
+  cross-vendor match to CUDA extends by construction (no kernel math
+  changed between the 3-way verification below and the timestamp
+  expansion).
+- **Initial cross-vendor closure**: 15 timestamps × 14 intermediates
+  × 3 pairs (cpu ↔ metal ↔ cuda) = **630 SHAs, 100% match** — the
+  snapshot that proved the `(a*b) ± c` fma-fusion fixes of §§ 5, 8,
+  and 14 held across Apple and NVIDIA. A single bit of drift anywhere
+  would have surfaced as at least one differing SHA.
+- **Raw-buffer pixel level** at the same 15-timestamp scope: × (sun,
+  dsn, sun_rgb, dsn_rgb) × 3 pairs = **180 buffer comparisons, all
+  BIT-EXACT** on both byte count and |Δ|.
 - **IEEE-math guard**: PASSED on all three backends before every run.
   Hard-aborts if `fma(1+2⁻¹², 1+2⁻¹², -1)` ≠ `0x3a000400`, or if
   `1/3` ≠ `0x3eaaaaab`, or if `√2` ≠ `0x3fb504f3` — the specific
   bit patterns that distinguish IEEE-rn from fast-math / approx
   implementations.
-- **PNG roundtrip lossless**: `save_indexed_png` → `FileIO.load` preserves
-  `*_rgb` bytes on every backend; any encoder regression fails loudly
-  per-run.
+- **PNG roundtrip lossless**: `save_indexed_png` → `FileIO.load`
+  preserves `*_rgb` bytes on every backend; any encoder regression
+  fails loudly per-run.
 - **Toolchain pinned in each SHAs.txt header**: julia 1.11.5,
   KernelAbstractions 0.9.41, Metal 1.9.3, CUDA 5.9.0; platforms
   `arm64-apple-darwin24.0.0` (Mac) and `x86_64-w64-mingw32` (Windows).
@@ -514,7 +539,7 @@ By construction the same guarantees extend to any IEEE 754 +
 hardware-FMA backend — AMD ROCm, Intel oneAPI, Linux x86 CPU — since
 the kernel now uses only IEEE-mandated ops (`* + − / sqrt fma`) plus
 LUT-based transcendentals (atan2, cos/sin) built from those same ops.
-The `big_smoke_test.jl` IEEE-math guard (§ 9, § 12) runs on any
+The `bitexact_test.jl` IEEE-math guard (§ 9, § 12) runs on any
 backend before emitting SHAs, so a broken backend fails loudly rather
 than silently.
 

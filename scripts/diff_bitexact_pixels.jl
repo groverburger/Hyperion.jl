@@ -1,12 +1,12 @@
 #!/usr/bin/env julia
-# Per-timestamp pixel-level diff of big_smoke sun/dsn UInt8 outputs across
-# every backend directory present in data/outputs/big_smoke/ (cpu, metal,
+# Per-timestamp pixel-level diff of bitexact sun/dsn UInt8 outputs across
+# every backend directory present in data/outputs/bitexact/ (cpu, metal,
 # cuda). Prints all pairs so three-way bit-exactness can be read at a
 # glance.
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Printf, Statistics
 
-const BASE = joinpath(dirname(@__DIR__), "data", "outputs", "big_smoke")
+const BASE = joinpath(dirname(@__DIR__), "data", "outputs", "bitexact")
 H, W = 512, 896
 
 load_u8(path) = reshape(read(path), (H, W))

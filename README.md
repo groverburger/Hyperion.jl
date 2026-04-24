@@ -41,38 +41,30 @@ julia -e 'using Pkg; Pkg.add("AMDGPU")'
 
 ## Usage
 
-Scripts in `scripts/` have a backend selection block at the top —
-uncomment the one matching your hardware. Example:
+To verify bit-exactness end-to-end, run the tests:
 
 ```
-# scripts/smoke_test_gpu_live.jl
-using Metal
-const BACKEND    = Metal.MetalBackend()
-const DEVICE_ARR = Metal.MtlArray
+julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-For NVIDIA, comment that out and use:
+This runs `test/bitexact.jl`, which exercises the full pipeline on the
+KA CPU backend at 20 representative timestamps (full 896×512 each) and
+verifies:
+- SHA-256 of every intermediate (sun, dsn, palette-applied RGB,
+  Float32 diagnostics, azel precompute) against a hardcoded known-good
+  table, and
+- pixel equality of the decoded PNG against 40 committed reference
+  fixtures in `test/fixtures/bitexact/`.
+
+Runtime: ~10-15 minutes. The same invariants hold bit-for-bit on
+Apple Metal and NVIDIA CUDA — see
+[`docs/cross-vendor-determinism.md`](docs/cross-vendor-determinism.md).
+
+For a cross-vendor forensic audit (actual Metal or CUDA hardware +
+raw .bin buffers), use `scripts/bitexact_test.jl`:
 
 ```
-using CUDA
-const BACKEND    = CUDA.CUDABackend()
-const DEVICE_ARR = CUDA.CuArray
-```
-
-Then run:
-
-```
-julia --project scripts/smoke_test_gpu_live.jl
-```
-
-The smoke test prints the SHA-256 of a single 128×128 frame. **You
-should see the same SHAs on every backend** — that's how you verify
-bit-exactness.
-
-Known-good SHAs (2026-01-01T00:00:00, origin 9000,18600, 128×128):
-```
-sun: a7c71255cd8845b7238cbb0d4f02e44b09b6ab2ee05933d450fd41abbbc2f4fb
-dsn: 215894806c716a15949a243ee1a83fb31f32376fe8e5d90b6eb964144073fa93
+JM_BACKEND=metal julia --project scripts/bitexact_test.jl   # or cuda / cpu
 ```
 
 ## Library API
@@ -104,7 +96,10 @@ save_indexed_png(dsn, DSN_PALETTE, "dsn.png")
 
 ## Scripts
 
-- `scripts/smoke_test_gpu_live.jl` — single-frame bit-exactness check
+- `scripts/bitexact_test.jl` — cross-vendor forensic harness: 20
+  timestamps × full 896×512 × backend-of-your-choice, SHAs + raw .bin
+  buffers + PNGs. Pair with `scripts/diff_bitexact_{shas,pixels}.jl`
+  for N-way pairwise comparison across `data/outputs/bitexact/`.
 - `scripts/bench_workgroup.jl` — sweep workgroup sizes {128, 256, 512}
 - `scripts/generate_live_year.jl` — full year (2h cadence) with per-ts
   timing and SSIM vs an optional precomputed reference directory
@@ -119,6 +114,9 @@ julia --project -e 'using Pkg; Pkg.test()'
 ```
 
 Covers deterministic-math LUTs, Float32 stereographic projection,
-mipmap pyramid shape. GPU byte-exactness is tested via
-`scripts/smoke_test_gpu_live.jl` (since the GPU backend is caller-
-supplied, not built into the package).
+mipmap pyramid shape, and — the canonical cross-platform regression —
+20-timestamp bit-exactness check on the KA CPU backend, including
+SHA-256 of all intermediates + pixel-exact comparison against 40
+committed PNG fixtures. See
+[`docs/cross-vendor-determinism.md`](docs/cross-vendor-determinism.md)
+for the theory and verification protocol.

@@ -575,7 +575,10 @@ timestamps × 14 intermediates × 3 backend pairs = **630 SHAs, all
 matching** across Apple Silicon CPU ↔ Metal ↔ NVIDIA CUDA. Every
 stage of the pipeline — kernel raw UInt8 output, palette-applied RGB,
 PNG roundtrip, Float32 diagnostics, and CPU precompute — is byte-exact.
-By construction the same guarantees extend to any IEEE 754 +
+The regression check is now wired into `] test` (`test/bitexact.jl`,
+20-timestamp scope on the KA CPU backend, ~10-15 min; compares SHAs
+against a hardcoded known-good table and decoded PNG fixtures pixel-for-
+pixel). By construction the same guarantees extend to any IEEE 754 +
 hardware-FMA backend (AMD ROCm, Intel oneAPI, Linux x86 CPU).
 
 ## Deployment: supercomputer batch generation

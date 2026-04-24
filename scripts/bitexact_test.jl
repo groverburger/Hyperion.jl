@@ -1,9 +1,21 @@
 #!/usr/bin/env julia
-# Full-scale bit-exactness audit: 896×512 frame × 3 representative timestamps.
-# Dumps per-timestamp SHAs for sun, dsn, de, d_0..d_7, and azel, plus raw
-# .bin buffers for offline cross-platform diff.
+# Cross-vendor bit-exactness forensic harness. 896×512 frame × 20
+# representative timestamps × any backend (metal | cuda | cpu via
+# JM_BACKEND). Runs the IEEE-math guard first (hard-aborts on any
+# fma/div/sqrt bit-pattern drift), emits per-timestamp SHAs for every
+# stage (sun, dsn, sun_rgb, dsn_rgb, de, d_0..d_7, azel), writes PNGs,
+# and dumps raw .bin buffers for offline pairwise diff.
 #
-# Pick backend via JM_BACKEND env var (same as scripts/smoke_test_gpu_live.jl).
+# Relationship to the test suite: `] test` runs test/bitexact.jl on the
+# CPU backend, checking the same 20-timestamp invariants against a
+# hardcoded SHA table + committed PNG fixtures. That test is the
+# canonical regression check. This script exists for:
+#   - generating fresh baselines after an intentional algorithm change
+#     (run on every backend, diff with scripts/diff_bitexact_shas.jl,
+#     then refresh test/fixtures/ + test/bitexact.jl's KNOWN_GOOD),
+#   - cross-vendor forensic audits with an actual Metal or CUDA GPU,
+#   - full-depth inspection via raw .bin buffers (test/bitexact.jl
+#     only loads PNG fixtures, not raw floats).
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Dates, Printf, SHA
 using KernelAbstractions: KernelAbstractions, @kernel, @index, synchronize
@@ -92,7 +104,7 @@ end
 _verify_math_semantics(BACKEND, DEVICE_ARR)
 
 const REPO    = dirname(@__DIR__)
-const OUT     = joinpath(REPO, "data", "outputs", "big_smoke", BACKEND_NAME)
+const OUT     = joinpath(REPO, "data", "outputs", "bitexact", BACKEND_NAME)
 const KERNELS = joinpath(REPO, "kernels")
 mkpath(OUT)
 
@@ -104,26 +116,31 @@ max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
 origin_r, origin_c = 8960, 18432
 H, W = 512, 896
 
-# Representative timestamps spanning a full lunar year at Nobile. Mix of
-# night (sun_below skips most pixels), twilight (terminator crosses the
-# frame — hardest case for bit-exactness since shadow boundaries are
-# rounding-sensitive), and high-sun (long rays exercise the full depth of
-# the hierarchical cast). Spread by month + hour so we exercise varied
-# sun/earth azimuths and elevations.
+# 20 representative timestamps spanning a full lunar year at Nobile. Mix
+# of night (sun_below skips most pixels), twilight (terminator crosses
+# the frame — hardest case for bit-exactness since shadow boundaries are
+# rounding-sensitive), and high-sun (long rays exercise the full depth
+# of the hierarchical cast). Spread across every month × varied hours to
+# exercise many sun/earth azimuths and elevations.
 test_dts = [
     DateTime(2027,  1,  5,  0,  0, 0),
+    DateTime(2027,  1, 22,  7,  0, 0),
     DateTime(2027,  2, 12, 12,  0, 0),
+    DateTime(2027,  2, 28,  4,  0, 0),
     DateTime(2027,  3, 20,  6,  0, 0),
     DateTime(2027,  4,  8, 18,  0, 0),
     DateTime(2027,  5, 15,  0,  0, 0),
+    DateTime(2027,  5, 24, 19,  0, 0),
     DateTime(2027,  6,  1,  0,  0, 0),   # original: night
     DateTime(2027,  6, 21, 12,  0, 0),
     DateTime(2027,  6, 23,  0,  0, 0),   # original: twilight
     DateTime(2027,  7,  4,  3,  0, 0),
     DateTime(2027,  7, 16,  8,  0, 0),   # original: high-sun
+    DateTime(2027,  8,  5, 11,  0, 0),
     DateTime(2027,  8, 20, 15,  0, 0),
     DateTime(2027,  9, 10,  0,  0, 0),
     DateTime(2027, 10,  5, 21,  0, 0),
+    DateTime(2027, 10, 27, 14,  0, 0),
     DateTime(2027, 11, 11, 12,  0, 0),
     DateTime(2027, 12, 21,  0,  0, 0),
 ]
@@ -163,7 +180,7 @@ sha_path = joinpath(OUT, "SHAs.txt")
 sha_io = open(sha_path, "w")
 # Record full (julia, platform, backend-package) version triplet alongside
 # the SHAs so a regression can be localized to a toolchain change. These
-# strings are printed to SHAs.txt as comments; diff_big_smoke_shas.jl
+# strings are printed to SHAs.txt as comments; diff_bitexact_shas.jl
 # echoes them back so a 3-way diff can flag toolchain drift.
 backend_pkg_version = if BACKEND_NAME == "metal"
     "Metal=$(pkgversion(Metal))"
@@ -173,7 +190,7 @@ else
     "(host KernelAbstractions only)"
 end
 
-println(sha_io, "# big_smoke_test — cross-platform bit-exactness audit")
+println(sha_io, "# bitexact_test — cross-platform bit-exactness audit")
 println(sha_io, "# backend=$(BACKEND_NAME)")
 println(sha_io, "# julia=$(VERSION)")
 println(sha_io, "# platform=$(Sys.MACHINE)")

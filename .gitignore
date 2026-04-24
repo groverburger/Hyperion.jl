@@ -1,12 +1,9 @@
 __pycache__/
 Manifest.toml
 ._*
+.claude/
 
 # Test data — fetched via scripts/fetch_test_data.jl, not stored in git
 data/inputs/
 data/outputs/
 # data/reference/ IS tracked (pinned test fixtures)
-
-# Local-only scripts: Windows verification harnesses (untracked by design)
-verify_windows.ps1
-big_verify_windows.ps1

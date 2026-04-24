@@ -1,12 +1,12 @@
 #!/usr/bin/env julia
 # Compare SHAs.txt across every backend directory present in
-# data/outputs/big_smoke/ (metal/, cuda/, cpu/). Prints the toolchain
+# data/outputs/bitexact/ (metal/, cuda/, cpu/). Prints the toolchain
 # triplet per backend (so regressions can be localized to a version bump)
 # then an all-pairs MATCH / DIFFER report.
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Printf
 
-const BASE = joinpath(dirname(@__DIR__), "data", "outputs", "big_smoke")
+const BASE = joinpath(dirname(@__DIR__), "data", "outputs", "bitexact")
 
 "Parse a SHAs.txt file into (header_lines, Vector{(section, Dict(key => sha))})."
 function parse_shas(path)
@@ -38,7 +38,7 @@ end
 
 if length(backends) < 2
     error("Need at least two backends with SHAs.txt under $BASE. " *
-          "Found: $backends. Run big_smoke_test.jl with JM_BACKEND={cpu,metal,cuda}.")
+          "Found: $backends. Run bitexact_test.jl with JM_BACKEND={cpu,metal,cuda}.")
 end
 
 parsed = Dict(b => parse_shas(joinpath(BASE, b, "SHAs.txt")) for b in backends)

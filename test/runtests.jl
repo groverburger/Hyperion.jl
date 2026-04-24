@@ -94,5 +94,13 @@ else
     @warn "LDEM not found at $LDEM_PATH — skipping mipmap + projection tests that need it"
 end
 
-# Note: GPU byte-exactness is tested via scripts/smoke_test_gpu_live.jl
-# (pick a backend at top of script; prints SHA-256 of the output).
+# ─── Cross-platform bit-exactness regression ──────────────────────────────
+# The canonical verification that the full live-shadow pipeline produces
+# byte-identical output across Apple CPU / Metal / NVIDIA CUDA. See the
+# included file for the 20-timestamp SHA table + PNG fixture details.
+
+if HAS_LDEM
+    include("bitexact.jl")
+else
+    @warn "LDEM not found at $LDEM_PATH — skipping cross-platform bit-exactness test"
+end
