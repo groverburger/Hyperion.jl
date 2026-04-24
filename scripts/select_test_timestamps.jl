@@ -6,11 +6,11 @@ using Pkg; Pkg.activate(dirname(@__DIR__))
 using Dates, Printf
 import JuliaMapbuilder as JM
 
-const DATA = joinpath(dirname(@__DIR__), "data", "inputs")
 const KERNELS = joinpath(dirname(@__DIR__), "kernels")
 
 @info "Loading"
-dem = JM.load_shadow_dem(joinpath(DATA, "nobile_20m.tif"))
+_, nobile_path = JM.ensure_test_data!()
+dem = JM.load_shadow_dem(nobile_path)
 H, W = dem.H, dem.W
 mr, mc = H ÷ 2 + 1, W ÷ 2 + 1
 

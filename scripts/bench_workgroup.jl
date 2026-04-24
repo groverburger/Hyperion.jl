@@ -13,7 +13,7 @@ const DEVICE_ARR = Metal.MtlArray
 # const BACKEND    = CUDA.CUDABackend()
 # const DEVICE_ARR = CUDA.CuArray
 
-ldem = JM.load_ldem(joinpath(dirname(@__DIR__), "data", "inputs", "ldem_80s_20m.img"))
+ldem = JM.load_ldem(JM.ensure_ldem!())
 JM.init_spice(joinpath(dirname(@__DIR__), "kernels"))
 max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
 

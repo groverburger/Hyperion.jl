@@ -15,18 +15,37 @@ directory is a deterministic function of (DEM, SPICE kernels, git SHA).
 
 ## Install
 
-Library deps are backend-agnostic (no Metal / CUDA in `Project.toml`):
+Library deps are backend-agnostic (no Metal / CUDA in `Project.toml`).
+Fresh clone to running tests is three commands:
 
 ```
 git clone …
 cd JuliaMapbuilder
 git checkout live-only
 julia --project -e 'using Pkg; Pkg.instantiate()'
+julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-Then add the backend that matches your hardware to your **global**
-Julia env (`@v1.x`). `using Metal` / `using CUDA` will find it from
-there without polluting this project's Project.toml.
+The test command auto-downloads the 1.85 GB LDEM from the PDS on the
+first run (SHA-verified), then runs the full 20-timestamp bit-exactness
+regression. Subsequent test runs are a no-op on the data — no re-download.
+
+If you want to pre-seed the data without running tests yet (or to also
+derive the Nobile GTiff used by diagnostic scripts):
+
+```
+julia --project scripts/fetch_test_data.jl
+```
+
+Both paths call the same `JuliaMapbuilder.ensure_ldem!()` /
+`ensure_test_data!()` functions, so they're safe to mix.
+
+### GPU backends (optional)
+
+The CPU KernelAbstractions backend works out of the box. For GPU runs,
+add the matching backend to your **global** Julia env (`@v1.x`) so
+`using Metal` / `using CUDA` resolves without polluting this project's
+Project.toml:
 
 ```
 # Apple Silicon

@@ -4,13 +4,22 @@ const JM = JuliaMapbuilder
 import SHA
 using Dates
 
-# ─── Test data discovery ───────────────────────────────────────────────────
+# ─── Test-data provisioning (auto-fetch on first run) ─────────────────────
 
 const PROJECT_ROOT = dirname(@__DIR__)
-const DATA_DIR     = joinpath(PROJECT_ROOT, "data", "inputs")
-const LDEM_PATH    = joinpath(DATA_DIR, "ldem_80s_20m.img")
 
-const HAS_LDEM = isfile(LDEM_PATH)
+# Idempotently ensure the LDEM is present and SHA-verified. First run
+# downloads ~1.85 GB from PDS (with progress output); subsequent runs are
+# a no-op. If the machine has no network, LDEM-dependent test sets are
+# skipped and the quick unit tests still run.
+const LDEM_PATH = try
+    JM.ensure_ldem!()
+catch e
+    @warn "Could not provision LDEM — LDEM-dependent tests will be skipped. " *
+          "To retry manually: `julia --project scripts/fetch_test_data.jl`." exception=e
+    ""
+end
+const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
 
 function sha256_bytes(v::AbstractArray)
     bytes2hex(SHA.sha256(collect(reinterpret(UInt8, vec(v)))))
@@ -91,7 +100,7 @@ if HAS_LDEM
         @test maximum(max_mm[1]) == maximum(max_mm[end])
     end
 else
-    @warn "LDEM not found at $LDEM_PATH — skipping mipmap + projection tests that need it"
+    @warn "LDEM not available — skipping mipmap + projection tests that need it"
 end
 
 # ─── Cross-platform bit-exactness regression ──────────────────────────────
@@ -102,5 +111,5 @@ end
 if HAS_LDEM
     include("bitexact.jl")
 else
-    @warn "LDEM not found at $LDEM_PATH — skipping cross-platform bit-exactness test"
+    @warn "LDEM not available — skipping cross-platform bit-exactness test"
 end

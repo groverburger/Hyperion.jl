@@ -9,6 +9,7 @@ include("deterministic_math.jl")
 include("io.jl")
 include("live_helpers.jl")     # CPU helpers used to fill GPU buffers
 include("gpu_live.jl")          # the one and only GPU kernel + driver
+include("test_data.jl")         # idempotent LDEM fetch + SHA verify
 
 function __init__()
     if !verify_lut_integrity()

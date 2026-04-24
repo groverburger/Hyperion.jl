@@ -26,7 +26,7 @@ mkpath(joinpath(OUT_ROOT, "dsn_000"))
 
 # ─── Setup ────────────────────────────────────────────────────────────────
 @info "Loading LDEM + SPICE"
-ldem = JM.load_ldem(joinpath(DATA, "ldem_80s_20m.img"))
+ldem = JM.load_ldem(JM.ensure_ldem!())
 JM.init_spice(KERNELS)
 
 @info "Building mipmap pyramids"

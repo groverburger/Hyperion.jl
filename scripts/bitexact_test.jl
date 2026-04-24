@@ -109,7 +109,7 @@ const KERNELS = joinpath(REPO, "kernels")
 mkpath(OUT)
 
 @info "Loading"
-ldem = JM.load_ldem(joinpath(REPO, "data", "inputs", "ldem_80s_20m.img"))
+ldem = JM.load_ldem(JM.ensure_ldem!())
 JM.init_spice(KERNELS)
 max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
 
