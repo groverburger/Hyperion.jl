@@ -6,4 +6,6 @@ Manifest.toml
 # Test data — fetched via scripts/fetch_test_data.jl, not stored in git
 data/inputs/
 data/outputs/
-# data/reference/ IS tracked (pinned test fixtures)
+
+# Local-only working copy of data/, untracked by design.
+_data/
