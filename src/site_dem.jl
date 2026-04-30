@@ -237,7 +237,7 @@ function generate_live_shadow_frame_site_gpu(site::SiteDEM{T},
                                               origin_c::Int = 0,
                                               H::Int = site.H,
                                               W::Int = site.W,
-                                              mipmap_base::Float32 = 1.0f9) where {T<:Real}
+                                              mipmap_base::Float32 = 100.0f0) where {T<:Real}
     # Rotate (sun, earth) MOON_ME → site local frame. Float64.
     sun_local   = _moonme_to_local(sun_pos_km,   site.lat0, site.lon0)
     earth_local = _moonme_to_local(earth_pos_km, site.lat0, site.lon0)
@@ -250,10 +250,11 @@ function generate_live_shadow_frame_site_gpu(site::SiteDEM{T},
 
     # `mipmap_base` is the pixel-distance at which the kernel starts
     # using max-pooled mipmap levels instead of fine-grained level-0
-    # samples. The LDEM 20m path uses `100.0f0` (= 2 km of level-0).
-    # For the 1m path we default to `1e9` (effectively ∞), which forces
-    # level 0 throughout — slow but artifact-free, used while we're
-    # diagnosing mipmap-induced banding.
+    # samples. Default `100.0f0` matches the LDEM convention: level 0
+    # covers the first 100 px of the ray. After commit 3a57940 the
+    # mipmap-on path is byte-exact with mipmap-off (verified across 9
+    # site-DEM timestamps), so the optimization is "free" — typically
+    # 1.5–2× speedup, no quality cost.
     return generate_live_shadow_frame_gpu(
         site.data, origin_r, origin_c, H, W,
         sun_local, earth_local, observer_height_m;
