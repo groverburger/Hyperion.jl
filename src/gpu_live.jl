@@ -262,8 +262,11 @@ end
                 # metres, not at lunar radius), so Float32 precision is
                 # in metres rather than at lunar radius:
                 #   (qR_total − R_total) = (qelev − telev) · 0.001
-                sample_pos = scale * two_u2
-                dz = (q_elev_m - telev_m) * 0.001f0 + (sample_pos - qz_pos)
+                # Both `(a*b) ± c` patterns are wrapped in explicit `fma`
+                # (rules 5/8/14) so neither Metal nor CUDA can fuse one
+                # but not the other.
+                sample_minus_qz = fma(scale, two_u2, -qz_pos)
+                dz = fma(q_elev_m - telev_m, 0.001f0, sample_minus_qz)
                 # Only compute the radial ENU component (lz). Horizontal
                 # distance² follows from orthonormality of the ENU frame:
                 # |d|² = lx² + ly² + lz², so alen_sq = |d|² − lz². This skips
