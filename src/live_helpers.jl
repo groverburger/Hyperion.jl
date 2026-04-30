@@ -129,15 +129,25 @@ end
 # the ρ² contribution when 4R² ≈ 1.2e13 and ρ² ≈ 1e10). Reformulated in
 # the tan-half-angle variable u = ρ/(2R) which is ~0.05 near Nobile, so
 # 1 ± u² stays near 1 with full Float32 precision.
+#
+# All projection helpers take `(s0, l0, pixel_size_km)` so the same math
+# serves both the 20m LDEM and a 1m site DEM resampled into the same
+# south-polar projection (just at finer pixel size + a shifted s0, l0
+# expressed in the finer pixel grid). Existing 20m callers pass
+# `(LDEM_S0_F32, LDEM_L0_F32, 0.02f0)` — those are the same Float32 bit
+# patterns as the previous hardcoded literals, so the existing
+# cross-platform bit-exact regression is preserved.
 
 """
-    _stereo_to_moonme_f32(cx, cy, elev_m) -> (X, Y, Z) in km
+    _stereo_to_moonme_f32(cx, cy, elev_m, s0, l0, pixel_size_km) -> (X, Y, Z) in km
 
-Float32 polar-stereographic pixel → MOON_ME cartesian.
+Float32 polar-stereographic pixel → MOON_ME cartesian. Parameterized by
+the projection origin (s0, l0) in pixel coords and the pixel size.
 """
-@inline function _stereo_to_moonme_f32(cx::Float32, cy::Float32, elev_m::Float32)
-    e_km = (cx - LDEM_S0_F32) * 0.02f0
-    n_km = (LDEM_L0_F32 - cy) * 0.02f0
+@inline function _stereo_to_moonme_f32(cx::Float32, cy::Float32, elev_m::Float32,
+                                       s0::Float32, l0::Float32, pixel_size_km::Float32)
+    e_km = (cx - s0) * pixel_size_km
+    n_km = (l0 - cy) * pixel_size_km
     # fma (not muladd) so ARM and x86 Julia backends both emit hardware FMA
     # rather than letting LLVM's heuristic decide per-target.
     rho = sqrt(fma(n_km, n_km, e_km * e_km))
@@ -152,15 +162,22 @@ Float32 polar-stereographic pixel → MOON_ME cartesian.
     (X, Y, Z)
 end
 
+# LDEM convenience wrapper — keeps the original 3-arg signature usable
+# from tests/scripts that don't care about parameterization.
+@inline _stereo_to_moonme_f32(cx::Float32, cy::Float32, elev_m::Float32) =
+    _stereo_to_moonme_f32(cx, cy, elev_m, LDEM_S0_F32, LDEM_L0_F32, 0.02f0)
+
 """
-    _live_query_setup_f32(cx, cy, elev_m) ->
+    _live_query_setup_f32(cx, cy, elev_m, s0, l0, pixel_size_km) ->
         (qx, qy, qz, M11..M33, rho_km, qn_km, qe_km)
 
-Query-pixel Float32 3D position + ENU rotation matrix.
+Query-pixel Float32 3D position + ENU rotation matrix. Parameterized by
+the projection origin (s0, l0) in pixel coords and the pixel size.
 """
-@inline function _live_query_setup_f32(cx::Float32, cy::Float32, elev_m::Float32)
-    qe_km = (cx - LDEM_S0_F32) * 0.02f0
-    qn_km = (LDEM_L0_F32 - cy) * 0.02f0
+@inline function _live_query_setup_f32(cx::Float32, cy::Float32, elev_m::Float32,
+                                       s0::Float32, l0::Float32, pixel_size_km::Float32)
+    qe_km = (cx - s0) * pixel_size_km
+    qn_km = (l0 - cy) * pixel_size_km
     rho = sqrt(fma(qn_km, qn_km, qe_km * qe_km))
     R_total = fma(elev_m, 0.001f0, R_KM_F32)
     u = rho / (2.0f0 * R_KM_F32)
@@ -179,6 +196,10 @@ Query-pixel Float32 3D position + ENU rotation matrix.
     M31 = qclat*qclon; M32 = qclat*qslon; M33 = qslat
     (qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33, rho, qn_km, qe_km)
 end
+
+# LDEM convenience wrapper.
+@inline _live_query_setup_f32(cx::Float32, cy::Float32, elev_m::Float32) =
+    _live_query_setup_f32(cx, cy, elev_m, LDEM_S0_F32, LDEM_L0_F32, 0.02f0)
 
 # ─── Mipmap pyramid (min- and max-pooled) ────────────────────────────────
 
@@ -233,11 +254,15 @@ function _compute_azel_at_pixel(ldem_col::Int, ldem_row::Int,
                                 ldem::Matrix{Int16},
                                 sun_pos_km::NTuple{3, Float64},
                                 earth_pos_km::NTuple{3, Float64},
-                                observer_km::Float32)
+                                observer_km::Float32;
+                                s0::Float32 = LDEM_S0_F32,
+                                l0::Float32 = LDEM_L0_F32,
+                                pixel_size_km::Float32 = 0.02f0)
     qelev_m = Float32(ldem[ldem_row + 1, ldem_col + 1]) * 0.5f0
     (qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
      rho_q, qn_km, qe_km) =
-        _live_query_setup_f32(Float32(ldem_col), Float32(ldem_row), qelev_m)
+        _live_query_setup_f32(Float32(ldem_col), Float32(ldem_row), qelev_m,
+                              s0, l0, pixel_size_km)
 
     sun_x = Float32(sun_pos_km[1]);  sun_y = Float32(sun_pos_km[2]);  sun_z = Float32(sun_pos_km[3])
     earth_x = Float32(earth_pos_km[1]); earth_y = Float32(earth_pos_km[2]); earth_z = Float32(earth_pos_km[3])
@@ -289,7 +314,10 @@ function _precompute_azel(ldem::Matrix{Int16},
                           H::Int, W::Int,
                           sun_pos_km::NTuple{3, Float64},
                           earth_pos_km::NTuple{3, Float64},
-                          observer_km::Float32)
+                          observer_km::Float32;
+                          s0::Float32 = LDEM_S0_F32,
+                          l0::Float32 = LDEM_L0_F32,
+                          pixel_size_km::Float32 = 0.02f0)
     sun_ray_cos   = Matrix{Float32}(undef, H, W)
     sun_ray_sin   = Matrix{Float32}(undef, H, W)
     sun_el_deg    = Matrix{Float32}(undef, H, W)
@@ -304,7 +332,8 @@ function _precompute_azel(ldem::Matrix{Int16},
             ldem_c = ldem_origin_col + (c - 1)
             ldem_r = ldem_origin_row + (r - 1)
             (src, srs, el_s, erc, ers, el_e) = _compute_azel_at_pixel(
-                ldem_c, ldem_r, ldem, sun_pos_km, earth_pos_km, observer_km)
+                ldem_c, ldem_r, ldem, sun_pos_km, earth_pos_km, observer_km;
+                s0 = s0, l0 = l0, pixel_size_km = pixel_size_km)
             sun_ray_cos[r, c]   = src
             sun_ray_sin[r, c]   = srs
             sun_el_deg[r, c]    = el_s

@@ -80,10 +80,15 @@ end
 # Approximate slope in (num, den_sq) form so the caller can compare via
 # squared cross-multiplication — no in-loop division by a variable. The
 # constant `(2*R_m)` division from the flat-Earth drop term is replaced by
-# multiplication with the CPU-precomputed `inv_2R_m`.
+# multiplication with the CPU-precomputed `inv_2R_m`. `pixel_size_m`
+# converts pixel-units distance to meters; the LDEM (20m) path passes
+# `20.0f0` and the 1m site path passes `1.0f0` — both are runtime
+# parameters but their bit pattern is the same as the prior literal so
+# bit-exactness is preserved.
 @inline function _gpu_approx_slope_sq(elev_m::Float32, dist_pix::Float32,
-                                       q_elev_m::Float32)
-    horizontal_m = dist_pix * 20.0f0
+                                       q_elev_m::Float32,
+                                       pixel_size_m::Float32)
+    horizontal_m = dist_pix * pixel_size_m
     hsq = horizontal_m * horizontal_m
     # delta = (elev_m − q_elev_m) − hsq·INV_2R_M as a single fma so vendor
     # fp-contract defaults can't differ on the `(a*b) − c` fold.
@@ -133,6 +138,8 @@ end
         max_d_pixels::Float32,
         ldem_s0::Float32, ldem_l0::Float32,
         R_km::Float32,
+        pixel_size_km::Float32, pixel_size_m::Float32,
+        mipmap_base::Float32,
         atan_lut, atan_scale::Float32)
     # Track the running max slope in (num, den_sq) form so the hot path uses
     # only *, +, fma, and <. The one sqrt+div (inside the atan LUT) happens
@@ -142,7 +149,6 @@ end
     max_den_sq = 0.0f0
     threshold_sq = threshold * threshold
     base_step = Float32(0.70710698)
-    mipmap_base = Float32(100.0)
     d = 1.0f0
     terminated = false
     @inbounds while d <= max_d_pixels && !terminated
@@ -181,7 +187,7 @@ end
             cell_w = Float32(Int32(1) << lvl)
             half_diag = cell_w * 0.707107f0
             d_near = max(0.5f0, d - half_diag)
-            cmax_num, cmax_den_sq = _gpu_approx_slope_sq(max_elev_m, d_near, q_elev_m)
+            cmax_num, cmax_den_sq = _gpu_approx_slope_sq(max_elev_m, d_near, q_elev_m, pixel_size_m)
             # cmax < max_slope iff max_slope > cmax — reuse the gt helper.
             if _gpu_gt_slope_sq(max_num, max_den_sq, cmax_num, cmax_den_sq)
                 d += cell_w
@@ -194,7 +200,7 @@ end
                                          min4[mm_row, mm_col]
                 min_elev_m = Float32(mn_v) * 0.5f0
                 d_far = d + half_diag
-                cmin_num, cmin_den_sq = _gpu_approx_slope_sq(min_elev_m, d_far, q_elev_m)
+                cmin_num, cmin_den_sq = _gpu_approx_slope_sq(min_elev_m, d_far, q_elev_m, pixel_size_m)
                 if _gpu_ge_threshold_sq(cmin_num, cmin_den_sq, threshold, threshold_sq)
                     max_num = threshold
                     max_den_sq = 1.0f0
@@ -230,8 +236,8 @@ end
                 # contract `mul + add` patterns into fma (that contraction is
                 # per-platform and was the dominant drift source after we
                 # cleared the inner-loop sqrt/div).
-                e_km = (cx - ldem_s0) * 0.02f0
-                n_km = (ldem_l0 - cy) * 0.02f0
+                e_km = (cx - ldem_s0) * pixel_size_km
+                n_km = (ldem_l0 - cy) * pixel_size_km
                 rho2 = fma(n_km, n_km, e_km * e_km)
                 R_total = fma(telev_m, 0.001f0, R_km)
                 dn = fma(rho2, INV_4R_KM2_F32, 1.0f0)
@@ -292,6 +298,8 @@ end
     observer_km::Float32,
     ldem_s0::Float32, ldem_l0::Float32,
     R_km::Float32,
+    pixel_size_km::Float32, pixel_size_m::Float32,
+    max_terrain_pix_scale::Float32, mipmap_base::Float32,
     sun_half_angle_deg::Float32, max_terrain_m::Float32)
 
     idx = @index(Global)
@@ -308,8 +316,8 @@ end
     # the source of truth for `_precompute_azel` and tests.
     qelev_raw = Float32(max0[ldem_row + Int32(1), ldem_col + Int32(1)])
     qelev_m = qelev_raw * 0.5f0
-    qe_km = (Float32(ldem_col) - ldem_s0) * 0.02f0
-    qn_km = (ldem_l0 - Float32(ldem_row)) * 0.02f0
+    qe_km = (Float32(ldem_col) - ldem_s0) * pixel_size_km
+    qn_km = (ldem_l0 - Float32(ldem_row)) * pixel_size_km
     rho2_q = fma(qn_km, qn_km, qe_km * qe_km)
     R_total_q = fma(qelev_m, 0.001f0, R_km)
     denom_q = fma(rho2_q, INV_4R_KM2_F32, 1.0f0)
@@ -352,8 +360,11 @@ end
 
     # Dynamic max ray distance. Consolidated to one mul + one div (was two
     # divs + one mul) so vendor-specific `/ const` rounding can't accumulate.
+    # `max_terrain_pix_scale` = 1.5 / pixel_size_m, computed CPU-side; for
+    # the LDEM 20m path this is `0.075f0` (= 1.5/20) — same Float32 bit
+    # pattern as the prior literal, so bit-exactness is preserved.
     HARD_CAP = 15000.0f0
-    max_terrain_scaled = max_terrain_m * 0.075f0    # = 1.5 / 20
+    max_terrain_scaled = max_terrain_m * max_terrain_pix_scale
     sun_max_d = sun_slope_thresh > 0.005f0 ?
         min(HARD_CAP, max_terrain_scaled / sun_slope_thresh) : HARD_CAP
     dsn_max_d = dsn_slope_thresh > 0.005f0 ?
@@ -379,7 +390,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[2]; s_k = SUN_RAY_OFFSET_SIN[2]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
@@ -389,7 +402,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[3]; s_k = SUN_RAY_OFFSET_SIN[3]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
@@ -399,7 +414,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[4]; s_k = SUN_RAY_OFFSET_SIN[4]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
@@ -409,7 +426,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[5]; s_k = SUN_RAY_OFFSET_SIN[5]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
@@ -419,7 +438,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[6]; s_k = SUN_RAY_OFFSET_SIN[6]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
@@ -429,7 +450,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[7]; s_k = SUN_RAY_OFFSET_SIN[7]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
@@ -439,7 +462,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
 
         c_k = SUN_RAY_OFFSET_COS[8]; s_k = SUN_RAY_OFFSET_SIN[8]
         rc = fma(-sun_rs_base, s_k, sun_rc_base * c_k)
@@ -449,7 +474,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
     end
 
     if !earth_below
@@ -458,7 +485,9 @@ end
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
             qelev_m, qx, qy, qz, M31, M32, M33,
             earth_rc, earth_rs, observer_km, dsn_slope_thresh, dsn_max_d,
-            ldem_s0, ldem_l0, R_km, atan_lut, atan_scale)
+            ldem_s0, ldem_l0, R_km,
+            pixel_size_km, pixel_size_m, mipmap_base,
+            atan_lut, atan_scale)
     end
 
     # ── Sun fraction integration (16 ticks across sun disk, 4 anchors) ──
@@ -566,7 +595,13 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
                                          min_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
                                          backend,
                                          DeviceArray,
-                                         workgroup_size::Int=512)
+                                         workgroup_size::Int=512,
+                                         s0::Float32 = LDEM_S0_F32,
+                                         l0::Float32 = LDEM_L0_F32,
+                                         pixel_size_km::Float32 = 0.02f0,
+                                         pixel_size_m::Float32 = 20.0f0,
+                                         max_terrain_pix_scale::Float32 = 0.075f0,
+                                         mipmap_base::Float32 = 100.0f0)
     observer_km = Float32(observer_height_m / 1000.0)
     ldem_H, ldem_W = size(ldem)
 
@@ -575,7 +610,8 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
     #              sun_tan, dsn_tan).
     sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
         _precompute_azel(ldem, ldem_origin_row, ldem_origin_col, H, W,
-                         sun_pos_km, earth_pos_km, observer_km)
+                         sun_pos_km, earth_pos_km, observer_km;
+                         s0 = s0, l0 = l0, pixel_size_km = pixel_size_km)
 
     azel = Array{Float32, 3}(undef, H, W, 8)
     azel[:, :, 1] .= sun_rc
@@ -605,8 +641,10 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{Int16},
            Int32(ldem_H), Int32(ldem_W), Int32(H), Int32(W),
            Int32(ldem_origin_row), Int32(ldem_origin_col),
            observer_km,
-           Float32(LDEM_S0), Float32(LDEM_L0),
+           s0, l0,
            Float32(R_KM_F64),
+           pixel_size_km, pixel_size_m,
+           max_terrain_pix_scale, mipmap_base,
            SUN_HALF_ANGLE_DEG, MAX_TERRAIN_M_F32;
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)

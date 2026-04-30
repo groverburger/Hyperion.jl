@@ -113,3 +113,6 @@ if HAS_LDEM
 else
     @warn "LDEM not available — skipping cross-platform bit-exactness test"
 end
+
+# ─── 1m site DEM bit-exactness (skipped if site TIF not present) ──────────
+include("site_1m.jl")
