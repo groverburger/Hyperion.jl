@@ -26,12 +26,19 @@
 import ArchGDAL
 
 """
-    SiteDEM
+    SiteDEM{T}
 
-A site DEM in its native locally-tangent stereographic projection.
+A site DEM in its native locally-tangent stereographic projection. `T`
+is the elevation array element type — `Int16` for the half-meter LDEM
+encoding (`elev_m = data * 0.5`) or `Float32` for direct meters
+(`elev_m = data * 1.0`). The elevation→meter scale is an explicit
+parameter passed to the kernel (`elev_scale_to_m`); when set to a value
+with the same Float32 bit pattern as the prior literal `0.5f0` the
+kernel produces identical output, so the LDEM bit-exact regression is
+preserved.
 
 Fields:
-  `data`         — Int16 half-meter elevation, (H, W). Multiply by 0.5 m.
+  `data`         — (H, W) elevation. Multiply by `elev_scale_to_m` for m.
   `H`, `W`       — array dimensions (matches the source TIF exactly).
   `s0`, `l0`     — projection origin (the local "south pole",
                    = (lat0, lon0)) expressed in the TIF's pixel grid,
@@ -41,9 +48,11 @@ Fields:
   `lat0`, `lon0` — projection center in radians. Sun and Earth positions
                    are rotated through these to enter the kernel's local
                    frame.
+  `elev_scale_to_m` — multiply `data` by this to get meters.
+                      `0.5f0` for Int16 half-meter, `1.0f0` for Float32 m.
 """
-struct SiteDEM
-    data::Matrix{Int16}
+struct SiteDEM{T<:Real}
+    data::Matrix{T}
     H::Int
     W::Int
     s0::Float64
@@ -51,6 +60,7 @@ struct SiteDEM
     pixel_size_m::Float64
     lat0::Float64    # radians
     lon0::Float64    # radians
+    elev_scale_to_m::Float32
 end
 
 # ─── WKT parsing ─────────────────────────────────────────────────────────
@@ -108,20 +118,57 @@ end
 # ─── Loader ───────────────────────────────────────────────────────────────
 
 """
-    load_site_dem(tif_path) -> SiteDEM
+    load_site_dem(tif_path) -> SiteDEM{Int16}
 
 Load a stereographic-projection GeoTIFF DEM in its native projection. No
-resampling — the output map will be pixel-aligned with the input TIF.
+resampling — output stays pixel-aligned with the input TIF.
 
-The CRS is parsed for the natural-origin (lat0, lon0). The GeoTransform
-provides pixel size and the cell-center-coord position of (lat0, lon0)
-in the TIF's pixel grid. Float32 elevations (m) are converted to Int16
-half-meters (clamped to ±32768 / 2 = ±16383 m, plenty for lunar terrain).
+Elevations are quantized to **Int16 half-meters** to mirror the LDEM
+encoding (`elev_m = data * 0.5`). For most lunar terrain the 0.5 m
+quantization is well below natural relief — but at very low sun
+elevation the staircase contours can become visible as concentric
+rings around peaks. If you see those, try `load_site_dem_f32` instead.
 
 For the kernel's mipmap pyramid to halve cleanly through 5 levels,
 the TIF dims must be divisible by 16. (nobile_1m.tif: 4992×4096 ✓)
 """
 function load_site_dem(tif_path::AbstractString)
+    src, H, W, s0, l0, pixel_size_m, lat0, lon0 = _read_site_tif(tif_path)
+    out = Array{Int16, 2}(undef, H, W)
+    Threads.@threads for i in 1:H
+        @inbounds for j in 1:W
+            v = Float64(src[i, j]) * 2.0
+            out[i, j] = Int16(round(clamp(v, -32768.0, 32767.0)))
+        end
+    end
+    return SiteDEM{Int16}(out, H, W, s0, l0, pixel_size_m, lat0, lon0, 0.5f0)
+end
+
+"""
+    load_site_dem_f32(tif_path) -> SiteDEM{Float32}
+
+Like `load_site_dem` but keeps the source elevations as **Float32 metres**
+with no quantization — `elev_scale_to_m = 1.0f0`. Mipmaps are built
+in Float32. Use this when the half-meter quantization in
+`load_site_dem` introduces visible staircase rings at low sun
+elevations, or for any data where you want to preserve sub-half-meter
+detail.
+
+Costs: ~2× memory (Float32 vs Int16) for the DEM and its mipmaps.
+"""
+function load_site_dem_f32(tif_path::AbstractString)
+    src, H, W, s0, l0, pixel_size_m, lat0, lon0 = _read_site_tif(tif_path)
+    out = Array{Float32, 2}(undef, H, W)
+    Threads.@threads for i in 1:H
+        @inbounds for j in 1:W
+            out[i, j] = Float32(src[i, j])
+        end
+    end
+    return SiteDEM{Float32}(out, H, W, s0, l0, pixel_size_m, lat0, lon0, 1.0f0)
+end
+
+# Shared TIF reader: returns the Float32 raw matrix + projection params.
+function _read_site_tif(tif_path::AbstractString)
     dataset = ArchGDAL.read(tif_path)
     band = ArchGDAL.getband(dataset, 1)
     raw = ArchGDAL.read(band)                    # (W, H) column-major
@@ -134,12 +181,9 @@ function load_site_dem(tif_path::AbstractString)
         @warn "Non-square pixels: $pix_w × $pix_h. Using $pix_w." pix_w pix_h
     pixel_size_m = pix_w
 
-    # s0, l0 in cell-center-coord — kernel formula is
-    # `e = (cx - s0) * pixel_size_km` where integer cx is treated as the
-    # cell center coord. With gt[1] = top-left edge, cell 0's CENTER is
-    # at e = gt[1] + 0.5*pix_w. For e=0 at cx=s0:
-    #   0 = (s0 - 0)*0 ... hmm just solve: cell n center at e = gt[1] + (n+0.5)*pix
-    #   Set = 0:  n = -gt[1]/pix - 0.5  → s0 = -gt[1]/pix - 0.5.
+    # s0, l0 in cell-center-coord — kernel uses `e = (cx - s0) * pix_km`
+    # with integer cx as the cell center coord. Cell n's center is at
+    # e = gt[1] + (n+0.5)*pix; setting = 0 gives s0 = -gt[1]/pix - 0.5.
     s0 = -gt[1] / pix_w - 0.5
     l0 =  gt[4] / pix_h - 0.5
 
@@ -147,19 +191,7 @@ function load_site_dem(tif_path::AbstractString)
     lat0_deg, lon0_deg = _parse_stereo_natural_origin(wkt)
     lat0 = deg2rad(lat0_deg); lon0 = deg2rad(lon0_deg)
 
-    # Float32 m → Int16 half-meters. Source is Float32 m above some local
-    # reference. The kernel only cares that all cells share the same
-    # reference (for relative-shadow geometry); it doesn't need the
-    # reference to match the LDEM's. Round-half-to-even on the *2 step.
-    out = Array{Int16, 2}(undef, H, W)
-    Threads.@threads for i in 1:H
-        @inbounds for j in 1:W
-            v = Float64(src[i, j]) * 2.0
-            out[i, j] = Int16(round(clamp(v, -32768.0, 32767.0)))
-        end
-    end
-
-    return SiteDEM(out, H, W, s0, l0, pixel_size_m, lat0, lon0)
+    return src, H, W, s0, l0, pixel_size_m, lat0, lon0
 end
 
 """
@@ -169,7 +201,7 @@ end
 Same shape as `build_ldem_mipmaps_minmax`. Errors if H or W aren't
 divisible by 16 (= 2⁴, the maximum halving depth for 5 levels).
 """
-function build_site_mipmaps_minmax(site::SiteDEM)
+function build_site_mipmaps_minmax(site::SiteDEM{T}) where {T<:Real}
     (site.H % 16 == 0 && site.W % 16 == 0) ||
         error("Site DEM dims must be a multiple of 16 (5 mipmap levels = 4 halvings); got $(site.H)x$(site.W)")
     return (_build_pool(site.data, max), _build_pool(site.data, min))
@@ -192,12 +224,12 @@ source TIF.
 into the site's local frame on CPU before being threaded through the
 existing kernel — kernel math is unchanged.
 """
-function generate_live_shadow_frame_site_gpu(site::SiteDEM,
+function generate_live_shadow_frame_site_gpu(site::SiteDEM{T},
                                               sun_pos_km::NTuple{3, Float64},
                                               earth_pos_km::NTuple{3, Float64},
                                               observer_height_m::Float64;
-                                              max_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
-                                              min_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{Int16}},
+                                              max_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{T}},
+                                              min_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{T}},
                                               backend,
                                               DeviceArray,
                                               workgroup_size::Int = 512,
@@ -205,7 +237,7 @@ function generate_live_shadow_frame_site_gpu(site::SiteDEM,
                                               origin_c::Int = 0,
                                               H::Int = site.H,
                                               W::Int = site.W,
-                                              mipmap_base::Float32 = 1.0f9)
+                                              mipmap_base::Float32 = 1.0f9) where {T<:Real}
     # Rotate (sun, earth) MOON_ME → site local frame. Float64.
     sun_local   = _moonme_to_local(sun_pos_km,   site.lat0, site.lon0)
     earth_local = _moonme_to_local(earth_pos_km, site.lat0, site.lon0)
@@ -232,5 +264,6 @@ function generate_live_shadow_frame_site_gpu(site::SiteDEM,
         pixel_size_km = pixel_size_km,
         pixel_size_m  = pixel_size_m,
         max_terrain_pix_scale = max_terrain_pix_scale,
-        mipmap_base = mipmap_base)
+        mipmap_base = mipmap_base,
+        elev_scale_to_m = site.elev_scale_to_m)
 end

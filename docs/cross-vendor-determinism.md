@@ -593,9 +593,141 @@ For quick navigation, the consolidated list with "where fixed":
 | 12 | Module-const reciprocals for JIT-time constants (pattern) | this doc |
 | 13 | Metal's 31-slot indirect argument buffer limit | this doc |
 | 14 | 1-ULP Float32 drift in atan2 **and cos_sin** LUT interp (item #8 again, one site deeper) | this doc |
+| 15 | `dz = scale·u²−1/dn − qz` catastrophic cancellation when projection origin is *inside* the imaged tile (latent on LDEM, visible at 1m) | this doc |
 
 Items 10-12 are patterns rather than discrete bugs — design disciplines
 we adopted to remove whole classes of divergence risk rather than plug
 specific sites. Items 5, 8, and 14 are the same rule (`(a*b) ± c` →
 explicit `fma`) applied at successively deeper dataflow sites: single
 expression, across connected statements, inside every LUT helper.
+
+## Bug 15: dz catastrophic cancellation (1m site DEM)
+
+### Symptom
+
+Rendering the live shadow kernel on a 1m site DEM in its native
+locally-tangent stereographic projection produces **prominent concentric
+ring artifacts** — even on a synthetic flat DEM (constant elevation
+everywhere). The flat DEM should produce one uniform sun value across
+the image; instead it produces 138 distinct values arranged in
+concentric rings centered on the projection origin. The same kernel run
+on the 20 m LDEM is bit-exact correct.
+
+### Diagnostic chain (what the rings ruled out)
+
+The investigation worked through hypotheses by elimination:
+
+1. **Mipmap skip artifacts** — disabled mipmaps (`mipmap_base = 1e9`,
+   forcing level 0 throughout). Rings persisted **identically**, same
+   sun coverage. *Rules out mipmaps.*
+2. **Half-meter Int16 quantization (½ m staircase under grazing sun)** —
+   added `load_site_dem_f32` and a Float32 path through the kernel.
+   Rings persisted essentially unchanged. *Rules out source quantization.*
+3. **Synthetic flat DEM (constant 6000 m everywhere)** — kernel still
+   produced 138 distinct sun values arranged in rings. **The kernel itself
+   is generating position-dependent variation on uniform terrain.** This
+   was the smoking gun: zero terrain features → output should be uniform,
+   any variation comes from the kernel math.
+4. **Patch sweep** — rendered 256×256 patches at varied (qe, qn) on the
+   flat DEM. A patch *centered on the projection origin* (rho = 0.18 km)
+   produced a single uniform value (255). Patches farther from the origin
+   (rho > 0.5 km) showed strong variation. **The bug magnitude grows with
+   distance from the projection origin.**
+5. **Per-pixel slope dump on flat terrain** — kernel reported `de` (DSN
+   horizon angle) values up to **+5.22°** on truly flat terrain.
+   Geometric expectation: ~0° (curvature drop only, sub-degree).
+6. **Single-step trace, plain Float32** — at one bad pixel, traced
+   `(dx, dy, dz)` and `lz_geom` for a 1 m east step. Found
+   `dz = -0.122 mm` where the geometric truth is `~5.7e-7 m`.
+   Off by **>10⁵×**.
+7. **Float64 reproduction of the same trace** — gave `dz = -0.92 μm`,
+   matching the geometric expectation almost exactly. **The bug was
+   purely a Float32 precision failure.** The kernel formula is
+   mathematically correct.
+
+### Root cause
+
+In the level-0 sample inner loop, `dz` was:
+
+```
+dz = fma(scale, u2_m1, -qz)        # = scale·(u²−1)/dn − qz
+```
+
+Both operands are ≈ −R_total ≈ −1737.4 km. Float32 ULP at that magnitude
+is ~2×10⁻⁴ km ≈ **0.2 m**. The geometric value of `dz` is on the order
+of millimeters for nearby samples. So the subtraction is **catastrophic
+cancellation**: result is rounding noise, not signal.
+
+The noise is not random — it's a deterministic function of `(qe, qn)`
+through the rounding of `1 + ρ²/(4R²)` ≈ `1.000000274`. As `ρ` varies,
+this denominator crosses Float32 representable boundaries at discrete
+ρ values. Each crossing is one ring.
+
+### Why this is invisible on the LDEM
+
+In south-polar PS, the projection origin is at the south pole — far
+from any imaged pixel. Across the LDEM Nobile crop, every query has
+`ρ_q ≈ 138 km`. Therefore:
+- `qz ≈ −1731.9 km` (well-resolved at this ρ)
+- `scale·u²−1/dn ≈ −1729.2 km` for samples 20 m away
+- They differ by **~2.7 km** — far above Float32 noise
+- The subtraction is benign; precision is preserved
+
+The instant you put the projection origin *inside* the tile (= every
+locally-tangent stereographic of a small site), pixels close to that
+origin have `qz ≈ −R_total` and samples a few meters away also
+`≈ −R_total`. The two operands now differ by *centimeters to meters*,
+which is exactly Float32 ULP at lunar radius. Cancellation kills the
+signal. The bug had been latent in the kernel since day one; the LDEM's
+projection geometry hid it.
+
+### Fix
+
+Reformulate `dz` to avoid the `~−R − ~−R` subtraction. Algebraically:
+
+```
+sample_z = R_total_s · (u²_s − 1)/dn_s = −R_total_s + 2·R_total_s·u²_s/dn_s
+query_z  = R_total_q · (u²_q − 1)/dn_q = −R_total_q + 2·R_total_q·u²_q/dn_q
+
+dz = sample_z − query_z
+   = (R_total_q − R_total_s)              ← elev difference, well-conditioned
+   + (sample_pos − qz_pos)                ← curvature term, all O(ρ²/R)
+```
+
+where:
+- `sample_pos = scale · 2·u²` (= scale_s · 2·u²_s/dn_s in disguise)
+- `qz_pos = R_total_q · 2·u²_q/dn_q`
+
+Critically, **`qz_pos` must be computed directly, not as `qz + R_total_q`**.
+The latter is *also* a `~−R + R` cancellation with the same Float32
+~0.2 m ULP. Build it explicitly from `ρ²_q · (2·INV_4R)` (= `2·u²_q`),
+multiplied by `R_total_q · inv_dn_q`. Each factor is O(small) in
+isolation; the result is precise to sub-mm at lunar radius.
+
+The new formula reduces algebraically to the old one, so it is
+mathematically equivalent — but Float32 ULP differs by ~5 orders of
+magnitude in the inputs to the subtraction. On the LDEM, the new formula
+produces results within a few ULP of the old (= bit-exact tests need
+re-pinning, but the qualitative behavior is unchanged). On the 1 m site
+DEM, the rings collapse to noise floor.
+
+### Verification
+
+A flat DEM (synthetic, constant 6000 m) under the fixed kernel produces
+**1 unique sun value across the entire 4096×4992 image** (vs 138 with
+the bug). Per-pixel `de` reports **−0.0°** for every test pixel (vs
++5.22°). Real 1m terrain renders cleanly with proper crater shadow
+geometry and no concentric rings.
+
+### Generalization
+
+Bug 15 is the same template as bug 1 (Float32 catastrophic cancellation,
+this time in `dz` instead of in `4R² + ρ²`). Both manifest only when
+the operand magnitudes happen to put the cancellation *at* Float32 ULP
+for the projection geometry being used. The lesson is the *latency*:
+**bit-exact regression on one DEM is not proof of correctness for a
+different DEM**, because the per-pixel operand magnitudes change with
+projection geometry, and Float32 cancellations can be benign in one
+regime and catastrophic in another. Cross-DEM stress tests (synthetic
+flat DEMs at varied projection geometries) are now part of the
+verification protocol.

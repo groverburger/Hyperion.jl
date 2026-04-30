@@ -213,14 +213,14 @@ function build_ldem_mipmaps_minmax(ldem::Matrix{Int16})
     return (_build_pool(ldem, max), _build_pool(ldem, min))
 end
 
-function _build_pool(ldem::Matrix{Int16}, reducer)
-    levels = Matrix{Int16}[ldem]
+function _build_pool(ldem::AbstractMatrix{T}, reducer) where {T<:Real}
+    levels = Matrix{T}[ldem]
     current = ldem
     for lvl in 1:(N_MIPMAP_LEVELS - 1)
         h, w = size(current)
         new_h = h ÷ 2
         new_w = w ÷ 2
-        next_lvl = Matrix{Int16}(undef, new_h, new_w)
+        next_lvl = Matrix{T}(undef, new_h, new_w)
         @threads for c in 1:new_w
             @inbounds for r in 1:new_h
                 a  = current[2r - 1, 2c - 1]
@@ -251,14 +251,15 @@ Returns: (sun_ray_cos, sun_ray_sin, sun_el_deg,
           earth_ray_cos, earth_ray_sin, earth_el_deg)
 """
 function _compute_azel_at_pixel(ldem_col::Int, ldem_row::Int,
-                                ldem::Matrix{Int16},
+                                ldem::AbstractMatrix{<:Real},
                                 sun_pos_km::NTuple{3, Float64},
                                 earth_pos_km::NTuple{3, Float64},
                                 observer_km::Float32;
                                 s0::Float32 = LDEM_S0_F32,
                                 l0::Float32 = LDEM_L0_F32,
-                                pixel_size_km::Float32 = 0.02f0)
-    qelev_m = Float32(ldem[ldem_row + 1, ldem_col + 1]) * 0.5f0
+                                pixel_size_km::Float32 = 0.02f0,
+                                elev_scale_to_m::Float32 = 0.5f0)
+    qelev_m = Float32(ldem[ldem_row + 1, ldem_col + 1]) * elev_scale_to_m
     (qx, qy, qz, M11, M12, M13, M21, M22, M23, M31, M32, M33,
      rho_q, qn_km, qe_km) =
         _live_query_setup_f32(Float32(ldem_col), Float32(ldem_row), qelev_m,
@@ -309,7 +310,7 @@ Per-pixel precompute: sun and earth ray directions in LDEM-grid frame
 angles and deterministic tan slopes for early-return thresholds. All
 eight Float32 maps get packed into the GPU buffer.
 """
-function _precompute_azel(ldem::Matrix{Int16},
+function _precompute_azel(ldem::AbstractMatrix{<:Real},
                           ldem_origin_row::Int, ldem_origin_col::Int,
                           H::Int, W::Int,
                           sun_pos_km::NTuple{3, Float64},
@@ -317,7 +318,8 @@ function _precompute_azel(ldem::Matrix{Int16},
                           observer_km::Float32;
                           s0::Float32 = LDEM_S0_F32,
                           l0::Float32 = LDEM_L0_F32,
-                          pixel_size_km::Float32 = 0.02f0)
+                          pixel_size_km::Float32 = 0.02f0,
+                          elev_scale_to_m::Float32 = 0.5f0)
     sun_ray_cos   = Matrix{Float32}(undef, H, W)
     sun_ray_sin   = Matrix{Float32}(undef, H, W)
     sun_el_deg    = Matrix{Float32}(undef, H, W)
@@ -333,7 +335,8 @@ function _precompute_azel(ldem::Matrix{Int16},
             ldem_r = ldem_origin_row + (r - 1)
             (src, srs, el_s, erc, ers, el_e) = _compute_azel_at_pixel(
                 ldem_c, ldem_r, ldem, sun_pos_km, earth_pos_km, observer_km;
-                s0 = s0, l0 = l0, pixel_size_km = pixel_size_km)
+                s0 = s0, l0 = l0, pixel_size_km = pixel_size_km,
+                elev_scale_to_m = elev_scale_to_m)
             sun_ray_cos[r, c]   = src
             sun_ray_sin[r, c]   = srs
             sun_el_deg[r, c]    = el_s
