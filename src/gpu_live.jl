@@ -131,7 +131,7 @@ end
         query_col::Float32, query_row::Float32,
         q_elev_m::Float32,
         qx::Float32, qy::Float32, qz::Float32,
-        qR_total::Float32, qz_pos::Float32,
+        qz_pos::Float32,
         M31::Float32, M32::Float32, M33::Float32,
         ray_cos::Float32, ray_sin::Float32,
         observer_km::Float32,
@@ -251,16 +251,19 @@ end
                 # source after we cleared sqrt/div from the loop).
                 dx = fma(common, n_km, -qx)
                 dy = fma(common, e_km, -qy)
-                # dz: well-conditioned form. Old `scale*u2_m1 − qz` was a
-                # ~−R − (−R) cancellation when sample and query were both
-                # near the projection origin (catastrophic at 1 m DEM scale,
-                # benign at the LDEM since rho_q is O(100 km) far from the
-                # south pole). Equivalent to
-                #   dz = (qR_total − R_total) + (scale·2u² − qz_pos)
-                # where qz_pos = qz + qR_total = scale_q·2u²_q. Both bracketed
-                # quantities are O(rho²/R) — no cancellation against R_total.
+                # dz: well-conditioned form. The naive `scale*u2_m1 − qz`
+                # was a ~−R − (−R) cancellation. The first replacement
+                #   (qR_total − R_total) + (scale·2u² − qz_pos)
+                # was *also* broken — `qR_total` and `R_total` are both
+                # ~R in magnitude, so subtracting them in Float32 has
+                # ~0.2 m ULP at lunar radius, swamping the millimeter-
+                # scale signal we need. Compute the elevation-difference
+                # term directly from `q_elev_m − telev_m` (which lives in
+                # metres, not at lunar radius), so Float32 precision is
+                # in metres rather than at lunar radius:
+                #   (qR_total − R_total) = (qelev − telev) · 0.001
                 sample_pos = scale * two_u2
-                dz = (qR_total - R_total) + (sample_pos - qz_pos)
+                dz = (q_elev_m - telev_m) * 0.001f0 + (sample_pos - qz_pos)
                 # Only compute the radial ENU component (lz). Horizontal
                 # distance² follows from orthonormality of the ENU frame:
                 # |d|² = lx² + ly² + lz², so alen_sq = |d|² − lz². This skips
@@ -404,7 +407,7 @@ end
         d_0 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -416,7 +419,7 @@ end
         d_1 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -428,7 +431,7 @@ end
         d_2 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -440,7 +443,7 @@ end
         d_3 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -452,7 +455,7 @@ end
         d_4 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -464,7 +467,7 @@ end
         d_5 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -476,7 +479,7 @@ end
         d_6 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -488,7 +491,7 @@ end
         d_7 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -499,7 +502,7 @@ end
         de = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, R_total_q, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
             earth_rc, earth_rs, observer_km, dsn_slope_thresh, dsn_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,

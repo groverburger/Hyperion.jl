@@ -731,3 +731,66 @@ projection geometry, and Float32 cancellations can be benign in one
 regime and catastrophic in another. Cross-DEM stress tests (synthetic
 flat DEMs at varied projection geometries) are now part of the
 verification protocol.
+
+### Bug 15b: the second cancellation (regression chasing)
+
+After applying the fix above and verifying flat-DEM uniformity, real-
+terrain renders still showed faint contour-following ridges in lit
+areas. Tracing one bad pixel revealed a *second* catastrophic
+cancellation — this one in the *replacement* formula:
+
+```
+dz = (qR_total − R_total) + (sample_pos − qz_pos)
+```
+
+`qR_total` and `R_total` are *both ~R_KM in magnitude* (1737.4 km +
+elevation/1000). Their Float32 representations have ULP ≈ 0.2 m at
+lunar radius. Subtracting them recovers Float32 precision *in metres at
+lunar radius* — but the geometric *signal* in this term is the
+sample-vs-query elevation difference, which is millimetres-to-metres.
+The signal-to-noise ratio sat at ~1, and which Float32 representable
+each `R_total` rounded to produced position-dependent jumps that
+looked like contour-line ridges following the terrain.
+
+Diagnostic that pinpointed it: per-pixel dump on adjacent pixels along
+a smooth-elevation row. Pixel (col=1250, row=500) on `nobile_1m` at
+2027-01-22T07 reported `de = −6.94°` (slope ≈ −0.122) while neighbors
+on either side reported a smooth ~−10.86°. The value −0.122 is
+*exactly* the Float32 ULP-at-lunar-radius / 1 m — a signature of the
+bug. All 9 rays from that one pixel returned identical `−6.935°` to
+4 decimals, meaning the rays didn't really converge on the same
+occluder; they all inherited the same noise floor.
+
+**The fix is trivial once seen.** `qR_total − R_total = (qelev_m − telev_m) · 0.001`
+exactly. Compute the elevation-difference term in *metres*, not at
+lunar radius:
+
+```
+dz = (q_elev_m − telev_m) · 0.001 + (sample_pos − qz_pos)
+```
+
+Now the leading term has Float32 precision *in metres of elevation*,
+not at lunar radius — sub-millimetre instead of decimetre. The artifact
+disappears. After-fix verification at the same pixel: `de = −10.864°`
+(continuous with both neighbors). Synthetic flat DEM: 1 unique sun
+value across the entire 4096×4992 image. Real 1m terrain: clean crater
+shadows, no visible ridges.
+
+`qR_total` itself is no longer needed inside `_gpu_cast_ray` and was
+removed from the function signature.
+
+**The general rule both 15 and 15b reinforce:** never form a
+quantity-of-interest as the difference of two values at lunar radius
+in Float32. Either reformulate to compute the small difference
+directly (metres-to-km, not km-to-km), or carry the precision in a
+quantity that lives at the *signal's* magnitude rather than the
+operand's.
+
+Two cancellations were present, the second hidden behind the first.
+The diagnostic chain that found 15b was the same one that found 15
+(synthetic flat DEM → patch sweep → per-pixel dump → Float32 trace),
+plus the additional step of *also tracing the corrected formula in
+Float32* and noticing that intermediate operand magnitudes were still
+at lunar radius. **Float64 reproduction of the corrected formula is
+necessary but not sufficient — verify each step's operand magnitudes
+in Float32 land within Float32's ULP for the signal you're computing.**
