@@ -87,12 +87,23 @@ end
 # bit-exactness is preserved.
 @inline function _gpu_approx_slope_sq(elev_m::Float32, dist_pix::Float32,
                                        q_elev_m::Float32,
-                                       pixel_size_m::Float32)
+                                       pixel_size_m::Float32,
+                                       slope_safety::Float32)
     horizontal_m = dist_pix * pixel_size_m
     hsq = horizontal_m * horizontal_m
-    # delta = (elev_m − q_elev_m) − hsq·INV_2R_M as a single fma so vendor
-    # fp-contract defaults can't differ on the `(a*b) − c` fold.
-    delta = fma(-hsq, INV_2R_M_F32, elev_m - q_elev_m)
+    # delta = (elev_m − q_elev_m) − hsq·INV_2R_M, plus a slope-units
+    # safety margin (added as `+ slope_safety · horizontal_m` to delta —
+    # equivalent to slope_safe = slope + slope_safety) to bound the
+    # approximation error vs the level-0 stereographic projection. The
+    # missing term in the level-0 formula contributes up to `rho_q/R`
+    # in slope units (see docs/cross-vendor-determinism.md bug 16),
+    # which dominates for the 1 m site DEM and is negligible for the
+    # LDEM. Pass `slope_safety = qrho_km · INV_R_KM_F32 + ε` per
+    # query to make the approximation reliably pessimistic, restoring
+    # bit-exactness with mipmaps enabled. All `(a*b) ± c` patterns are
+    # explicit fmas (rules 5/8/14).
+    delta_no_safety = fma(-hsq, INV_2R_M_F32, elev_m - q_elev_m)
+    delta = fma(slope_safety, horizontal_m, delta_no_safety)
     return delta, hsq
 end
 
@@ -131,7 +142,7 @@ end
         query_col::Float32, query_row::Float32,
         q_elev_m::Float32,
         qx::Float32, qy::Float32, qz::Float32,
-        qz_pos::Float32,
+        qz_pos::Float32, slope_safety::Float32,
         M31::Float32, M32::Float32, M33::Float32,
         ray_cos::Float32, ray_sin::Float32,
         observer_km::Float32,
@@ -188,7 +199,7 @@ end
             cell_w = Float32(Int32(1) << lvl)
             half_diag = cell_w * 0.707107f0
             d_near = max(0.5f0, d - half_diag)
-            cmax_num, cmax_den_sq = _gpu_approx_slope_sq(max_elev_m, d_near, q_elev_m, pixel_size_m)
+            cmax_num, cmax_den_sq = _gpu_approx_slope_sq(max_elev_m, d_near, q_elev_m, pixel_size_m, slope_safety)
             # cmax < max_slope iff max_slope > cmax — reuse the gt helper.
             if _gpu_gt_slope_sq(max_num, max_den_sq, cmax_num, cmax_den_sq)
                 d += cell_w
@@ -201,7 +212,12 @@ end
                                          min4[mm_row, mm_col]
                 min_elev_m = Float32(mn_v) * elev_scale_to_m
                 d_far = d + half_diag
-                cmin_num, cmin_den_sq = _gpu_approx_slope_sq(min_elev_m, d_far, q_elev_m, pixel_size_m)
+                # For the termination check (cmin), use ZERO safety —
+                # we want a *pessimistic* lower bound on cmin, not an
+                # upper bound (terminating early because cmin > threshold
+                # must require cmin to actually be ≥ threshold, so we
+                # don't add the safety here).
+                cmin_num, cmin_den_sq = _gpu_approx_slope_sq(min_elev_m, d_far, q_elev_m, pixel_size_m, 0.0f0)
                 if _gpu_ge_threshold_sq(cmin_num, cmin_den_sq, threshold, threshold_sq)
                     max_num = threshold
                     max_den_sq = 1.0f0
@@ -357,6 +373,15 @@ end
     two_u2_q = rho2_q * (Float32(2.0) * INV_4R_KM2_F32)
     qz_pos   = R_total_q * (two_u2_q * inv_denom_q)
 
+    # `slope_safety` bounds the approximation error in `_gpu_approx_slope_sq`
+    # vs the full level-0 stereographic projection. The missing term in
+    # the approximation contributes up to `rho_q/R` in slope units; we
+    # add a fixed 1% padding (≈ 0.6° in angle) on top to also conservatively
+    # bound the running-max divergence between mipmap-on and mipmap-off
+    # sampling schedules within a skipped cell. Per-pixel constant.
+    qrho_km = sqrt(rho2_q)
+    slope_safety = fma(qrho_km, INV_R_KM_F32, Float32(0.01))
+
     # ── Read 8 precomputed channels (CPU-side; cross-platform bit-exact) ──
     # 1: sun_ray_cos     (sun direction in LDEM-grid frame, unit cos)
     # 2: sun_ray_sin     (unit sin)
@@ -410,7 +435,7 @@ end
         d_0 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -422,7 +447,7 @@ end
         d_1 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -434,7 +459,7 @@ end
         d_2 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -446,7 +471,7 @@ end
         d_3 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -458,7 +483,7 @@ end
         d_4 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -470,7 +495,7 @@ end
         d_5 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -482,7 +507,7 @@ end
         d_6 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -494,7 +519,7 @@ end
         d_7 = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             rc, rs, observer_km, sun_slope_thresh, sun_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
@@ -505,7 +530,7 @@ end
         de = _gpu_cast_ray(
             max0, max1, max2, max3, max4, min1, min2, min3, min4,
             ldem_H, ldem_W, Float32(ldem_col), Float32(ldem_row),
-            qelev_m, qx, qy, qz, qz_pos, M31, M32, M33,
+            qelev_m, qx, qy, qz, qz_pos, slope_safety, M31, M32, M33,
             earth_rc, earth_rs, observer_km, dsn_slope_thresh, dsn_max_d,
             ldem_s0, ldem_l0, R_km,
             pixel_size_km, pixel_size_m, mipmap_base,
