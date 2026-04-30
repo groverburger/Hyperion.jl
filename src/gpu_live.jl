@@ -375,10 +375,11 @@ end
 
     # `slope_safety` bounds the approximation error in `_gpu_approx_slope_sq`
     # vs the full level-0 stereographic projection. The missing term in
-    # the approximation contributes up to `rho_q/R` in slope units; we
-    # add a fixed 1% padding (≈ 0.6° in angle) on top to also conservatively
-    # bound the running-max divergence between mipmap-on and mipmap-off
-    # sampling schedules within a skipped cell. Per-pixel constant.
+    # the approximation contributes up to `rho_q/R` in slope units; pad
+    # by 0.01 (≈ 0.6° in angle) to cover residual second-order
+    # discrepancies. Per-pixel constant. (The bilinear-footprint issue —
+    # pool max not bounding bilinear samples within the cell — is fixed
+    # separately by the halo'd 3×3 mipmap pool in _build_pool.)
     qrho_km = sqrt(rho2_q)
     slope_safety = fma(qrho_km, INV_R_KM_F32, Float32(0.01))
 

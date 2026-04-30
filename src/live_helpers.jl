@@ -216,6 +216,20 @@ end
 function _build_pool(ldem::AbstractMatrix{T}, reducer) where {T<:Real}
     levels = Matrix{T}[ldem]
     current = ldem
+    # 3×3 (halo'd) pool, not 2×2. The kernel does bilinear interpolation
+    # at each level-0 sample, so a sample within mipmap cell (i, j)'s
+    # 2-pixel × 2-pixel footprint actually reads pixels (col_i, col_i+1)
+    # and (row_i, row_i+1) — and at the cell's right/bottom edge,
+    # `col_i+1` or `row_i+1` is in the *next* mipmap cell. A 2×2 pool
+    # would underestimate the true max sample-able within the cell, and
+    # the mipmap-skip check could wrongly conclude `running_max > cmax`
+    # for an unsafe skip. Pool with a +1 pixel halo at each level so the
+    # pool max covers the full bilinear footprint of any sample within
+    # the cell. Adjacent mipmap cells overlap by 1 pixel of source data.
+    # Sentinel for boundary: `reducer(extra_val, sentinel) = extra_val`
+    # so the sentinel never wins. For `max`, sentinel = typemin(T); for
+    # `min`, sentinel = typemax(T).
+    sentinel = reducer === max ? typemin(T) : typemax(T)
     for lvl in 1:(N_MIPMAP_LEVELS - 1)
         h, w = size(current)
         new_h = h ÷ 2
@@ -223,11 +237,23 @@ function _build_pool(ldem::AbstractMatrix{T}, reducer) where {T<:Real}
         next_lvl = Matrix{T}(undef, new_h, new_w)
         @threads for c in 1:new_w
             @inbounds for r in 1:new_h
-                a  = current[2r - 1, 2c - 1]
-                b  = current[2r - 1, 2c]
-                cv = current[2r,     2c - 1]
-                d  = current[2r,     2c]
-                next_lvl[r, c] = reducer(reducer(a, b), reducer(cv, d))
+                r0 = 2r - 1; c0 = 2c - 1
+                # 3 rows × 3 cols, with the third row/col falling back to
+                # sentinel if past the bound. Inlined as a pyramid of
+                # reducer calls.
+                v00 = current[r0, c0]
+                v01 = current[r0, c0 + 1]
+                v02 = c0 + 2 <= w ? current[r0, c0 + 2] : sentinel
+                v10 = current[r0 + 1, c0]
+                v11 = current[r0 + 1, c0 + 1]
+                v12 = c0 + 2 <= w ? current[r0 + 1, c0 + 2] : sentinel
+                v20 = r0 + 2 <= h ? current[r0 + 2, c0] : sentinel
+                v21 = r0 + 2 <= h ? current[r0 + 2, c0 + 1] : sentinel
+                v22 = (r0 + 2 <= h && c0 + 2 <= w) ? current[r0 + 2, c0 + 2] : sentinel
+                row0 = reducer(reducer(v00, v01), v02)
+                row1 = reducer(reducer(v10, v11), v12)
+                row2 = reducer(reducer(v20, v21), v22)
+                next_lvl[r, c] = reducer(reducer(row0, row1), row2)
             end
         end
         push!(levels, next_lvl)
