@@ -202,28 +202,61 @@ end
             cmax_num, cmax_den_sq = _gpu_approx_slope_sq(max_elev_m, d_near, q_elev_m, pixel_size_m, slope_safety)
             # cmax < max_slope iff max_slope > cmax — reuse the gt helper.
             if _gpu_gt_slope_sq(max_num, max_den_sq, cmax_num, cmax_den_sq)
-                d += cell_w
-                skip_to_next = true
-            else
-                # Only now read the min — needed for termination check.
-                mn_v = lvl == Int32(1) ? min1[mm_row, mm_col] :
-                       lvl == Int32(2) ? min2[mm_row, mm_col] :
-                       lvl == Int32(3) ? min3[mm_row, mm_col] :
-                                         min4[mm_row, mm_col]
-                min_elev_m = Float32(mn_v) * elev_scale_to_m
-                d_far = d + half_diag
-                # For the termination check (cmin), use ZERO safety —
-                # we want a *pessimistic* lower bound on cmin, not an
-                # upper bound (terminating early because cmin > threshold
-                # must require cmin to actually be ≥ threshold, so we
-                # don't add the safety here).
-                cmin_num, cmin_den_sq = _gpu_approx_slope_sq(min_elev_m, d_far, q_elev_m, pixel_size_m, 0.0f0)
-                if _gpu_ge_threshold_sq(cmin_num, cmin_den_sq, threshold, threshold_sq)
-                    max_num = threshold
-                    max_den_sq = 1.0f0
-                    terminated = true
+                # Advance d by `n_skip` repeated `+ base_step` additions —
+                # bit-exact equivalent to taking n_skip level-0 base_step
+                # iterations without sampling. We MUST loop instead of
+                # `d += n_skip * base_step` because Float32 multiplication
+                # rounds differently than n accumulated additions, and a
+                # 1-ULP drift in d cascades through `unsafe_trunc(cx)`,
+                # bilinear cell selection, and running_max evolution.
+                # n_skip = ceil(2^lvl / 0.7071): 3, 6, 12, 23 for lvls 1-4.
+                # Chosen so the post-skip d lands on the mipmap-off path's
+                # sample grid (`1 + k·bs`), making the next level-0 sample
+                # bit-identical to where the no-skip path would arrive.
+                #
+                # We must also check bounds at each intermediate step:
+                # otherwise a ray exiting the DEM mid-skip would be detected
+                # by the no-mipmap path (which checks bounds at every step)
+                # but missed by the mipmap path (which would skip over the
+                # boundary and sample invalid out-of-bounds terrain).
+                # Use `terminated` as a sentinel signalling "exited bounds
+                # mid-skip"; the outer while-loop sees `!terminated` and
+                # exits naturally.
+                n_skip = lvl == Int32(1) ? Int32(3) :
+                         lvl == Int32(2) ? Int32(6) :
+                         lvl == Int32(3) ? Int32(12) :
+                                           Int32(23)
+                exited_in_skip = false
+                @inbounds for _ in Int32(1):n_skip
+                    d += base_step
+                    cx_chk = fma(ray_cos, d, query_col)
+                    cy_chk = fma(ray_sin, d, query_row)
+                    ci_chk = unsafe_trunc(Int32, cx_chk)
+                    ri_chk = unsafe_trunc(Int32, cy_chk)
+                    if ci_chk < Int32(0) || ci_chk >= ldem_W || ri_chk < Int32(0) || ri_chk >= ldem_H
+                        exited_in_skip = true
+                        break
+                    end
                 end
+                if exited_in_skip
+                    break    # break the outer while-loop — ray exited bounds
+                end
+                skip_to_next = true
             end
+            # The cmin (whole-cell-blocks) early termination was removed:
+            # when triggered, it set `max_num = threshold; max_den_sq = 1`
+            # which produces a *different* atan2 result than the level-0
+            # sample termination (which sets max_num/max_den_sq to the
+            # specific sample's lz / alen_sq, slightly larger than the
+            # threshold). For bit-exactness with the mipmap-off path —
+            # where termination always runs through the level-0 path —
+            # we always fall through to the level-0 sample below. The
+            # level-0 sample within a cell that satisfies cmin > threshold
+            # is guaranteed to give slope ≥ cmin > threshold (bilinear
+            # preserves the cell's elevation range), so termination still
+            # fires there. The cost is one extra level-0 sample for the
+            # ~rare cells that would have cmin-terminated, negligible
+            # against the cmax-skip optimization which dominates.
         end
 
         if !skip_to_next && !terminated
