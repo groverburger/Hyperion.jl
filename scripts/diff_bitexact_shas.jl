@@ -30,15 +30,22 @@ function parse_shas(path)
     return headers, sections
 end
 
-# Discover which backends have SHAs.txt on disk.
+# Discover which backends have SHAs.txt on disk. Auto-scans every
+# subdirectory of `data/outputs/bitexact/`, so cross-machine runs that
+# rename their dirs (e.g. `win_cuda/`, `win_cpu/` from a Windows + CUDA
+# audit) are picked up alongside the local-machine `cpu/` / `metal/`.
 backends = String[]
-for b in ("cpu", "metal", "cuda")
-    isfile(joinpath(BASE, b, "SHAs.txt")) && push!(backends, b)
+if isdir(BASE)
+    for entry in sort(readdir(BASE))
+        startswith(entry, ".") && continue
+        isfile(joinpath(BASE, entry, "SHAs.txt")) && push!(backends, entry)
+    end
 end
 
 if length(backends) < 2
     error("Need at least two backends with SHAs.txt under $BASE. " *
-          "Found: $backends. Run bitexact_test.jl with JM_BACKEND={cpu,metal,cuda}.")
+          "Found: $backends. Run bitexact_test.jl with JM_BACKEND={cpu,metal,cuda} " *
+          "or copy in cross-machine results.")
 end
 
 parsed = Dict(b => parse_shas(joinpath(BASE, b, "SHAs.txt")) for b in backends)

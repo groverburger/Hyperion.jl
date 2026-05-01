@@ -1,0 +1,182 @@
+# cross_vendor_test.ps1
+# ─────────────────────────────────────────────────────────────────────────
+# Cross-vendor bit-exact verification on Windows + NVIDIA CUDA.
+#
+# Workflow (Mac → Windows → Mac):
+#   1. Plug the WD_BLACK drive into a Windows machine with Julia + an
+#      NVIDIA GPU + the CUDA.jl package available in the global Julia env.
+#   2. Open a PowerShell window and `cd` into JuliaMapbuilder (on the
+#      WD_BLACK drive's mount letter, e.g. D:\JuliaMapbuilder).
+#   3. Run:    .\scripts\cross_vendor_test.ps1
+#   4. Wait. The script will write everything it does to
+#      data\outputs\cross_vendor_test_results.log and the per-timestamp
+#      SHAs to data\outputs\bitexact\{cpu,cuda}\SHAs.txt.
+#   5. Eject the drive cleanly, plug it back into the Mac, and tell
+#      Claude to compare the SHAs against the pinned Mac values.
+#
+# What the script tests:
+#   A) Pkg.test() — runs the full test/runtests.jl on Windows x86 CPU.
+#      Includes the 20-timestamp LDEM bit-exact regression and the 1m
+#      site DEM regression. PASS = Windows CPU Float32 produces output
+#      byte-identical to the pinned Apple-Silicon CPU SHAs.
+#   B) bitexact_test.jl JM_BACKEND=cuda — runs the same 20 timestamps on
+#      the NVIDIA GPU, writing per-stage SHAs and raw .bin buffers under
+#      data\outputs\bitexact\cuda\. After bringing the drive back to the
+#      Mac, `scripts/diff_bitexact_shas.jl` compares against the Mac
+#      CPU SHAs to confirm CUDA produces identical output.
+#   C) bitexact_test.jl JM_BACKEND=cpu — same on Windows x86 CPU
+#      (redundant with (A) but written in the same SHAs.txt format,
+#      handy for direct CUDA-vs-CPU diffing on the same machine).
+#
+# What kernel state this verifies (commit at time of writing):
+#   - The dz-cancellation fixes (commits bfda7f6, 533f9ed, facfe85).
+#   - The mipmap-pool/skip/d-alignment fixes (commits b048496, 3a57940).
+#   - The default `mipmap_base = 100` for the site driver (commit 9ecfb43).
+#   - Re-pinned LDEM + 1m site SHAs (commit 122e31d).
+# ─────────────────────────────────────────────────────────────────────────
+
+$ErrorActionPreference = "Continue"
+
+# ─── Locate project root and log file ─────────────────────────────────────
+$ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path
+Set-Location $ProjectRoot
+
+$LogFile = Join-Path $ProjectRoot "data\outputs\cross_vendor_test_results.log"
+New-Item -ItemType Directory -Force (Split-Path $LogFile) | Out-Null
+
+# ─── Logging helper ──────────────────────────────────────────────────────
+function Log($Msg) {
+    $TimestampedLine = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Msg"
+    Write-Host $TimestampedLine
+    Add-Content -Path $LogFile -Value $TimestampedLine
+}
+
+function RunAndLog($Description, $ScriptBlock) {
+    Log ""
+    Log "================================================================"
+    Log "STAGE: $Description"
+    Log "================================================================"
+    $StageStart = Get-Date
+
+    # Tee-Object: write to log file AND stream to terminal in real time.
+    & $ScriptBlock 2>&1 | Tee-Object -FilePath $LogFile -Append
+    $ExitCode = $LASTEXITCODE
+
+    $StageEnd = Get-Date
+    Log "STAGE EXIT: $Description  (exit=$ExitCode, duration=$([int]($StageEnd - $StageStart).TotalSeconds)s)"
+    return $ExitCode
+}
+
+# ─── Header ──────────────────────────────────────────────────────────────
+Log "=================================================================="
+Log "Cross-vendor bit-exact test"
+Log "Project root: $ProjectRoot"
+Log "Hostname:     $env:COMPUTERNAME"
+Log "User:         $env:USERNAME"
+Log "OS:           $((Get-CimInstance Win32_OperatingSystem).Caption)"
+Log "PSVersion:    $($PSVersionTable.PSVersion)"
+$JuliaVersion = & julia --version 2>&1 | Out-String
+Log "Julia:        $($JuliaVersion.Trim())"
+Log "=================================================================="
+
+# ─── Pre-flight: LDEM file ───────────────────────────────────────────────
+$LDEMTarget = Join-Path $ProjectRoot "data\inputs\ldem_80s_20m.img"
+$LDEMSource = Join-Path (Split-Path $ProjectRoot) "mapbuilder\test_inputs\ldem_80s_20m.img"
+$LDEMExpectedSHA = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
+
+Log ""
+Log "Pre-flight: ensuring LDEM is in place at $LDEMTarget"
+if (-not (Test-Path $LDEMTarget) -or ((Get-FileHash $LDEMTarget -Algorithm SHA256).Hash.ToLower() -ne $LDEMExpectedSHA)) {
+    if (Test-Path $LDEMSource) {
+        Log "  Target missing or wrong SHA — copying from $LDEMSource"
+        New-Item -ItemType Directory -Force (Split-Path $LDEMTarget) | Out-Null
+        Copy-Item $LDEMSource $LDEMTarget -Force
+        $ActualSHA = (Get-FileHash $LDEMTarget -Algorithm SHA256).Hash.ToLower()
+        if ($ActualSHA -eq $LDEMExpectedSHA) {
+            Log "  Copy verified: SHA matches"
+        } else {
+            Log "  ERROR: post-copy SHA mismatch. Expected $LDEMExpectedSHA, got $ActualSHA"
+            exit 1
+        }
+    } else {
+        Log "  ERROR: cannot find $LDEMSource. Aborting."
+        exit 1
+    }
+} else {
+    Log "  Target present and SHA matches; skipping copy."
+}
+
+# ─── Pre-flight: site TIF ────────────────────────────────────────────────
+$SiteTIF = Join-Path (Split-Path $ProjectRoot) "mapbuilder\test_inputs\nobile_1m.tif"
+if (Test-Path $SiteTIF) {
+    $env:JULIAMAPBUILDER_SITE_TIF = $SiteTIF
+    Log "Set JULIAMAPBUILDER_SITE_TIF = $SiteTIF"
+} else {
+    Log "WARNING: site TIF not at $SiteTIF — site test will skip"
+}
+
+# ─── Stage 0: instantiate the project ────────────────────────────────────
+$Exit0 = RunAndLog "Pkg.instantiate() — fetch project dependencies" {
+    julia --project -e "using Pkg; Pkg.instantiate()"
+}
+
+# ─── Stage A: full test suite (Windows CPU) ──────────────────────────────
+$ExitA = RunAndLog "Pkg.test() — full regression on Windows CPU" {
+    julia --project -e "using Pkg; Pkg.test()"
+}
+
+# ─── Stage B: bitexact_test.jl with CUDA ─────────────────────────────────
+$env:JM_BACKEND = "cuda"
+$ExitB = RunAndLog "bitexact_test.jl  JM_BACKEND=cuda" {
+    julia --project scripts/bitexact_test.jl
+}
+
+# ─── Stage C: bitexact_test.jl with CPU (Windows x86) ────────────────────
+$env:JM_BACKEND = "cpu"
+$ExitC = RunAndLog "bitexact_test.jl  JM_BACKEND=cpu" {
+    julia --project scripts/bitexact_test.jl
+}
+
+# ─── Rename output dirs so they don't collide with Mac side runs ─────────
+# bitexact_test.jl writes to data/outputs/bitexact/<backend>/. After the
+# drive is plugged back into a Mac and Mac-side runs happen, those would
+# overwrite these Windows results. Move to win_cpu/ + win_cuda/ now.
+$BitexactBase = Join-Path $ProjectRoot "data\outputs\bitexact"
+foreach ($pair in @(@("cpu", "win_cpu"), @("cuda", "win_cuda"))) {
+    $src = Join-Path $BitexactBase $pair[0]
+    $dst = Join-Path $BitexactBase $pair[1]
+    if (Test-Path $src) {
+        if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
+        Move-Item $src $dst
+        Log "Renamed $src → $dst"
+    }
+}
+
+# ─── Summary ─────────────────────────────────────────────────────────────
+Log ""
+Log "=================================================================="
+Log "FINAL SUMMARY"
+Log "=================================================================="
+Log "Stage 0 (Pkg.instantiate):                   exit=$Exit0  $(if ($Exit0 -eq 0) { 'OK' } else { 'FAIL' })"
+Log "Stage A (Pkg.test on Windows CPU):           exit=$ExitA  $(if ($ExitA -eq 0) { 'PASS' } else { 'FAIL' })"
+Log "Stage B (bitexact_test.jl with CUDA):        exit=$ExitB"
+Log "Stage C (bitexact_test.jl with Windows CPU): exit=$ExitC"
+Log ""
+Log "Stage A=PASS means Windows CPU Float32 is byte-identical to the"
+Log "pinned Apple Silicon CPU SHAs in test/bitexact.jl + test/site_1m.jl."
+Log ""
+Log "Stages B and C produced SHA tables at:"
+Log "  data\outputs\bitexact\win_cuda\SHAs.txt   (NVIDIA CUDA)"
+Log "  data\outputs\bitexact\win_cpu\SHAs.txt    (Windows x86 CPU)"
+Log ""
+Log "Bring the drive back to the Mac and run:"
+Log "  julia --project scripts/diff_bitexact_shas.jl"
+Log "to compare across all available backends."
+Log ""
+Log "Log file: $LogFile"
+Log "=================================================================="
+
+if ($Exit0 -ne 0 -or $ExitA -ne 0 -or $ExitB -ne 0 -or $ExitC -ne 0) {
+    exit 1
+}
+exit 0

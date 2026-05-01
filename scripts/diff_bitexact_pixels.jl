@@ -13,10 +13,15 @@ load_u8(path) = reshape(read(path), (H, W))
 # RGB buffer is stored as 3×H×W UInt8.
 load_rgb(path) = reshape(read(path), (3, H, W))
 
-# Discover available backends.
+# Discover available backends. Auto-scans every subdirectory of
+# `data/outputs/bitexact/` (handles cross-machine results renamed to
+# e.g. `win_cuda/`, `win_cpu/` alongside local `cpu/` / `metal/`).
 backends = String[]
-for b in ("cpu", "metal", "cuda")
-    isdir(joinpath(BASE, b)) && push!(backends, b)
+if isdir(BASE)
+    for entry in sort(readdir(BASE))
+        startswith(entry, ".") && continue
+        isdir(joinpath(BASE, entry)) && push!(backends, entry)
+    end
 end
 if length(backends) < 2
     error("Need at least two backends under $BASE. Found: $backends")
