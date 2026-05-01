@@ -1,4 +1,4 @@
-# cross_vendor_test.ps1
+﻿# cross_vendor_test.ps1
 # ─────────────────────────────────────────────────────────────────────────
 # Cross-vendor bit-exact verification on Windows + NVIDIA CUDA.
 #
@@ -45,10 +45,20 @@ $LogFile = Join-Path $ProjectRoot "data\outputs\cross_vendor_test_results.log"
 New-Item -ItemType Directory -Force (Split-Path $LogFile) | Out-Null
 
 # ─── Logging helper ──────────────────────────────────────────────────────
+# Single-writer design: every line goes through AppendLogLine, which uses
+# [System.IO.File]::AppendAllText (open-write-close, UTF-8, no held handle).
+# Avoids the lock contention + UTF-16/UTF-8 encoding mismatch we'd get from
+# mixing Add-Content with Tee-Object -Append on the same file.
+$Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
+function AppendLogLine($Line) {
+    [System.IO.File]::AppendAllText($LogFile, [string]$Line + [Environment]::NewLine, $Utf8NoBom)
+}
+
 function Log($Msg) {
     $TimestampedLine = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Msg"
     Write-Host $TimestampedLine
-    Add-Content -Path $LogFile -Value $TimestampedLine
+    AppendLogLine $TimestampedLine
 }
 
 function RunAndLog($Description, $ScriptBlock) {
@@ -58,8 +68,18 @@ function RunAndLog($Description, $ScriptBlock) {
     Log "================================================================"
     $StageStart = Get-Date
 
-    # Tee-Object: write to log file AND stream to terminal in real time.
-    & $ScriptBlock 2>&1 | Tee-Object -FilePath $LogFile -Append
+    # Stream each line through Write-Host + AppendLogLine so terminal and log
+    # update in real time. ErrorRecord (from native stderr via 2>&1) is
+    # stringified so it lands in the log as text, not as a thrown error.
+    & $ScriptBlock 2>&1 | ForEach-Object {
+        $line = if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            $_.Exception.Message
+        } else {
+            [string]$_
+        }
+        Write-Host $line
+        AppendLogLine $line
+    }
     $ExitCode = $LASTEXITCODE
 
     $StageEnd = Get-Date
@@ -117,12 +137,12 @@ if (Test-Path $SiteTIF) {
 
 # ─── Stage 0: instantiate the project ────────────────────────────────────
 $Exit0 = RunAndLog "Pkg.instantiate() — fetch project dependencies" {
-    julia --project -e "using Pkg; Pkg.instantiate()"
+    julia --project -e 'using Pkg; Pkg.instantiate()'
 }
 
 # ─── Stage A: full test suite (Windows CPU) ──────────────────────────────
 $ExitA = RunAndLog "Pkg.test() — full regression on Windows CPU" {
-    julia --project -e "using Pkg; Pkg.test()"
+    julia --project -e 'using Pkg; Pkg.test()'
 }
 
 # ─── Stage B: bitexact_test.jl with CUDA ─────────────────────────────────
