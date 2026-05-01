@@ -44,7 +44,7 @@ end
 
 if length(backends) < 2
     error("Need at least two backends with SHAs.txt under $BASE. " *
-          "Found: $backends. Run bitexact_test.jl with JM_BACKEND={cpu,metal,cuda} " *
+          "Found: $backends. Run bitexact_test.jl with HYP_BACKEND={cpu,metal,cuda} " *
           "or copy in cross-machine results.")
 end
 

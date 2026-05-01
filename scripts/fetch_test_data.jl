@@ -15,7 +15,7 @@
 
 using Pkg
 Pkg.activate(dirname(@__DIR__))
-import JuliaMapbuilder as JM
+import Hyperion as Hyp
 
-JM.ensure_test_data!()
+Hyp.ensure_test_data!()
 @info "Test data ready"

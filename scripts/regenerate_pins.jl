@@ -8,8 +8,8 @@
 # in parallel with test/fixtures/bitexact/, for easy old-vs-new visual diff
 # (`data/outputs/bitexact_pre_fixes/` was saved before this script ran).
 
-using JuliaMapbuilder
-const JM = JuliaMapbuilder
+using Hyperion
+const Hyp = Hyperion
 import SHA, FileIO
 using Dates
 using KernelAbstractions: CPU
@@ -47,9 +47,9 @@ const TIMESTAMPS = [
 ]
 
 println("Regenerating LDEM bit-exact pins ($(length(TIMESTAMPS)) timestamps) ...")
-ldem = JM.load_ldem("/Volumes/WD_BLACK/mapbuilder/test_inputs/ldem_80s_20m.img")
-JM.init_spice(joinpath(PROJECT_ROOT, "kernels"))
-max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
+ldem = Hyp.load_ldem("/Volumes/WD_BLACK/mapbuilder/test_inputs/ldem_80s_20m.img")
+Hyp.init_spice(joinpath(PROJECT_ROOT, "kernels"))
+max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 const ORIGIN_R, ORIGIN_C = 8960, 18432
 const H, W = 512, 896
 
@@ -63,35 +63,35 @@ open(sha_path, "w") do io
         print("  $ts ... "); flush(stdout)
         t0 = time()
         dt = DateTime(ts, dateformat"yyyy-mm-ddTHH-MM-SS")
-        et = JM.datetime_to_et(dt)
-        sun_t = Tuple(JM.get_body_position(JM.NAIF_SUN, et))
-        earth_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
+        et = Hyp.datetime_to_et(dt)
+        sun_t = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN, et))
+        earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
-        sun, dsn, de, sun_rays = JM.generate_live_shadow_frame_gpu(
+        sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_gpu(
             ldem.data, ORIGIN_R, ORIGIN_C, H, W, sun_t, earth_t, 0.0;
             max_mipmaps = max_mm, min_mipmaps = min_mm,
             backend = CPU(), DeviceArray = Array)
 
         # CPU precompute buffer
         sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
-            JM._precompute_azel(ldem.data, ORIGIN_R, ORIGIN_C, H, W,
+            Hyp._precompute_azel(ldem.data, ORIGIN_R, ORIGIN_C, H, W,
                                 sun_t, earth_t, Float32(0.0))
         azel_bytes = vcat(vec(sun_rc), vec(sun_rs), vec(sun_el),
                           vec(earth_rc), vec(earth_rs), vec(earth_el),
                           vec(sun_tan), vec(dsn_tan))
         azel_sha = bytes2hex(SHA.sha256(reinterpret(UInt8, azel_bytes)))
 
-        sun_rgb = _palette_apply(sun, JM.SUN_PALETTE)
-        dsn_rgb = _palette_apply(dsn, JM.DSN_PALETTE)
+        sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
+        dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
 
         # Write PNG fixtures (overwrite test/fixtures/bitexact/ + copy to compare dir)
         function _save_indexed(path, data, palette)
-            JM.save_indexed_png(data, palette, path)
+            Hyp.save_indexed_png(data, palette, path)
         end
-        _save_indexed(joinpath(FIXTURES,    "$(ts)_sun.png"), sun, JM.SUN_PALETTE)
-        _save_indexed(joinpath(FIXTURES,    "$(ts)_dsn.png"), dsn, JM.DSN_PALETTE)
-        _save_indexed(joinpath(COMPARE_DIR, "$(ts)_sun.png"), sun, JM.SUN_PALETTE)
-        _save_indexed(joinpath(COMPARE_DIR, "$(ts)_dsn.png"), dsn, JM.DSN_PALETTE)
+        _save_indexed(joinpath(FIXTURES,    "$(ts)_sun.png"), sun, Hyp.SUN_PALETTE)
+        _save_indexed(joinpath(FIXTURES,    "$(ts)_dsn.png"), dsn, Hyp.DSN_PALETTE)
+        _save_indexed(joinpath(COMPARE_DIR, "$(ts)_sun.png"), sun, Hyp.SUN_PALETTE)
+        _save_indexed(joinpath(COMPARE_DIR, "$(ts)_dsn.png"), dsn, Hyp.DSN_PALETTE)
 
         # Emit the NamedTuple entry
         println(io, "    \"$ts\" => (")
@@ -114,19 +114,19 @@ end
 # ─── 1m site DEM regeneration ────────────────────────────────────────────
 println()
 println("Regenerating 1m site DEM bit-exact pin ...")
-site = JM.load_site_dem("/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
-max_smm, min_smm = JM.build_site_mipmaps_minmax(site)
+site = Hyp.load_site_dem("/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
+max_smm, min_smm = Hyp.build_site_mipmaps_minmax(site)
 
 const SITE_TS = "2027-06-01T00-00-00"
 const SITE_OR, SITE_OC = 3500, 3500
 const SITE_H, SITE_W = 256, 256
 
 dt = DateTime(SITE_TS, dateformat"yyyy-mm-ddTHH-MM-SS")
-et = JM.datetime_to_et(dt)
-sun_t = Tuple(JM.get_body_position(JM.NAIF_SUN, et))
-earth_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
+et = Hyp.datetime_to_et(dt)
+sun_t = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN, et))
+earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
-sun, dsn, de, sun_rays = JM.generate_live_shadow_frame_site_gpu(
+sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_site_gpu(
     site, sun_t, earth_t, 0.0;
     max_mipmaps = max_smm, min_mipmaps = min_smm,
     backend = CPU(), DeviceArray = Array,
@@ -134,10 +134,10 @@ sun, dsn, de, sun_rays = JM.generate_live_shadow_frame_site_gpu(
 
 data_sub = site.data[SITE_OR+1:SITE_OR+SITE_H, SITE_OC+1:SITE_OC+SITE_W]
 
-sun_local   = JM._moonme_to_local(sun_t,   site.lat0, site.lon0)
-earth_local = JM._moonme_to_local(earth_t, site.lat0, site.lon0)
+sun_local   = Hyp._moonme_to_local(sun_t,   site.lat0, site.lon0)
+earth_local = Hyp._moonme_to_local(earth_t, site.lat0, site.lon0)
 sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
-    JM._precompute_azel(site.data, SITE_OR, SITE_OC, SITE_H, SITE_W,
+    Hyp._precompute_azel(site.data, SITE_OR, SITE_OC, SITE_H, SITE_W,
                         sun_local, earth_local, Float32(0.0);
                         s0 = Float32(site.s0), l0 = Float32(site.l0),
                         pixel_size_km = Float32(site.pixel_size_m / 1000.0))

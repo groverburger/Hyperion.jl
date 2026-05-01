@@ -5,8 +5,8 @@
 # Workflow (Mac → Windows → Mac):
 #   1. Plug the WD_BLACK drive into a Windows machine with Julia + an
 #      NVIDIA GPU + the CUDA.jl package available in the global Julia env.
-#   2. Open a PowerShell window and `cd` into JuliaMapbuilder (on the
-#      WD_BLACK drive's mount letter, e.g. D:\JuliaMapbuilder).
+#   2. Open a PowerShell window and `cd` into Hyperion.jl (on the
+#      WD_BLACK drive's mount letter, e.g. D:\Hyperion.jl).
 #   3. Run:    .\scripts\cross_vendor_test.ps1
 #   4. Wait. The script will write everything it does to
 #      data\outputs\cross_vendor_test_results.log and the per-timestamp
@@ -19,12 +19,12 @@
 #      Includes the 20-timestamp LDEM bit-exact regression and the 1m
 #      site DEM regression. PASS = Windows CPU Float32 produces output
 #      byte-identical to the pinned Apple-Silicon CPU SHAs.
-#   B) bitexact_test.jl JM_BACKEND=cuda — runs the same 20 timestamps on
+#   B) bitexact_test.jl HYP_BACKEND=cuda — runs the same 20 timestamps on
 #      the NVIDIA GPU, writing per-stage SHAs and raw .bin buffers under
 #      data\outputs\bitexact\cuda\. After bringing the drive back to the
 #      Mac, `scripts/diff_bitexact_shas.jl` compares against the Mac
 #      CPU SHAs to confirm CUDA produces identical output.
-#   C) bitexact_test.jl JM_BACKEND=cpu — same on Windows x86 CPU
+#   C) bitexact_test.jl HYP_BACKEND=cpu — same on Windows x86 CPU
 #      (redundant with (A) but written in the same SHAs.txt format,
 #      handy for direct CUDA-vs-CPU diffing on the same machine).
 #
@@ -129,8 +129,8 @@ if (-not (Test-Path $LDEMTarget) -or ((Get-FileHash $LDEMTarget -Algorithm SHA25
 # ─── Pre-flight: site TIF ────────────────────────────────────────────────
 $SiteTIF = Join-Path (Split-Path $ProjectRoot) "mapbuilder\test_inputs\nobile_1m.tif"
 if (Test-Path $SiteTIF) {
-    $env:JULIAMAPBUILDER_SITE_TIF = $SiteTIF
-    Log "Set JULIAMAPBUILDER_SITE_TIF = $SiteTIF"
+    $env:HYPERION_SITE_TIF = $SiteTIF
+    Log "Set HYPERION_SITE_TIF = $SiteTIF"
 } else {
     Log "WARNING: site TIF not at $SiteTIF — site test will skip"
 }
@@ -146,14 +146,14 @@ $ExitA = RunAndLog "Pkg.test() — full regression on Windows CPU" {
 }
 
 # ─── Stage B: bitexact_test.jl with CUDA ─────────────────────────────────
-$env:JM_BACKEND = "cuda"
-$ExitB = RunAndLog "bitexact_test.jl  JM_BACKEND=cuda" {
+$env:HYP_BACKEND = "cuda"
+$ExitB = RunAndLog "bitexact_test.jl  HYP_BACKEND=cuda" {
     julia --project scripts/bitexact_test.jl
 }
 
 # ─── Stage C: bitexact_test.jl with CPU (Windows x86) ────────────────────
-$env:JM_BACKEND = "cpu"
-$ExitC = RunAndLog "bitexact_test.jl  JM_BACKEND=cpu" {
+$env:HYP_BACKEND = "cpu"
+$ExitC = RunAndLog "bitexact_test.jl  HYP_BACKEND=cpu" {
     julia --project scripts/bitexact_test.jl
 }
 

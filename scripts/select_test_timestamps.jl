@@ -4,20 +4,20 @@
 
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Dates, Printf
-import JuliaMapbuilder as JM
+import Hyperion as Hyp
 
 const KERNELS = joinpath(dirname(@__DIR__), "kernels")
 
 @info "Loading"
-_, nobile_path = JM.ensure_test_data!()
-dem = JM.load_shadow_dem(nobile_path)
+_, nobile_path = Hyp.ensure_test_data!()
+dem = Hyp.load_shadow_dem(nobile_path)
 H, W = dem.H, dem.W
 mr, mc = H ÷ 2 + 1, W ÷ 2 + 1
 
-JM.init_spice(KERNELS)
+Hyp.init_spice(KERNELS)
 
 function azel_at(body_id, et)
-    pos = JM.get_body_position(body_id, et)
+    pos = Hyp.get_body_position(body_id, et)
     r = mr; c = mc
     lx = dem.R[r,c,1,1]*pos[1] + dem.R[r,c,1,2]*pos[2] + dem.R[r,c,1,3]*pos[3] + dem.T[r,c,1]
     ly = dem.R[r,c,2,1]*pos[1] + dem.R[r,c,2,2]*pos[2] + dem.R[r,c,2,3]*pos[3] + dem.T[r,c,2]
@@ -30,9 +30,9 @@ end
 samples = Tuple{DateTime,Float64,Float64,Float64,Float64}[]
 let dt = DateTime(2026, 1, 1), stop = DateTime(2026, 12, 31, 23, 0, 0)
     while dt <= stop
-        et = JM.datetime_to_et(dt)
-        sun_az, sun_el = azel_at(JM.NAIF_SUN, et)
-        earth_az, earth_el = azel_at(JM.NAIF_EARTH, et)
+        et = Hyp.datetime_to_et(dt)
+        sun_az, sun_el = azel_at(Hyp.NAIF_SUN, et)
+        earth_az, earth_el = azel_at(Hyp.NAIF_EARTH, et)
         push!(samples, (dt, sun_az, sun_el, earth_az, earth_el))
         dt += Dates.Hour(6)
     end

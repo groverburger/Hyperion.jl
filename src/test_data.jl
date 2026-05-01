@@ -18,7 +18,7 @@ const _LDEM_DIM   = 30400                     # LDEM is 30400×30400 Int16
 const _LDEM_SIZE_GB = 1.85
 
 # Nobile test window in LDEM pixel coordinates. These values are verified
-# byte-exact against the original nobile_20m.tif in the mapbuilder reference
+# byte-exact against the original nobile_20m.tif from the upstream reference
 # pipeline (see scripts/fetch_test_data.jl history for the provenance).
 const _NOBILE_ROW   = 8960
 const _NOBILE_COL   = 18432

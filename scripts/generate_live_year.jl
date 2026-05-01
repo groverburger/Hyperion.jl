@@ -1,11 +1,11 @@
 #!/usr/bin/env julia
 # Generate a full year of live shadow maps (June 2027 – June 2028, 2h step)
-# for Nobile and compare against the mapbuilder precomputed reference.
+# for Nobile and compare against the precomputed reference dataset.
 # Times each timestep and computes per-frame diff + SSIM.
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Dates, Printf, Statistics
 using Images, FileIO
-import JuliaMapbuilder as JM
+import Hyperion as Hyp
 
 using Metal
 const BACKEND    = Metal.MetalBackend()
@@ -26,12 +26,12 @@ mkpath(joinpath(OUT_ROOT, "dsn_000"))
 
 # ─── Setup ────────────────────────────────────────────────────────────────
 @info "Loading LDEM + SPICE"
-ldem = JM.load_ldem(JM.ensure_ldem!())
-JM.init_spice(KERNELS)
+ldem = Hyp.load_ldem(Hyp.ensure_ldem!())
+Hyp.init_spice(KERNELS)
 
 @info "Building mipmap pyramids"
 t_prep = @elapsed begin
-    max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
+    max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 end
 @printf("Mipmap build: %.2f s\n", t_prep)
 
@@ -74,32 +74,32 @@ sun_mabs  = Float64[]; dsn_mabs  = Float64[]
 
 # Warmup: one kernel launch to avoid counting compilation time in first ts
 @info "GPU warmup"
-let et = JM.datetime_to_et(timestamps[1])
-    s_t = Tuple(JM.get_body_position(JM.NAIF_SUN,   et))
-    e_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
-    JM.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
+let et = Hyp.datetime_to_et(timestamps[1])
+    s_t = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+    e_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
+    Hyp.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
         s_t, e_t, 0.0; max_mipmaps=max_mm, min_mipmaps=min_mm, backend=BACKEND, DeviceArray=DEVICE_ARR)
 end
 @info "Starting full year"
 
 for (i, dt) in enumerate(timestamps)
-    et = JM.datetime_to_et(dt)
-    sun_t   = Tuple(JM.get_body_position(JM.NAIF_SUN,   et))
-    earth_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
+    et = Hyp.datetime_to_et(dt)
+    sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+    earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
     ts = fmt(dt)
 
     # GPU timed
     t_gpu = @elapsed begin
-        sun_gpu, dsn_gpu, _, _ = JM.generate_live_shadow_frame_gpu(ldem.data,
+        sun_gpu, dsn_gpu, _, _ = Hyp.generate_live_shadow_frame_gpu(ldem.data,
             origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
             max_mipmaps=max_mm, min_mipmaps=min_mm, backend=BACKEND, DeviceArray=DEVICE_ARR)
     end
     push!(gpu_times, t_gpu)
 
     # Save
-    JM.save_indexed_png(sun_gpu, JM.SUN_PALETTE,
+    Hyp.save_indexed_png(sun_gpu, Hyp.SUN_PALETTE,
         joinpath(OUT_ROOT, "sun_000", "sun_000.$ts.png"))
-    JM.save_indexed_png(dsn_gpu, JM.DSN_PALETTE,
+    Hyp.save_indexed_png(dsn_gpu, Hyp.DSN_PALETTE,
         joinpath(OUT_ROOT, "dsn_000", "dsn_000.$ts.png"))
 
     # Compare against reference (load the reference PNGs and pull their index

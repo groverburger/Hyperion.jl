@@ -3,7 +3,7 @@
 # Pick your backend below.
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Dates, Printf, Statistics
-import JuliaMapbuilder as JM
+import Hyperion as Hyp
 
 using Metal
 const BACKEND    = Metal.MetalBackend()
@@ -13,9 +13,9 @@ const DEVICE_ARR = Metal.MtlArray
 # const BACKEND    = CUDA.CUDABackend()
 # const DEVICE_ARR = CUDA.CuArray
 
-ldem = JM.load_ldem(JM.ensure_ldem!())
-JM.init_spice(joinpath(dirname(@__DIR__), "kernels"))
-max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
+ldem = Hyp.load_ldem(Hyp.ensure_ldem!())
+Hyp.init_spice(joinpath(dirname(@__DIR__), "kernels"))
+max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 
 # Use a high-sun timestamp (slowest in the year) to get the most signal
 dts = [DateTime(2027, 7, 16, 8, 0, 0),   # slowest from year gen
@@ -27,22 +27,22 @@ H, W = 512, 896
 function bench(wg_size::Int, n_reps::Int=3)
     # Warmup
     for dt in dts
-        et = JM.datetime_to_et(dt)
-        s_t = Tuple(JM.get_body_position(JM.NAIF_SUN,   et))
-        e_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
-        JM.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
+        et = Hyp.datetime_to_et(dt)
+        s_t = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+        e_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
+        Hyp.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
             s_t, e_t, 0.0; max_mipmaps=max_mm, min_mipmaps=min_mm,
             workgroup_size=wg_size)
     end
 
     total_t = Float64[]
     for dt in dts
-        et = JM.datetime_to_et(dt)
-        s_t = Tuple(JM.get_body_position(JM.NAIF_SUN,   et))
-        e_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
+        et = Hyp.datetime_to_et(dt)
+        s_t = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+        e_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
         times = Float64[]
         for _ in 1:n_reps
-            t = @elapsed JM.generate_live_shadow_frame_gpu(ldem.data,
+            t = @elapsed Hyp.generate_live_shadow_frame_gpu(ldem.data,
                 origin_r, origin_c, H, W, s_t, e_t, 0.0;
                 max_mipmaps=max_mm, min_mipmaps=min_mm, workgroup_size=wg_size,
             backend=BACKEND, DeviceArray=DEVICE_ARR)

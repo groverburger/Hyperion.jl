@@ -1,4 +1,4 @@
-module JuliaMapbuilder
+module Hyperion
 
 # Live-only build: GPU-first, cross-platform via KernelAbstractions.
 # The precomputed-horizons pipeline and the CPU live path have been removed.
@@ -19,4 +19,4 @@ function __init__()
     end
 end
 
-end # module JuliaMapbuilder
+end # module Hyperion

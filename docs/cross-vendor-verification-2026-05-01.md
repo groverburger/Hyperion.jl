@@ -29,8 +29,8 @@ All three ran the same `scripts/bitexact_test.jl` over the canonical
    - Stage 0: `Pkg.instantiate()`
    - Stage A: `Pkg.test()` — full regression on Windows CPU, including
      the 20m LDEM bit-exact pin and the 1m site DEM pin.
-   - Stage B: `bitexact_test.jl` with `JM_BACKEND=cuda`
-   - Stage C: `bitexact_test.jl` with `JM_BACKEND=cpu`
+   - Stage B: `bitexact_test.jl` with `HYP_BACKEND=cuda`
+   - Stage C: `bitexact_test.jl` with `HYP_BACKEND=cpu`
    Then renamed `data/outputs/bitexact/cuda/` → `win_cuda/` and
    `data/outputs/bitexact/cpu/` → `win_cpu/` so they wouldn't be
    overwritten by the upcoming Mac run.

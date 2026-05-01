@@ -1,6 +1,6 @@
 using Test
-using JuliaMapbuilder
-const JM = JuliaMapbuilder
+using Hyperion
+const Hyp = Hyperion
 import SHA
 using Dates
 
@@ -13,7 +13,7 @@ const PROJECT_ROOT = dirname(@__DIR__)
 # a no-op. If the machine has no network, LDEM-dependent test sets are
 # skipped and the quick unit tests still run.
 const LDEM_PATH = try
-    JM.ensure_ldem!()
+    Hyp.ensure_ldem!()
 catch e
     @warn "Could not provision LDEM — LDEM-dependent tests will be skipped. " *
           "To retry manually: `julia --project scripts/fetch_test_data.jl`." exception=e
@@ -29,28 +29,28 @@ end
 
 @testset "Deterministic math" begin
     @testset "LUT SHA integrity" begin
-        @test JM.verify_lut_integrity()
+        @test Hyp.verify_lut_integrity()
     end
 
     @testset "atan2_lut" begin
-        @test JM.atan2_lut(0f0, 0f0) === 0f0
-        @test JM.atan2_lut(0f0, 1f0) ≈ 0f0 atol=1f-5
-        @test JM.atan2_lut(1f0, 0f0) ≈ Float32(π/2) atol=1f-4
-        @test JM.atan2_lut(0f0, -1f0) ≈ Float32(π) atol=1f-4
-        @test JM.atan2_lut(-1f0, 0f0) ≈ Float32(-π/2) atol=1f-4
-        @test JM.atan2_lut(1f0, 1f0) ≈ Float32(π/4) atol=1f-4
+        @test Hyp.atan2_lut(0f0, 0f0) === 0f0
+        @test Hyp.atan2_lut(0f0, 1f0) ≈ 0f0 atol=1f-5
+        @test Hyp.atan2_lut(1f0, 0f0) ≈ Float32(π/2) atol=1f-4
+        @test Hyp.atan2_lut(0f0, -1f0) ≈ Float32(π) atol=1f-4
+        @test Hyp.atan2_lut(-1f0, 0f0) ≈ Float32(-π/2) atol=1f-4
+        @test Hyp.atan2_lut(1f0, 1f0) ≈ Float32(π/4) atol=1f-4
     end
 
     @testset "cos_sin_lut" begin
-        c, s = JM.cos_sin_lut(0f0)
+        c, s = Hyp.cos_sin_lut(0f0)
         @test c ≈ 1f0 atol=1f-5
         @test s ≈ 0f0 atol=1f-5
 
-        c, s = JM.cos_sin_lut(JM.PI_HALF_F32)
+        c, s = Hyp.cos_sin_lut(Hyp.PI_HALF_F32)
         @test c ≈ 0f0 atol=1f-4
         @test s ≈ 1f0 atol=1f-4
 
-        c, s = JM.cos_sin_lut(JM.PI_F32)
+        c, s = Hyp.cos_sin_lut(Hyp.PI_F32)
         @test c ≈ -1f0 atol=1f-4
         @test s ≈ 0f0 atol=1f-4
     end
@@ -62,15 +62,15 @@ end
     # Identity check: round-trip through projection at a typical Nobile pixel
     cx, cy = 19000f0, 9300f0
     elev_m = 500f0
-    x, y, z = JM._stereo_to_moonme_f32(cx, cy, elev_m)
+    x, y, z = Hyp._stereo_to_moonme_f32(cx, cy, elev_m)
     # Should lie on sphere of radius R + elev/1000 km
-    R_total = JM.R_KM_F32 + elev_m * 0.001f0
+    R_total = Hyp.R_KM_F32 + elev_m * 0.001f0
     r = sqrt(x*x + y*y + z*z)
     @test abs(r - R_total) < 0.001f0
 
     # Query setup orthonormality: M should be a rotation matrix.
     (_qx, _qy, _qz, M11, M12, M13, M21, M22, M23, M31, M32, M33, _, _, _) =
-        JM._live_query_setup_f32(cx, cy, elev_m)
+        Hyp._live_query_setup_f32(cx, cy, elev_m)
     # Row norms ≈ 1
     @test abs(M11*M11 + M12*M12 + M13*M13 - 1f0) < 1f-4
     @test abs(M21*M21 + M22*M22 + M23*M23 - 1f0) < 1f-4
@@ -85,12 +85,12 @@ end
 
 if HAS_LDEM
     @testset "Mipmap pyramid" begin
-        ldem = JM.load_ldem(LDEM_PATH)
-        max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
-        @test length(max_mm) == JM.N_MIPMAP_LEVELS
-        @test length(min_mm) == JM.N_MIPMAP_LEVELS
+        ldem = Hyp.load_ldem(LDEM_PATH)
+        max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
+        @test length(max_mm) == Hyp.N_MIPMAP_LEVELS
+        @test length(min_mm) == Hyp.N_MIPMAP_LEVELS
         # Each level halves size
-        for lvl in 2:JM.N_MIPMAP_LEVELS
+        for lvl in 2:Hyp.N_MIPMAP_LEVELS
             prev = max_mm[lvl - 1]; cur = max_mm[lvl]
             @test size(cur, 1) == size(prev, 1) ÷ 2
             @test size(cur, 2) == size(prev, 2) ÷ 2

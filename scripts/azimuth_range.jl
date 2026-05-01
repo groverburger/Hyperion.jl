@@ -7,7 +7,7 @@ using Pkg
 Pkg.activate(dirname(@__DIR__))
 
 using Dates, Printf
-import JuliaMapbuilder as JM
+import Hyperion as Hyp
 
 const REPO    = dirname(@__DIR__)
 const KERNELS = joinpath(REPO, "kernels")
@@ -15,15 +15,15 @@ const KERNELS = joinpath(REPO, "kernels")
 const F32_RAD2DEG = Float32(180.0) / Float32(π)
 
 @info "Loading DEM"
-_, nobile_path = JM.ensure_test_data!()
-dem = JM.load_shadow_dem(nobile_path)
+_, nobile_path = Hyp.ensure_test_data!()
+dem = Hyp.load_shadow_dem(nobile_path)
 H, W = dem.H, dem.W
 mr = H ÷ 2 + 1    # midpoint row (1-indexed)
 mc = W ÷ 2 + 1    # midpoint col (1-indexed)
 @info "Midpoint pixel" row=mr col=mc size="$(H)×$(W)"
 
 @info "Initializing SPICE"
-JM.init_spice(KERNELS)
+Hyp.init_spice(KERNELS)
 
 # Timestep grid: June 1 2027 00:00 → June 1 2028 00:00, 2h steps
 start_dt = DateTime(2027, 6, 1, 0, 0, 0)
@@ -40,8 +40,8 @@ n = length(timesteps)
 @info "Timestep grid" n=n
 
 # Compute az/el at the midpoint for each timestep, each body
-function azel_at(body_id::Int, et::Float64, dem::JM.ShadowDEM, r::Int, c::Int)
-    pos = JM.get_body_position(body_id, et)
+function azel_at(body_id::Int, et::Float64, dem::Hyp.ShadowDEM, r::Int, c::Int)
+    pos = Hyp.get_body_position(body_id, et)
     lx = dem.R[r,c,1,1]*pos[1] + dem.R[r,c,1,2]*pos[2] + dem.R[r,c,1,3]*pos[3] + dem.T[r,c,1]
     ly = dem.R[r,c,2,1]*pos[1] + dem.R[r,c,2,2]*pos[2] + dem.R[r,c,2,3]*pos[3] + dem.T[r,c,2]
     lz = dem.R[r,c,3,1]*pos[1] + dem.R[r,c,3,2]*pos[2] + dem.R[r,c,3,3]*pos[3] + dem.T[r,c,3]
@@ -56,7 +56,7 @@ earth_az = Vector{Float64}(undef, n)
 earth_el = Vector{Float64}(undef, n)
 
 for (i, dt) in enumerate(timesteps)
-    et = JM.datetime_to_et(dt)
+    et = Hyp.datetime_to_et(dt)
     sun_az[i], sun_el[i]   = azel_at(10, et, dem, mr, mc)
     earth_az[i], earth_el[i] = azel_at(399, et, dem, mr, mc)
 end

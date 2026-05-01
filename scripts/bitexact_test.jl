@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 # Cross-vendor bit-exactness forensic harness. 896×512 frame × 20
 # representative timestamps × any backend (metal | cuda | cpu via
-# JM_BACKEND). Runs the IEEE-math guard first (hard-aborts on any
+# HYP_BACKEND). Runs the IEEE-math guard first (hard-aborts on any
 # fma/div/sqrt bit-pattern drift), emits per-timestamp SHAs for every
 # stage (sun, dsn, sun_rgb, dsn_rgb, de, d_0..d_7, azel), writes PNGs,
 # and dumps raw .bin buffers for offline pairwise diff.
@@ -20,9 +20,9 @@ using Pkg; Pkg.activate(dirname(@__DIR__))
 using Dates, Printf, SHA
 using KernelAbstractions: KernelAbstractions, @kernel, @index, synchronize
 import FileIO
-import JuliaMapbuilder as JM
+import Hyperion as Hyp
 
-const BACKEND_NAME = lowercase(get(ENV, "JM_BACKEND", "metal"))
+const BACKEND_NAME = lowercase(get(ENV, "HYP_BACKEND", "metal"))
 BACKEND, DEVICE_ARR = if BACKEND_NAME == "metal"
     @eval using Metal
     (Metal.MetalBackend(), Metal.MtlArray)
@@ -32,7 +32,7 @@ elseif BACKEND_NAME == "cuda"
 elseif BACKEND_NAME == "cpu"
     (KernelAbstractions.CPU(), Array)
 else
-    error("Unknown JM_BACKEND='$BACKEND_NAME' — use metal|cuda|cpu")
+    error("Unknown HYP_BACKEND='$BACKEND_NAME' — use metal|cuda|cpu")
 end
 
 @info "Backend" name=BACKEND_NAME
@@ -109,9 +109,9 @@ const KERNELS = joinpath(REPO, "kernels")
 mkpath(OUT)
 
 @info "Loading"
-ldem = JM.load_ldem(JM.ensure_ldem!())
-JM.init_spice(KERNELS)
-max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
+ldem = Hyp.load_ldem(Hyp.ensure_ldem!())
+Hyp.init_spice(KERNELS)
+max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 
 origin_r, origin_c = 8960, 18432
 H, W = 512, 896
@@ -169,7 +169,7 @@ end
 # via FileIO, hash the decoded bytes. Compares against the in-memory RGB
 # hash to confirm encode→decode is lossless on this platform.
 function _png_roundtrip_sha(data::Matrix{UInt8}, palette::Matrix{UInt8}, path::AbstractString)
-    JM.save_indexed_png(data, palette, path)
+    Hyp.save_indexed_png(data, palette, path)
     img = FileIO.load(path)             # Matrix{RGB{N0f8}}, H×W
     img_bytes = reinterpret(UInt8, vec(img))
     return bytes2hex(sha256(img_bytes))
@@ -202,10 +202,10 @@ println(sha_io, "")
 
 # Warmup so the first frame doesn't include kernel compile time in its SHA
 # (SHAs aren't time-dependent, just for timing cleanliness)
-let et = JM.datetime_to_et(test_dts[1])
-    s_t = Tuple(JM.get_body_position(JM.NAIF_SUN,   et))
-    e_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
-    JM.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
+let et = Hyp.datetime_to_et(test_dts[1])
+    s_t = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+    e_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
+    Hyp.generate_live_shadow_frame_gpu(ldem.data, origin_r, origin_c, H, W,
         s_t, e_t, 0.0; max_mipmaps=max_mm, min_mipmaps=min_mm,
         backend=BACKEND, DeviceArray=DEVICE_ARR)
 end
@@ -214,12 +214,12 @@ for dt in test_dts
     tag = Dates.format(dt, "yyyy-mm-ddTHH-MM-SS")
     @info "Frame" dt=tag
 
-    et = JM.datetime_to_et(dt)
-    sun_t   = Tuple(JM.get_body_position(JM.NAIF_SUN,   et))
-    earth_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
+    et = Hyp.datetime_to_et(dt)
+    sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+    earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
     t0 = time()
-    sun, dsn, de, sun_rays = JM.generate_live_shadow_frame_gpu(ldem.data,
+    sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_gpu(ldem.data,
         origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
         max_mipmaps=max_mm, min_mipmaps=min_mm,
         backend=BACKEND, DeviceArray=DEVICE_ARR)
@@ -227,7 +227,7 @@ for dt in test_dts
 
     # Also capture the CPU-side azel buffer so we can detect CPU-side drift.
     sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
-        JM._precompute_azel(ldem.data, origin_r, origin_c, H, W,
+        Hyp._precompute_azel(ldem.data, origin_r, origin_c, H, W,
                             sun_t, earth_t, Float32(0.0))
     azel_bytes = vcat(vec(sun_rc), vec(sun_rs), vec(sun_el),
                       vec(earth_rc), vec(earth_rs), vec(earth_el),
@@ -239,14 +239,14 @@ for dt in test_dts
 
     # End-to-end audit: palette-applied RGB (the user-visible content) and
     # PNG round-trip lossless check (per-platform sanity for the encoder).
-    sun_rgb = _palette_apply(sun, JM.SUN_PALETTE)
-    dsn_rgb = _palette_apply(dsn, JM.DSN_PALETTE)
+    sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
+    dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
     sun_rgb_h = hex(sun_rgb)
     dsn_rgb_h = hex(dsn_rgb)
 
     outdir = joinpath(OUT, tag); mkpath(outdir)
-    sun_png_h = _png_roundtrip_sha(sun, JM.SUN_PALETTE, joinpath(outdir, "sun.png"))
-    dsn_png_h = _png_roundtrip_sha(dsn, JM.DSN_PALETTE, joinpath(outdir, "dsn.png"))
+    sun_png_h = _png_roundtrip_sha(sun, Hyp.SUN_PALETTE, joinpath(outdir, "sun.png"))
+    dsn_png_h = _png_roundtrip_sha(dsn, Hyp.DSN_PALETTE, joinpath(outdir, "dsn.png"))
     if sun_png_h != sun_rgb_h
         error("PNG roundtrip lost bits for sun on backend=$BACKEND_NAME, tag=$tag")
     end

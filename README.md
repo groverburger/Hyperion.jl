@@ -1,4 +1,4 @@
-# JuliaMapbuilder — live shadow generation (GPU, cross-platform)
+# Hyperion — live shadow generation (GPU, cross-platform)
 
 Lunar shadow-map generator. This branch (`live-only`) has only the
 live raycasting GPU pipeline — the precomputed-horizons codepath and
@@ -20,7 +20,7 @@ Fresh clone to running tests is three commands:
 
 ```
 git clone …
-cd JuliaMapbuilder
+cd Hyperion.jl
 git checkout live-only
 julia --project -e 'using Pkg; Pkg.instantiate()'
 julia --project -e 'using Pkg; Pkg.test()'
@@ -37,7 +37,7 @@ derive the Nobile GTiff used by diagnostic scripts):
 julia --project scripts/fetch_test_data.jl
 ```
 
-Both paths call the same `JuliaMapbuilder.ensure_ldem!()` /
+Both paths call the same `Hyperion.ensure_ldem!()` /
 `ensure_test_data!()` functions, so they're safe to mix.
 
 ### GPU backends (optional)
@@ -83,13 +83,13 @@ For a cross-vendor forensic audit (actual Metal or CUDA hardware +
 raw .bin buffers), use `scripts/bitexact_test.jl`:
 
 ```
-JM_BACKEND=metal julia --project scripts/bitexact_test.jl   # or cuda / cpu
+HYP_BACKEND=metal julia --project scripts/bitexact_test.jl   # or cuda / cpu
 ```
 
 ## Library API
 
 ```julia
-using JuliaMapbuilder
+using Hyperion
 using Metal   # or CUDA, AMDGPU
 
 ldem = load_ldem("data/inputs/ldem_80s_20m.img")

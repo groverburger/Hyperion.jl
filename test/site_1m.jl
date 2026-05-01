@@ -15,8 +15,8 @@
 #   julia --project test/site_1m.jl            (standalone)
 
 using Test
-using JuliaMapbuilder
-const JM = JuliaMapbuilder
+using Hyperion
+const Hyp = Hyperion
 import SHA
 using Dates
 using KernelAbstractions: CPU
@@ -25,7 +25,7 @@ using KernelAbstractions: CPU
 # for `julia --project test/site_1m.jl` standalone runs.
 @isdefined(PROJECT_ROOT) || (const PROJECT_ROOT = dirname(@__DIR__))
 
-const SITE_TIF_PATH = get(ENV, "JULIAMAPBUILDER_SITE_TIF",
+const SITE_TIF_PATH = get(ENV, "HYPERION_SITE_TIF",
     "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
 
 if !isfile(SITE_TIF_PATH)
@@ -58,7 +58,7 @@ const SITE_KNOWN_GOOD = (
 _sha(v) = bytes2hex(SHA.sha256(collect(reinterpret(UInt8, vec(v)))))
 
 @testset "1m site DEM bit-exactness ($(SITE_KNOWN_GOOD.timestamp))" begin
-    site = JM.load_site_dem(SITE_TIF_PATH)
+    site = Hyp.load_site_dem(SITE_TIF_PATH)
     @testset "loader smoke" begin
         @test site.H == 4096
         @test site.W == 4992
@@ -68,25 +68,25 @@ _sha(v) = bytes2hex(SHA.sha256(collect(reinterpret(UInt8, vec(v)))))
         @test rad2deg(site.lon0) ≈  31.149274634101502 atol=1e-9
     end
 
-    max_mm, min_mm = JM.build_site_mipmaps_minmax(site)
+    max_mm, min_mm = Hyp.build_site_mipmaps_minmax(site)
     @testset "mipmap shape" begin
-        @test length(max_mm) == JM.N_MIPMAP_LEVELS
-        @test length(min_mm) == JM.N_MIPMAP_LEVELS
+        @test length(max_mm) == Hyp.N_MIPMAP_LEVELS
+        @test length(min_mm) == Hyp.N_MIPMAP_LEVELS
         @test size(max_mm[1]) == (site.H, site.W)
-        for lvl in 2:JM.N_MIPMAP_LEVELS
+        for lvl in 2:Hyp.N_MIPMAP_LEVELS
             @test size(max_mm[lvl], 1) == size(max_mm[lvl-1], 1) ÷ 2
             @test size(max_mm[lvl], 2) == size(max_mm[lvl-1], 2) ÷ 2
         end
     end
 
     # Pinned-region kernel run.
-    JM.init_spice(joinpath(PROJECT_ROOT, "kernels"))
+    Hyp.init_spice(joinpath(PROJECT_ROOT, "kernels"))
     dt = DateTime(SITE_KNOWN_GOOD.timestamp, dateformat"yyyy-mm-ddTHH-MM-SS")
-    et = JM.datetime_to_et(dt)
-    sun_t = Tuple(JM.get_body_position(JM.NAIF_SUN, et))
-    earth_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
+    et = Hyp.datetime_to_et(dt)
+    sun_t = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN, et))
+    earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
-    sun, dsn, de, sun_rays = JM.generate_live_shadow_frame_site_gpu(
+    sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_site_gpu(
         site, sun_t, earth_t, 0.0;
         max_mipmaps = max_mm, min_mipmaps = min_mm,
         backend = CPU(), DeviceArray = Array,
@@ -100,10 +100,10 @@ _sha(v) = bytes2hex(SHA.sha256(collect(reinterpret(UInt8, vec(v)))))
 
     # CPU precompute buffer: catches MOON_ME→local rotation + projection
     # parameterization regressions.
-    sun_local   = JM._moonme_to_local(sun_t,   site.lat0, site.lon0)
-    earth_local = JM._moonme_to_local(earth_t, site.lat0, site.lon0)
+    sun_local   = Hyp._moonme_to_local(sun_t,   site.lat0, site.lon0)
+    earth_local = Hyp._moonme_to_local(earth_t, site.lat0, site.lon0)
     sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
-        JM._precompute_azel(site.data,
+        Hyp._precompute_azel(site.data,
                             SITE_KNOWN_GOOD.origin_r, SITE_KNOWN_GOOD.origin_c,
                             SITE_KNOWN_GOOD.H, SITE_KNOWN_GOOD.W,
                             sun_local, earth_local, Float32(0.0);

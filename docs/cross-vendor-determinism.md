@@ -96,7 +96,7 @@ so a broken host doesn't mask a broken backend.
    for regression localization.
 
    For each frame the test also writes the actual PNG file
-   (`sun.png`, `dsn.png`) via `JM.save_indexed_png`, immediately reads
+   (`sun.png`, `dsn.png`) via `Hyperion.save_indexed_png`, immediately reads
    it back via `FileIO.load`, and verifies the decoded RGB bytes equal
    the in-memory `sun_rgb` / `dsn_rgb` hash. Hard-aborts on mismatch.
    This catches PNG-encoder regressions per-platform.
@@ -107,8 +107,8 @@ so a broken host doesn't mask a broken backend.
    decoded content equals `sun_rgb` / `dsn_rgb` on any platform that
    reads the file.
 2. Run on all three backends: `julia --project scripts/bitexact_test.jl`
-   with `JM_BACKEND ∈ {metal, cuda, cpu}`. Metal and cpu run on Mac;
-   cuda runs on Windows (plug the drive in, `JM_BACKEND=cuda julia
+   with `HYP_BACKEND ∈ {metal, cuda, cpu}`. Metal and cpu run on Mac;
+   cuda runs on Windows (plug the drive in, `HYP_BACKEND=cuda julia
    --project scripts/bitexact_test.jl`). A removable drive shuttles
    outputs between the two machines.
 

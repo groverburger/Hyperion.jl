@@ -13,8 +13,8 @@
 # That's expected for the 1m-only path; the eventual dual-DEM step adds
 # the 20m farfield to fill in the rest.
 
-using JuliaMapbuilder
-const JM = JuliaMapbuilder
+using Hyperion
+const Hyp = Hyperion
 using Dates
 using KernelAbstractions: CPU
 import FileIO
@@ -35,7 +35,7 @@ println("Mode:      ", DO_FULL ? "full DEM" : "1024×1024 interior crop")
 
 println("Loading site DEM (native projection — no resampling) ...")
 t0 = time()
-site = JM.load_site_dem(SITE_TIF)
+site = Hyp.load_site_dem(SITE_TIF)
 println("  $(site.H) × $(site.W) at $(site.pixel_size_m) m/px")
 println("  projection center (lat, lon) = ($(rad2deg(site.lat0))°, $(rad2deg(site.lon0))°)")
 println("  s0 = $(round(site.s0; digits=2))  l0 = $(round(site.l0; digits=2))  (in TIF pixel grid)")
@@ -43,16 +43,16 @@ println("  ($(round(time()-t0; digits=1)) s)")
 
 println("Building mipmaps ...")
 t1 = time()
-max_mm, min_mm = JM.build_site_mipmaps_minmax(site)
+max_mm, min_mm = Hyp.build_site_mipmaps_minmax(site)
 println("  ($(round(time()-t1; digits=1)) s)")
 
 println("Initialising SPICE ...")
-JM.init_spice(joinpath(@__DIR__, "..", "kernels"))
+Hyp.init_spice(joinpath(@__DIR__, "..", "kernels"))
 
 dt = DateTime(TIMESTAMP_STR, dateformat"yyyy-mm-ddTHH-MM-SS")
-et = JM.datetime_to_et(dt)
-sun_t = Tuple(JM.get_body_position(JM.NAIF_SUN, et))
-earth_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
+et = Hyp.datetime_to_et(dt)
+sun_t = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN, et))
+earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 println("  Sun pos (km):   ", round.(sun_t; digits=2))
 println("  Earth pos (km): ", round.(earth_t; digits=2))
 
@@ -67,7 +67,7 @@ println("Crop: origin=($crop_origin_r, $crop_origin_c)  size=$(crop_H)×$(crop_W
 
 println("Running kernel on CPU backend ...")
 t2 = time()
-sun, dsn, de, sun_rays = JM.generate_live_shadow_frame_site_gpu(
+sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_site_gpu(
     site, sun_t, earth_t, 0.0;
     max_mipmaps = max_mm, min_mipmaps = min_mm,
     backend = CPU(), DeviceArray = Array,
@@ -80,8 +80,8 @@ outdir = joinpath(@__DIR__, "..", "data", "outputs", "site_1m")
 mkpath(outdir)
 sun_png = joinpath(outdir, "$(TIMESTAMP_STR)_sun.png")
 dsn_png = joinpath(outdir, "$(TIMESTAMP_STR)_dsn.png")
-JM.save_indexed_png(sun, JM.SUN_PALETTE, sun_png)
-JM.save_indexed_png(dsn, JM.DSN_PALETTE, dsn_png)
+Hyp.save_indexed_png(sun, Hyp.SUN_PALETTE, sun_png)
+Hyp.save_indexed_png(dsn, Hyp.DSN_PALETTE, dsn_png)
 println("Wrote $sun_png")
 println("Wrote $dsn_png")
 

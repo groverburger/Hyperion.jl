@@ -386,22 +386,22 @@ function _load_png_rgb(path::AbstractString)
 end
 
 @testset "Cross-platform bit-exactness (20 timestamps)" begin
-    ldem = JM.load_ldem(LDEM_PATH)
-    JM.init_spice(joinpath(PROJECT_ROOT, "kernels"))
-    max_mm, min_mm = JM.build_ldem_mipmaps_minmax(ldem.data)
+    ldem = Hyp.load_ldem(LDEM_PATH)
+    Hyp.init_spice(joinpath(PROJECT_ROOT, "kernels"))
+    max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
     origin_r, origin_c = 8960, 18432
     H, W = 512, 896
 
     for (tag, expected) in sort(collect(KNOWN_GOOD), by = first)
         @testset "$tag" begin
             dt = DateTime(tag, dateformat"yyyy-mm-ddTHH-MM-SS")
-            et = JM.datetime_to_et(dt)
-            sun_t   = Tuple(JM.get_body_position(JM.NAIF_SUN,   et))
-            earth_t = Tuple(JM.get_body_position(JM.NAIF_EARTH, et))
+            et = Hyp.datetime_to_et(dt)
+            sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+            earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
             # Run kernel on the always-available CPU backend. Output matches
             # Metal and CUDA bit-for-bit per the verified 3-way invariant.
-            sun, dsn, de, sun_rays = JM.generate_live_shadow_frame_gpu(
+            sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_gpu(
                 ldem.data, origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
                 max_mipmaps = max_mm, min_mipmaps = min_mm,
                 backend = CPU(), DeviceArray = Array)
@@ -409,7 +409,7 @@ end
             # CPU precompute buffer — its SHA is part of the audit trail
             # because a drift in CPU math would silently corrupt GPU input.
             sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
-                JM._precompute_azel(ldem.data, origin_r, origin_c, H, W,
+                Hyp._precompute_azel(ldem.data, origin_r, origin_c, H, W,
                                     sun_t, earth_t, Float32(0.0))
             azel_bytes = vcat(vec(sun_rc), vec(sun_rs), vec(sun_el),
                               vec(earth_rc), vec(earth_rs), vec(earth_el),
@@ -426,8 +426,8 @@ end
             end
 
             # Palette-applied RGB (the user-visible content)
-            sun_rgb = _palette_apply(sun, JM.SUN_PALETTE)
-            dsn_rgb = _palette_apply(dsn, JM.DSN_PALETTE)
+            sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
+            dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
             @test sha256_bytes(sun_rgb) == expected.sun_rgb
             @test sha256_bytes(dsn_rgb) == expected.dsn_rgb
 

@@ -1,6 +1,6 @@
 # Shadow generation: precomputed horizons vs. live raycasting
 
-JuliaMapbuilder implements two algorithms that produce the same kind of
+Hyperion implements two algorithms that produce the same kind of
 output — UInt8 PNG time series of sun-illumination fraction and
 DSN over-horizon angle — via fundamentally different architectures. This
 document explains both, the (many) floating-point bugs we surfaced while
