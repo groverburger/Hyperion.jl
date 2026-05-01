@@ -794,3 +794,62 @@ Float32* and noticing that intermediate operand magnitudes were still
 at lunar radius. **Float64 reproduction of the corrected formula is
 necessary but not sufficient — verify each step's operand magnitudes
 in Float32 land within Float32's ULP for the signal you're computing.**
+
+### Correctness verification (post-fix)
+
+The pre-fix kernel was **bit-exact across vendors** (Apple CPU ↔ Metal ↔
+NVIDIA CUDA all produced identical output). That property guarantees
+*reproducibility*, not *correctness*. With the precision floor of the
+old `dz` formula sitting at ~0.2 m at lunar radius (one Float32 ULP),
+all three vendors made the same Float32 rounding errors and produced
+the same wrong answer at boundary pixels.
+
+After fix 15+15b the LDEM 20-timestamp regression had to be re-pinned.
+Comparing the old (pre-fix) and new (post-fix) outputs across all 20
+LDEM timestamps:
+
+| | Sun | DSN |
+|---|---|---|
+| Pixels differing | 2.15% | 1.53% |
+| Mean deviation per pixel | 0.52 / 255 | 1.31 / 255 |
+| Max deviation | 255 (full swing) | 205 |
+
+**The differences cluster along shadow boundaries** — visible as fine
+contour curves in the diff heatmaps (`data/outputs/bitexact_diffs/`).
+Pixels deep in shadow stay deep in shadow; pixels deep in sunlight
+stay deep in sunlight; only pixels close to the lit/shadow threshold
+change, because that's where Float32 ULP differences in the slope
+computation can flip the kernel's verdict.
+
+#### Numerical proof (one max-deviation pixel)
+
+For LDEM grid pixel (row=8963, col=19206) at 2027-01-22T07-00-00 — old
+verdict 0 (full shadow), new verdict 255 (full sun) — traced through
+the first sun-ray sample at d=1 against a Float64 reference:
+
+| | dz (μm) | Slope angle (°) | Error vs Float64 |
+|---|---:|---:|---:|
+| Float64 ground truth | -63.60 | 4.4701 | 0 |
+| Float32 NEW | -62.95 | 4.4683 | 0.65 μm dz, 0.002° slope |
+| Float32 OLD | **-366.21** | **5.3308** | **302.6 μm dz, 0.861° slope** |
+
+The old formula's `dz` was off by **5.7× from ground truth** due to
+the catastrophic cancellation `scale·u²−1 − qz` (both ≈ −R), producing
+a 0.86° slope error at one sample. With sun_top_el threshold ≈ 4.88°,
+the old kernel computed slope 5.33° (above threshold → "shadow"); the
+new kernel computes slope 4.47° (below threshold → "lit"). Same pixel,
+inverted conclusions, *because the old formula's Float32 cancellation
+floor sat above the true slope's distance from the threshold*.
+
+The new formula matches Float64 to within **1% relative error** on `dz`
+(= within Float32 ULP at the metres-of-elevation magnitude where
+`(qelev_m − telev_m) · 0.001` evaluates). The 94 max-255 pixels in
+this timestamp are pixels where the old cancellation error was large
+enough to flip the verdict; the ~10,000 lower-deviation pixels are
+boundary pixels where the cancellation produced a smaller but still
+incorrect shift.
+
+**Conclusion**: the previous LDEM bit-exact pin was self-consistent
+(reproducible across vendors) but systematically wrong at boundary
+pixels by up to 0.86° of slope. The new pin captures the correct
+geometry, verified against Float64 ground truth.
