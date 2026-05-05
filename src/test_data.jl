@@ -1,8 +1,21 @@
 # ─── Test-data provisioning ───────────────────────────────────────────────
 #
-# The LDEM (1.85 GB PDS raster) and its derived Nobile GTiff aren't in git.
-# These helpers fetch + SHA-verify them idempotently so a user can go
-# from `git clone` to `] test` with no manual setup step.
+# The LDEM (1.85 GB raster, see README.md → Farfield LDEM versions)
+# and its derived Nobile GTiff aren't in git. These helpers fetch +
+# SHA-verify them idempotently so a user can go from `git clone` to
+# `] test` with no manual setup step.
+#
+# KNOWN DOWNLOAD MISMATCH: `_LDEM_SHA` below is pinned to the "Shirley"
+# legacy artefact (caaf017f…), the file Mark Shirley shipped with the
+# upstream C# Mapbuilder pipeline. The download URL points at the
+# canonical PDS Geosciences Node @ WUSTL — but a live download from
+# there serves a different (newer) version of the same nominal product
+# with a different SHA, so `ensure_ldem!()` fails SHA-verify on a
+# fresh fetch. This is intentional: the Shirley file is preserved as
+# our test baseline so the Hyperion bit-exact regression matches the
+# Mapbuilder reference renders byte-for-byte. Migration plan: repin
+# against either WUSTL 2017 (live) or 2023 Barker, regenerate the
+# bit-exact pins, drop the Shirley dependency.
 #
 # `ensure_ldem!` is the minimum needed for `test/runtests.jl` and
 # `scripts/bitexact_test.jl`. `ensure_test_data!` additionally derives
@@ -47,8 +60,12 @@ end
     ensure_ldem!() -> String
 
 Idempotently ensure the 1.85 GB LDEM_80S_20M raster is present and
-SHA-verified at `data/inputs/ldem_80s_20m.img`. Downloads from the PDS
-if missing or corrupted. Returns the path.
+SHA-verified at `data/inputs/ldem_80s_20m.img` (the "Shirley" baseline,
+SHA `caaf017f…`; see README.md → Farfield LDEM versions). Downloads
+from the PDS Geosciences Node @ WUSTL if missing or corrupted — but
+note that a fresh download will fail SHA-verify because the live URL
+serves a different version than Shirley (this is a known migration
+issue). Returns the path.
 
 Called automatically by `test/runtests.jl` and `scripts/bitexact_test.jl`.
 """
@@ -62,7 +79,7 @@ function ensure_ldem!()
         actual = _sha256_file(_ldem_path())
         @warn "LDEM present but SHA mismatch — re-downloading" path=_ldem_path() expected=_LDEM_SHA actual
     else
-        @info "LDEM not found; fetching one-time $(_LDEM_SIZE_GB) GB from PDS" url=_LDEM_URL dest=_ldem_path()
+        @info "LDEM not found; fetching one-time $(_LDEM_SIZE_GB) GB from PDS Geosciences @ WUSTL — note: fresh download may fail SHA-verify against Shirley pin (see test_data.jl header)" url=_LDEM_URL dest=_ldem_path()
     end
 
     t0 = time()

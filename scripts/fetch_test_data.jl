@@ -1,7 +1,13 @@
 #!/usr/bin/env julia
-# Fetches the PDS LOLA 80°S 20 m/pixel LDEM and derives the Nobile
+# Fetches the project's baseline 80°S 20 m/pixel LDEM (the "Shirley"
+# legacy artefact, SHA `caaf017f…`; see README.md → Farfield LDEM
+# versions for the disambiguation table) and derives the Nobile
 # Float32 GTiff crop used by diagnostic scripts. Idempotent — SHA-
 # verifies existing files and only downloads / derives what's missing.
+# Note: a fresh fetch from the PDS Geosciences Node @ WUSTL URL would
+# serve a different version of the LDEM than Shirley (different SHA),
+# and `ensure_ldem!()` would fail its SHA check — see the header of
+# `src/test_data.jl` for context.
 #
 # Usage:
 #     julia --project scripts/fetch_test_data.jl

@@ -381,3 +381,173 @@ function _precompute_azel(ldem::AbstractMatrix{<:Real},
             earth_ray_cos, earth_ray_sin, earth_el_deg,
             sun_slope_tan, dsn_slope_tan)
 end
+
+# ─── Public Float64 az/el computation (CSV / hillshade use) ──────────────
+#
+# Apparent topocentric azimuth + elevation of the Sun and Earth from a
+# query point on the lunar surface, plus distances and angular
+# diameters.
+#
+# Float64 throughout — independent code path from the Float32 GPU
+# pipeline, intended for reference / hillshade / CSV-export use cases
+# where Float32 quantization isn't desired and bit-exact cross-vendor
+# determinism isn't a goal. SPICE is queried for body positions in
+# MOON_ME km exactly the same way as the kernel pipeline, so the
+# choice of SPICE kernels still drives reproducibility.
+#
+# Azimuth convention: degrees CCW from East, range [0°, 360°).
+# Equivalent to the "math heading" — east = 0°, north = 90°, west =
+# 180°, south = 270°. Compass / surveyor convention (CW from north)
+# is `(90° - az) mod 360°`.
+
+# Body physical radii — IAU 2015 nominal.
+const _SUN_PHYS_RADIUS_KM   = 695700.0      # IAU 2015 nominal solar radius
+const _EARTH_PHYS_RADIUS_KM = 6371.0008     # IAU 2015 mean Earth radius
+const _AU_KM                = 149_597_870.7 # IAU 2012 definition
+
+"""
+    compute_azel(et, query_lat_deg, query_lon_deg; query_elev_m=0.0)
+        → NamedTuple
+
+Compute the topocentric Sun and Earth azimuth + elevation observed from
+a query point at `(query_lat_deg, query_lon_deg)` on the lunar surface
+at SPICE ephemeris time `et`. Returns a NamedTuple with fields
+matching the reference `azimuths_elevations.csv` columns:
+
+  rover_to_sun_azimuth_deg, rover_to_sun_elevation_deg,
+  rover_to_earth_azimuth_deg, rover_to_earth_elevation_deg,
+  rover_to_sun_dist_km, rover_to_sun_dist_au,
+  sun_angular_diameter_deg, earth_angular_diameter_deg
+
+Azimuth is measured CCW from East in [0°, 360°); elevation is in
+[-90°, +90°] above/below the local horizontal.
+
+`init_spice` must be called first to load ephemerides.
+"""
+function compute_azel(et::Float64,
+                      query_lat_deg::Float64, query_lon_deg::Float64;
+                      query_elev_m::Float64 = 0.0)
+    # Query point in MOON_ME body-fixed Cartesian (km).
+    R = R_KM_F64 + query_elev_m / 1000.0
+    lat = deg2rad(query_lat_deg);  lon = deg2rad(query_lon_deg)
+    clat = cos(lat); slat = sin(lat); clon = cos(lon); slon = sin(lon)
+    qx = R * clat * clon
+    qy = R * clat * slon
+    qz = R * slat
+
+    # Local ENU basis at the query point.
+    #   Up    = q̂
+    #   East  = (Z × Up) / ||Z × Up||         (Z = +polar axis)
+    #   North = Up × East
+    up    = (clat*clon, clat*slon, slat)
+    eastv = (-slon, clon, 0.0)                # already unit-norm at non-pole
+    northv = (-slat*clon, -slat*slon, clat)
+
+    body_azel = function(body_pos)
+        dx = body_pos[1] - qx
+        dy = body_pos[2] - qy
+        dz = body_pos[3] - qz
+        e_proj = eastv[1]*dx + eastv[2]*dy + eastv[3]*dz
+        n_proj = northv[1]*dx + northv[2]*dy + northv[3]*dz
+        u_proj = up[1]*dx + up[2]*dy + up[3]*dz
+        # CCW-from-East convention — atan(n, e) is exactly that.
+        az_deg = mod(rad2deg(atan(n_proj, e_proj)), 360.0)
+        horiz = sqrt(e_proj*e_proj + n_proj*n_proj)
+        el_deg = rad2deg(atan(u_proj, horiz))
+        dist_km = sqrt(dx*dx + dy*dy + dz*dz)
+        return az_deg, el_deg, dist_km
+    end
+
+    sun_pos   = get_body_position(NAIF_SUN,   et)
+    earth_pos = get_body_position(NAIF_EARTH, et)
+    sun_az, sun_el, sun_dist     = body_azel(sun_pos)
+    earth_az, earth_el, earth_dist = body_azel(earth_pos)
+
+    # Apparent angular diameters: 2·arcsin(R / d).
+    sun_diam_deg   = 2.0 * rad2deg(asin(_SUN_PHYS_RADIUS_KM   / sun_dist))
+    earth_diam_deg = 2.0 * rad2deg(asin(_EARTH_PHYS_RADIUS_KM / earth_dist))
+
+    return (
+        rover_to_sun_azimuth_deg     = sun_az,
+        rover_to_sun_elevation_deg   = sun_el,
+        rover_to_earth_azimuth_deg   = earth_az,
+        rover_to_earth_elevation_deg = earth_el,
+        rover_to_sun_dist_km         = sun_dist,
+        rover_to_sun_dist_au         = sun_dist / _AU_KM,
+        sun_angular_diameter_deg     = sun_diam_deg,
+        earth_angular_diameter_deg   = earth_diam_deg,
+    )
+end
+
+"""
+    compute_azel(dt::DateTime, query_lat_deg, query_lon_deg; query_elev_m=0.0)
+
+DateTime convenience wrapper — converts to ET via `datetime_to_et`.
+"""
+compute_azel(dt::DateTime, lat::Real, lon::Real; query_elev_m::Real = 0.0) =
+    compute_azel(datetime_to_et(dt), Float64(lat), Float64(lon);
+                 query_elev_m = Float64(query_elev_m))
+
+"""
+    write_azel_csv(io_or_path, timestamps, query_lat_deg, query_lon_deg;
+                   query_elev_m=0.0)
+
+Write a per-timestamp Sun + Earth azimuth/elevation CSV at a fixed
+query point. Columns:
+
+  time, rover_to_sun_azimuth_deg, rover_to_sun_elevation_deg,
+  rover_to_earth_azimuth_deg, rover_to_earth_elevation_deg,
+  rover_to_sun_dist_km, rover_to_sun_dist_au,
+  sun_angular_diameter_deg, earth_angular_diameter_deg
+
+`timestamps` is any iterable of `DateTime`s; the first column of each
+row is the timestamp formatted as ISO-8601 with `Z` suffix
+(`yyyy-mm-ddTHH:MM:SSZ`). Same azimuth + elevation convention as
+`compute_azel` (CCW from East, deg). Float64 throughout.
+"""
+function write_azel_csv(path::AbstractString, timestamps,
+                        query_lat_deg::Real, query_lon_deg::Real;
+                        query_elev_m::Real = 0.0)
+    open(path, "w") do io
+        write_azel_csv(io, timestamps, query_lat_deg, query_lon_deg;
+                       query_elev_m = query_elev_m)
+    end
+end
+
+function write_azel_csv(io::IO, timestamps,
+                        query_lat_deg::Real, query_lon_deg::Real;
+                        query_elev_m::Real = 0.0,
+                        line_ending::AbstractString = "\r\n")
+    # Default CRLF line endings to match the legacy reference dataset
+    # (Excel-friendly).  Override via `line_ending = "\n"` if writing
+    # for Unix-only consumers.
+    le = line_ending
+    write(io, "time,",
+              "rover_to_sun_azimuth_deg,rover_to_sun_elevation_deg,",
+              "rover_to_earth_azimuth_deg,rover_to_earth_elevation_deg,",
+              "rover_to_sun_dist_km,rover_to_sun_dist_au,",
+              "sun_angular_diameter_deg,earth_angular_diameter_deg",
+              le)
+    lat = Float64(query_lat_deg); lon = Float64(query_lon_deg)
+    elev = Float64(query_elev_m)
+    for ts in timestamps
+        r = compute_azel(ts, lat, lon; query_elev_m = elev)
+        # Include sub-second precision iff the timestamp has any.
+        ms = Dates.millisecond(ts)
+        ts_str = if ms == 0
+            Dates.format(ts, dateformat"yyyy-mm-ddTHH:MM:SS") * "Z"
+        else
+            Dates.format(ts, dateformat"yyyy-mm-ddTHH:MM:SS.sss") * "Z"
+        end
+        write(io, ts_str, ",",
+                  string(r.rover_to_sun_azimuth_deg), ",",
+                  string(r.rover_to_sun_elevation_deg), ",",
+                  string(r.rover_to_earth_azimuth_deg), ",",
+                  string(r.rover_to_earth_elevation_deg), ",",
+                  string(r.rover_to_sun_dist_km), ",",
+                  string(r.rover_to_sun_dist_au), ",",
+                  string(r.sun_angular_diameter_deg), ",",
+                  string(r.earth_angular_diameter_deg),
+                  le)
+    end
+end
