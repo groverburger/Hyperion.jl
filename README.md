@@ -134,6 +134,50 @@ raw .bin buffers), use `scripts/bitexact_test.jl`:
 HYP_BACKEND=metal julia --project scripts/bitexact_test.jl   # or cuda / cpu
 ```
 
+### Tier 0 correctness regression (opt-in, GPU required)
+
+Beyond bit-exact regression, Hyperion has a **correctness regression**
+test that scores its sun-fraction output against real LROC NAC
+observations. The test requires a GPU backend (Metal or CUDA must be
+loaded in your active environment) since each LNSI render takes ~200 s
+on CPU; with Metal it's ~5 s/render (~5 min total for the full
+25-NAC sweep).
+
+Because `Pkg.test()` runs in a sub-environment that doesn't see
+globally-installed Metal/CUDA, run the test directly via the
+convenience runner:
+
+```
+HYP_RUN_CORRECTNESS=1 julia --project scripts/correctness/run_test.jl
+```
+
+This renders Hyperion at 25 NAC capture times (the bundled "Tier 0"
+subset, ~1 MB at `test/fixtures/correctness/`), scores each render
+against the Canny+Otsu-derived ground truth, and asserts the per-NAC
+and dataset-aggregate metrics match the pinned baseline at
+`test/fixtures/correctness/baseline_tier0.csv` to bit-exact (Hyperion
+is cross-vendor bit-exact by design, and every downstream stage of
+the comparison is IEEE 754 deterministic).
+
+When you've intentionally changed kernel behaviour and want to
+update the baseline:
+
+```
+julia --project scripts/correctness/refresh_baseline.jl
+git diff test/fixtures/correctness/baseline_tier0.csv
+git commit  # with a justification for the metric change
+```
+
+There are also two larger correctness data tiers, both external:
+
+- **Tier 1** (~22 MB): full 599-NAC ground truth. Set
+  `HYP_CORRECTNESS_TIER1_DIR` to a directory containing
+  `shadow_20m/`, `sun_frac_20m/`, `timestamps.csv` to enable the
+  statistically-robust evaluation. There is no default fallback —
+  the env var must be set explicitly.
+- **Tier 2** (~30 GB): raw LROC NAC `*.map.tif` orthoproducts. Used
+  only for re-deriving Tier 1 from scratch (verification audits).
+
 ## Library API
 
 ```julia

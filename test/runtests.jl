@@ -116,3 +116,29 @@ end
 
 # ─── 1m site DEM bit-exactness (skipped if site TIF not present) ──────────
 include("site_1m.jl")
+
+# ─── Tier 0 correctness regression (opt-in via HYP_RUN_CORRECTNESS=1) ─────
+# Requires a GPU backend (Metal or CUDA) in the active environment;
+# CPU is far too slow (~85 min for 25 renders). When invoked via
+# `Pkg.test()`, the test sub-environment doesn't include Metal/CUDA
+# unless they're declared in Project.toml's [targets] section, so
+# the recommended invocation is direct, against the user's main
+# environment where the GPU package is already loaded:
+#
+#   HYP_RUN_CORRECTNESS=1 julia --project=. -e '
+#       using Pkg; Pkg.activate(".")
+#       using Test, Hyperion
+#       const Hyp = Hyperion
+#       import SHA; using Dates
+#       const PROJECT_ROOT = dirname(dirname(pathof(Hyperion)))
+#       const LDEM_PATH = Hyp.ensure_ldem!()
+#       const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
+#       include(joinpath(PROJECT_ROOT, "test", "correctness.jl"))'
+#
+# Or use the convenience runner:
+#   HYP_RUN_CORRECTNESS=1 julia --project scripts/correctness/run_test.jl
+if get(ENV, "HYP_RUN_CORRECTNESS", "0") == "1"
+    include("correctness.jl")
+else
+    @info "Tier 0 correctness test skipped (set HYP_RUN_CORRECTNESS=1 to run)"
+end
