@@ -589,4 +589,141 @@ end
 # Default Tier 0 baseline path.
 tier0_baseline_path() = joinpath(tier0_dir(), "baseline_tier0.csv")
 
+
+# ─── Direction-aware baseline comparison ────────────────────────────
+#
+# Each numeric metric has a direction: lower-is-better (BER, MSE,
+# missed_rate, etc.) or higher-is-better (IoU, SSIM, pixel_agree).
+# The "n_*" count fields and the bias field are excluded — counts
+# are bookkeeping (not quality), and bias is a signed deviation
+# whose direction depends on whether the sim systematically over- or
+# under-predicts illumination, which the user reads themselves.
+const _METRIC_DIRECTIONS = (
+    pixel_agree     = :higher_is_better,
+    iou_shadow      = :higher_is_better,
+    iou_lit         = :higher_is_better,
+    missed_rate     = :lower_is_better,
+    over_rate       = :lower_is_better,
+    ber             = :lower_is_better,
+    ssim_binary     = :higher_is_better,
+    ssim_continuous = :higher_is_better,
+    mse             = :lower_is_better,
+    rmse            = :lower_is_better,
+    mae             = :lower_is_better,
+    p99_abs_err     = :lower_is_better,
+)
+
+"Numeric metric names (excluding `bias` and the `n_*` counts) along
+with their improvement direction."
+metric_directions() = _METRIC_DIRECTIONS
+
+# Threshold for treating a delta as "actual change" rather than
+# Float64 round-off in the metric computation. Hyperion is bit-exact
+# kernel-wise; the only noise here is from non-associative summation
+# in stdlib `mean`/`median`, which is well below 1e-10 in practice.
+const _IS_CHANGE_TOL = 1e-10
+
+"""
+Classify a single (current, baseline) pair for one direction-aware
+metric. Returns `:improvement`, `:regression`, or `:unchanged`.
+"""
+function _classify_delta(current::Real, baseline::Real, direction::Symbol)
+    if !isfinite(current) || !isfinite(baseline)
+        # NaN on either side — treat as unchanged for the test, but
+        # flag for the user when both sides differ in their NaNness.
+        return isnan(current) == isnan(baseline) ? :unchanged : :regression
+    end
+    delta = current - baseline
+    if abs(delta) <= _IS_CHANGE_TOL
+        return :unchanged
+    end
+    if direction === :lower_is_better
+        return delta < 0 ? :improvement : :regression
+    elseif direction === :higher_is_better
+        return delta > 0 ? :improvement : :regression
+    else
+        error("unknown direction $direction")
+    end
+end
+
+"""
+    compare_to_baseline(current::Vector{NamedTuple},
+                        baseline::Vector{NamedTuple})
+        -> NamedTuple
+
+Compare two sets of per-NAC metric rows. Returns a NamedTuple with:
+
+  per_nac        Vector{NamedTuple} of (nac_id, metric, baseline,
+                 current, delta, direction, classification) — one
+                 row per (NAC, metric) cell.
+  n_regressions  count of cells where current is worse than baseline
+  n_improvements count where current is better than baseline
+  n_unchanged    count where |current - baseline| <= tolerance
+  regressions    Vector of nac_id strings with at least one regression
+  improvements   Vector of nac_id strings with at least one improvement
+"""
+function compare_to_baseline(current::Vector, baseline::Vector)
+    base_by_pid = Dict(r.nac_id => r for r in baseline)
+    cur_by_pid  = Dict(r.nac_id => r for r in current)
+
+    Set(keys(base_by_pid)) == Set(keys(cur_by_pid)) ||
+        error("Baseline and current row sets don't match: " *
+              "missing in current = $(setdiff(keys(base_by_pid), keys(cur_by_pid))); " *
+              "missing in baseline = $(setdiff(keys(cur_by_pid), keys(base_by_pid)))")
+
+    per_nac = NamedTuple[]
+    n_reg = 0; n_imp = 0; n_unc = 0
+    regressed_pids  = Set{String}()
+    improved_pids   = Set{String}()
+
+    for pid in sort(collect(keys(base_by_pid)))
+        b = base_by_pid[pid]; c = cur_by_pid[pid]
+        for (metric, dir) in pairs(_METRIC_DIRECTIONS)
+            bv = getproperty(b, metric)
+            cv = getproperty(c, metric)
+            cls = _classify_delta(cv, bv, dir)
+            push!(per_nac, (
+                nac_id         = pid,
+                metric         = String(metric),
+                baseline       = bv,
+                current        = cv,
+                delta          = isfinite(bv) && isfinite(cv) ? cv - bv : NaN,
+                direction      = String(dir),
+                classification = String(cls),
+            ))
+            if cls === :regression
+                n_reg += 1; push!(regressed_pids, pid)
+            elseif cls === :improvement
+                n_imp += 1; push!(improved_pids, pid)
+            else
+                n_unc += 1
+            end
+        end
+    end
+
+    return (
+        per_nac        = per_nac,
+        n_regressions  = n_reg,
+        n_improvements = n_imp,
+        n_unchanged    = n_unc,
+        regressions    = sort(collect(regressed_pids)),
+        improvements   = sort(collect(improved_pids)),
+    )
+end
+
+"""
+Write a per-NAC × per-metric delta CSV for the result of
+`compare_to_baseline(current, baseline)`. Columns: nac_id, metric,
+baseline, current, delta, direction, classification.
+"""
+function write_delta_csv(cmp::NamedTuple, path::AbstractString)
+    open(path, "w") do io
+        println(io, "nac_id,metric,baseline,current,delta,direction,classification")
+        for r in cmp.per_nac
+            println(io, join((r.nac_id, r.metric, r.baseline, r.current,
+                              r.delta, r.direction, r.classification), ","))
+        end
+    end
+end
+
 end # module Correctness
