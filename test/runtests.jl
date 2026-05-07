@@ -4,22 +4,29 @@ const Hyp = Hyperion
 import SHA
 using Dates
 
-# ─── Test-data provisioning (auto-fetch on first run) ─────────────────────
+# ─── Test-data selection (no downloads from test suite) ───────────────────
 
 const PROJECT_ROOT = dirname(@__DIR__)
 
-# Idempotently ensure the LDEM is present and SHA-verified. First run
-# downloads ~1.85 GB from PDS (with progress output); subsequent runs are
-# a no-op. If the machine has no network, LDEM-dependent test sets are
-# skipped and the quick unit tests still run.
-const LDEM_PATH = try
-    Hyp.ensure_ldem!()
-catch e
-    @warn "Could not provision LDEM — LDEM-dependent tests will be skipped. " *
-          "To retry manually: `julia --project scripts/fetch_test_data.jl`." exception=e
+# The bit-exact pins are computed against the legacy Shirley LDEM SHA.
+# `Pkg.test()` must not fetch the WUSTL live DEM because that artifact is
+# not the baseline and currently SHA-mismatches the pins. If the Shirley
+# file is absent, LDEM-dependent tests are skipped.
+const LDEM_PATH = if Hyp._ldem_ok()
+    Hyp._ldem_path()
+else
+    if isfile(Hyp._ldem_path())
+        @warn "Local LDEM exists but is not the Shirley baseline SHA; " *
+              "skipping LDEM-dependent tests." path=Hyp._ldem_path()
+    else
+        @warn "Shirley LDEM not found; skipping LDEM-dependent tests. " *
+              "Place the SHA-pinned file at $(Hyp._ldem_path())."
+    end
     ""
 end
 const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
+
+include("test_backend.jl")
 
 function sha256_bytes(v::AbstractArray)
     bytes2hex(SHA.sha256(collect(reinterpret(UInt8, vec(v)))))
@@ -131,7 +138,7 @@ include("site_1m.jl")
 #       const Hyp = Hyperion
 #       import SHA; using Dates
 #       const PROJECT_ROOT = dirname(dirname(pathof(Hyperion)))
-#       const LDEM_PATH = Hyp.ensure_ldem!()
+#       const LDEM_PATH = Hyp.require_shirley_ldem!()
 #       const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
 #       include(joinpath(PROJECT_ROOT, "test", "correctness.jl"))'
 #

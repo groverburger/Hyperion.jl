@@ -1,31 +1,23 @@
-# ─── Test-data provisioning ───────────────────────────────────────────────
+# ─── Local test-data checks ───────────────────────────────────────────────
 #
 # The LDEM (1.85 GB raster, see README.md → Farfield LDEM versions)
-# and its derived Nobile GTiff aren't in git. These helpers fetch +
-# SHA-verify them idempotently so a user can go from `git clone` to
-# `] test` with no manual setup step.
+# and its derived Nobile GTiff aren't in git. These helpers validate the
+# local Shirley DEM and derive small local artifacts from it. They never
+# download data.
 #
-# KNOWN DOWNLOAD MISMATCH: `_LDEM_SHA` below is pinned to the "Shirley"
-# legacy artefact (caaf017f…), the file Mark Shirley shipped with the
-# upstream C# Mapbuilder pipeline. The download URL points at the
-# canonical PDS Geosciences Node @ WUSTL — but a live download from
-# there serves a different (newer) version of the same nominal product
-# with a different SHA, so `ensure_ldem!()` fails SHA-verify on a
-# fresh fetch. This is intentional: the Shirley file is preserved as
-# our test baseline so the Hyperion bit-exact regression matches the
-# Mapbuilder reference renders byte-for-byte. Migration plan: repin
-# against either WUSTL 2017 (live) or 2023 Barker, regenerate the
-# bit-exact pins, drop the Shirley dependency.
+# `_LDEM_SHA` below is pinned to the "Shirley" legacy artefact
+# (caaf017f…), the file Mark Shirley shipped with the upstream C#
+# Mapbuilder pipeline. The canonical PDS Geosciences Node @ WUSTL now
+# serves a different version of the same nominal product with a
+# different SHA. Do not auto-fetch from WUSTL: tests are pinned to
+# Shirley. Migration plan: repin against either current WUSTL or 2023
+# Barker, regenerate the bit-exact pins, drop the Shirley dependency.
 #
-# `ensure_ldem!` is the minimum needed for `test/runtests.jl` and
-# `scripts/bitexact_test.jl`. `ensure_test_data!` additionally derives
+# `require_shirley_ldem!` is the minimum needed for `test/runtests.jl`
+# and `scripts/bitexact_test.jl`. `require_test_data!` additionally derives
 # `data/inputs/nobile_20m.tif` for diagnostic scripts that want a
 # pre-cropped Nobile window.
 
-import Downloads
-using Printf
-
-const _LDEM_URL   = "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/LDEM_80S_20M.IMG"
 const _LDEM_SHA   = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
 const _LDEM_DIM   = 30400                     # LDEM is 30400×30400 Int16
 const _LDEM_SIZE_GB = 1.85
@@ -57,57 +49,51 @@ function _ldem_ok()
 end
 
 """
-    ensure_ldem!() -> String
+    require_shirley_ldem!() -> String
 
-Idempotently ensure the 1.85 GB LDEM_80S_20M raster is present and
-SHA-verified at `data/inputs/ldem_80s_20m.img` (the "Shirley" baseline,
-SHA `caaf017f…`; see README.md → Farfield LDEM versions). Downloads
-from the PDS Geosciences Node @ WUSTL if missing or corrupted — but
-note that a fresh download will fail SHA-verify because the live URL
-serves a different version than Shirley (this is a known migration
-issue). Returns the path.
+Require the 1.85 GB Shirley LDEM_80S_20M raster to be present and
+SHA-verified at `data/inputs/ldem_80s_20m.img`. Returns the path.
 
-Called automatically by `test/runtests.jl` and `scripts/bitexact_test.jl`.
+This function never downloads data. If the file is missing or has the
+wrong SHA, it errors with placement instructions.
 """
-function ensure_ldem!()
+function require_shirley_ldem!()
     if _ldem_ok()
         return _ldem_path()
     end
-    mkpath(_data_dir())
 
     if isfile(_ldem_path())
         actual = _sha256_file(_ldem_path())
-        @warn "LDEM present but SHA mismatch — re-downloading" path=_ldem_path() expected=_LDEM_SHA actual
+        error("""
+        Local LDEM is not the Shirley baseline.
+
+          path:     $(_ldem_path())
+          expected: $(_LDEM_SHA)
+          actual:   $actual
+
+        Download or copy the Shirley LDEM artifact and place it exactly at:
+
+          $(_ldem_path())
+
+        Expected format: raw 30400x30400 Int16 little-endian, scale 0.5 m,
+        no header, about $(_LDEM_SIZE_GB) GB. See README.md -> Farfield LDEM versions.
+        """)
     else
-        @info "LDEM not found; fetching one-time $(_LDEM_SIZE_GB) GB from PDS Geosciences @ WUSTL — note: fresh download may fail SHA-verify against Shirley pin (see test_data.jl header)" url=_LDEM_URL dest=_ldem_path()
-    end
+        error("""
+        Shirley LDEM not found.
 
-    t0 = time()
-    last_pct = Ref(-5.0)
-    Downloads.download(_LDEM_URL, _ldem_path(); progress = (total, now) -> begin
-        total > 0 || return
-        pct = 100 * now / total
-        # Emit every 5% so the log stays readable instead of spammy.
-        if pct - last_pct[] >= 5.0 || (now == total && last_pct[] < 100.0)
-            last_pct[] = pct
-            elapsed = time() - t0
-            mbps = now / 1e6 / max(elapsed, 0.001)
-            eta  = mbps > 0 ? (total - now) / 1e6 / mbps : 0.0
-            @printf("  [%5.1f%%]  %.2f / %.2f GB  @  %.1f MB/s  (ETA %.0fs)\n",
-                    pct, now/1e9, total/1e9, mbps, eta)
-            flush(stdout)
-        end
-    end)
-    @info "Download complete" seconds=round(time()-t0; digits=1)
+        Download or copy the Shirley LDEM artifact and place it exactly at:
 
-    print("  Verifying SHA-256 ... "); flush(stdout)
-    actual = _sha256_file(_ldem_path())
-    println("done")
-    if actual != _LDEM_SHA
-        error("LDEM SHA mismatch after download.\n  expected: $_LDEM_SHA\n  actual:   $actual")
+          $(_ldem_path())
+
+        Expected SHA-256:
+
+          $(_LDEM_SHA)
+
+        Expected format: raw 30400x30400 Int16 little-endian, scale 0.5 m,
+        no header, about $(_LDEM_SIZE_GB) GB. See README.md -> Farfield LDEM versions.
+        """)
     end
-    @info "LDEM SHA verified" path=_ldem_path()
-    return _ldem_path()
 end
 
 function _nobile_matches(expected::Matrix{Float32})
@@ -119,17 +105,17 @@ function _nobile_matches(expected::Matrix{Float32})
 end
 
 """
-    ensure_test_data!() -> (ldem_path, nobile_path)
+    require_test_data!() -> (ldem_path, nobile_path)
 
-Like `ensure_ldem!()` but additionally derives the Nobile-window GTiff
+Like `require_shirley_ldem!()` but additionally derives the Nobile-window GTiff
 (`data/inputs/nobile_20m.tif`, 512×896 Float32) used by diagnostic
 scripts (`azimuth_range.jl`, `select_test_timestamps.jl`).
 
 Idempotent — skips the derive step if the GTiff already matches the
 bytes extracted from the LDEM window.
 """
-function ensure_test_data!()
-    ensure_ldem!()
+function require_test_data!()
+    require_shirley_ldem!()
 
     # Read the Nobile window directly from the mmapped LDEM.
     raw = Mmap.mmap(open(_ldem_path(), "r"), Matrix{Int16}, (_LDEM_DIM, _LDEM_DIM))

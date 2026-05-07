@@ -19,7 +19,8 @@ using Hyperion
 const Hyp = Hyperion
 import SHA
 using Dates
-using KernelAbstractions: CPU
+
+@isdefined(TEST_BACKEND_NAME) || include("test_backend.jl")
 
 # Defined in runtests.jl when included from there; need a local fallback
 # for `julia --project test/site_1m.jl` standalone runs.
@@ -28,7 +29,9 @@ using KernelAbstractions: CPU
 const SITE_TIF_PATH = get(ENV, "HYPERION_SITE_TIF",
     "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
 
-if !isfile(SITE_TIF_PATH)
+if TEST_BACKEND_NAME == "none"
+    @warn "No render backend selected — skipping 1m regression."
+elseif !isfile(SITE_TIF_PATH)
     @warn "Site TIF not found at $SITE_TIF_PATH — skipping 1m regression."
 else
 
@@ -89,7 +92,7 @@ _sha(v) = bytes2hex(SHA.sha256(collect(reinterpret(UInt8, vec(v)))))
     sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_site_gpu(
         site, sun_t, earth_t, 0.0;
         max_mipmaps = max_mm, min_mipmaps = min_mm,
-        backend = CPU(), DeviceArray = Array,
+        backend = TEST_BACKEND, DeviceArray = TEST_DEVICE_ARRAY,
         origin_r = SITE_KNOWN_GOOD.origin_r,
         origin_c = SITE_KNOWN_GOOD.origin_c,
         H = SITE_KNOWN_GOOD.H, W = SITE_KNOWN_GOOD.W)

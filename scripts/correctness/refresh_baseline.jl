@@ -39,7 +39,7 @@ end
 @info "refreshing Tier 0 baseline" backend=BACKEND_NAME
 
 @info "loading LDEM"
-ldem_path = Hyperion.ensure_ldem!()
+ldem_path = Hyperion.require_shirley_ldem!()
 ldem = Hyperion.load_ldem(ldem_path)
 @info "building mipmaps"
 max_mm, min_mm = Hyperion.build_ldem_mipmaps_minmax(ldem.data)

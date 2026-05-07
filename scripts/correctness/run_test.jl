@@ -24,7 +24,7 @@ using Dates
 const PROJECT_ROOT = joinpath(@__DIR__, "..", "..")
 
 const LDEM_PATH = try
-    Hyp.ensure_ldem!()
+    Hyp.require_shirley_ldem!()
 catch e
     @warn "Could not provision LDEM" exception=e
     ""

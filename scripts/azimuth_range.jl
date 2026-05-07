@@ -15,7 +15,7 @@ const KERNELS = joinpath(REPO, "kernels")
 const F32_RAD2DEG = Float32(180.0) / Float32(π)
 
 @info "Loading DEM"
-_, nobile_path = Hyp.ensure_test_data!()
+_, nobile_path = Hyp.require_test_data!()
 dem = Hyp.load_shadow_dem(nobile_path)
 H, W = dem.H, dem.W
 mr = H ÷ 2 + 1    # midpoint row (1-indexed)

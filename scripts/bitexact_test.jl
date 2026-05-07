@@ -109,7 +109,7 @@ const KERNELS = joinpath(REPO, "kernels")
 mkpath(OUT)
 
 @info "Loading"
-ldem = Hyp.load_ldem(Hyp.ensure_ldem!())
+ldem = Hyp.load_ldem(Hyp.require_shirley_ldem!())
 Hyp.init_spice(KERNELS)
 max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 

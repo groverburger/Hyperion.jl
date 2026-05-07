@@ -2,7 +2,7 @@
 # that the pipeline produces identical output across Apple Silicon CPU,
 # Apple Metal GPU, and NVIDIA CUDA GPU.
 #
-# Runs on the KernelAbstractions CPU backend (always available), computes
+# Runs on the selected KernelAbstractions backend, computes
 # SHA-256 of every stage of the pipeline, and compares against hardcoded
 # known-good values. Also decodes the 40 committed PNG fixtures in
 # test/fixtures/bitexact/ and verifies pixel equality — so a regression
@@ -21,11 +21,13 @@
 #       of FP divergence and how to audit.
 #
 # Skipped if the LDEM is not available (flagged as HAS_LDEM in runtests.jl).
-# Runtime on CPU backend: ~10-15 minutes for 20 timestamps at 896×512.
+# Runtime on CPU backend: ~10-15 minutes for 20 timestamps at 896×512, so
+# CPU is only used when explicitly selected.
 
 using Dates
-using KernelAbstractions: CPU
 import FileIO
+
+@isdefined(TEST_BACKEND_NAME) || include("test_backend.jl")
 
 const FIXTURES = joinpath(@__DIR__, "fixtures", "bitexact")
 
@@ -385,7 +387,11 @@ function _load_png_rgb(path::AbstractString)
     return rgb
 end
 
-@testset "Cross-platform bit-exactness (20 timestamps)" begin
+if TEST_BACKEND_NAME == "none"
+    @warn "No render backend selected — skipping cross-platform bit-exactness test"
+else
+
+@testset "Cross-platform bit-exactness (20 timestamps, $(TEST_BACKEND_NAME))" begin
     ldem = Hyp.load_ldem(LDEM_PATH)
     Hyp.init_spice(joinpath(PROJECT_ROOT, "kernels"))
     max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
@@ -399,12 +405,13 @@ end
             sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
             earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
-            # Run kernel on the always-available CPU backend. Output matches
-            # Metal and CUDA bit-for-bit per the verified 3-way invariant.
+            # Run kernel on the selected machine-appropriate backend. Output
+            # matches CPU, Metal, and CUDA bit-for-bit per the verified
+            # 3-way invariant.
             sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_gpu(
                 ldem.data, origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
                 max_mipmaps = max_mm, min_mipmaps = min_mm,
-                backend = CPU(), DeviceArray = Array)
+                backend = TEST_BACKEND, DeviceArray = TEST_DEVICE_ARRAY)
 
             # CPU precompute buffer — its SHA is part of the audit trail
             # because a drift in CPU math would silently corrupt GPU input.
@@ -440,4 +447,6 @@ end
             @test ref_dsn == dsn_rgb
         end
     end
+end
+
 end

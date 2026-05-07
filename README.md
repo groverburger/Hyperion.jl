@@ -26,19 +26,23 @@ julia --project -e 'using Pkg; Pkg.instantiate()'
 julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-The test command auto-downloads the 1.85 GB LDEM from the PDS on the
-first run (SHA-verified), then runs the full 20-timestamp bit-exactness
-regression. Subsequent test runs are a no-op on the data — no re-download.
+The test suite expects the Shirley LDEM to already be present at
+`data/inputs/ldem_80s_20m.img`. It must be the raw 30400×30400 int16 LE
+artifact with SHA:
 
-If you want to pre-seed the data without running tests yet (or to also
-derive the Nobile GTiff used by diagnostic scripts):
+```
+caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b
+```
+
+If it is missing or has the wrong SHA, the LDEM-dependent tests are
+skipped or scripts fail with placement instructions. To validate the
+local file and derive the Nobile GTiff used by diagnostic scripts:
 
 ```
 julia --project scripts/fetch_test_data.jl
 ```
 
-Both paths call the same `Hyperion.ensure_ldem!()` /
-`ensure_test_data!()` functions, so they're safe to mix.
+This script does not download data.
 
 ### Farfield LDEM versions
 
@@ -50,8 +54,8 @@ extent differ.
 
 | Tag | File | SHA-256 | Format | Source |
 |---|---|---|---|---|
-| **Shirley** | (`/maps/lola_pds/LDEM_80S_20M-2017-06-15-processed.img`) | `caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b` | raw 30400×30400 int16 LE, scale 0.5 m, no header (1.85 GB) | Mark Shirley's pipeline (he maintained the upstream C# Mapbuilder until his retirement in 2025). Origin is unclear — believed to be a WUSTL 2017 download with one or more manual elevation patches. **This is the project's actual baseline** (despite the URL in `src/test_data.jl` pointing at the WUSTL Geosciences Node — see "Known download mismatch" below). |
-| **WUSTL 2017** (live) | (downloaded by `Hyperion.ensure_ldem!()`) | unknown — different from Shirley | raw 30400×30400 int16 LE, scale 0.5 m, no header (1.85 GB) | [PDS Geosciences Node @ WUSTL — LOLA GDR](https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/LDEM_80S_20M.IMG). The official, ongoing distribution. SHA differs from Shirley; a fresh `ensure_ldem!()` would fail SHA-verify against the pinned Shirley SHA. |
+| **Shirley** | (`/maps/lola_pds/LDEM_80S_20M-2017-06-15-processed.img`) | `caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b` | raw 30400×30400 int16 LE, scale 0.5 m, no header (1.85 GB) | Mark Shirley's pipeline (he maintained the upstream C# Mapbuilder until his retirement in 2025). Origin is unclear — believed to be a WUSTL 2017 download with one or more manual elevation patches. **This is the project's actual baseline.** |
+| **WUSTL 2017** (live) | `LDEM_80S_20M.IMG` | unknown — different from Shirley | raw 30400×30400 int16 LE, scale 0.5 m, no header (1.85 GB) | [PDS Geosciences Node @ WUSTL — LOLA GDR](https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/LDEM_80S_20M.IMG). The official, ongoing distribution. SHA differs from Shirley; do not use it with the current pins. |
 | **2023 Barker et al** | `LDEM_80S_20MPP_ADJ.TIF` | `09b7ca80f9e6a146f970225d18af72fc02787669b3ef51b888e347d2b6845649` | Cloud-Optimised GeoTIFF, Float32, DEFLATE (2.70 GB) | [GSFC PGDA product 90](https://pgda.gsfc.nasa.gov/products/90), Barker et al. 2023, *Planet. Sci. J.*, 4, 183. **Long-term migration target** (replaces Shirley as the canonical farfield once we re-pin the test suite). |
 | **Barker on 2017 grid** | `ldem_80s_20m_2023.img` | `898a803d8f980731f01634af90a0eb659423c738fef787c4ce4f882a7c3f2398` | raw int16 LE, scale 0.5 m, same .img layout as Shirley (1.85 GB) | The full 2023 Barker product re-formatted across the entire 30400×30400: resampled onto the Shirley/WUSTL pixel grid AND re-referenced to the same sphere. Mean diff vs Shirley at the Nobile window: 0.12 m, max: 42.5 m. Not a patch — a wholesale replacement of all elevations. |
 | **LNSI** ("Large Nobile Site of Interest") | `large_nobile.tif` (external, at `/Volumes/WD_BLACK/large_nobile.tif`) | (Float32 GeoTIFF) | 896×896 polar-stereographic 20 m crop, Float32 elevations in metres | **Byte-identical to Shirley at the Nobile window** (origin (63520, 130240), pixel offset (row 8688, col 18376)) — verified by direct comparison. So LNSI is a Shirley crop, not a Barker-derived product, despite the surrounding folder name. The C# Mapbuilder reference renders in `mapbuilder_large_nobile_sun/` rendered against this, hence against Shirley elevations. |
@@ -65,16 +69,14 @@ from. So Hyperion sim output and the Mapbuilder reference sim are
 pinned to the same far-field DEM, and any sim-vs-sim drift isolates to
 the kernel rather than the input data.
 
-**Known download mismatch.** `src/test_data.jl` advertises the WUSTL
-Geosciences Node URL as the LDEM source, but pins SHA `caaf017f…`
-(Shirley). A fresh download from that URL would fail SHA verification
-because WUSTL serves a different (live) version of the same nominal
-product. We accept this as a known failure mode — the legacy Shirley
-artefact is preserved as our test baseline so we can compare against
-the C# Mapbuilder pipeline (which used the same Shirley file)
-byte-for-byte. **Migration plan:** repin against either current WUSTL
-2017 or 2023 Barker, regenerate the bit-exact tables, drop the legacy
-Shirley dependency.
+**No auto-download.** WUSTL serves a different live version of the same
+nominal product, so this repo no longer attempts to download an LDEM.
+Place the Shirley artifact manually at `data/inputs/ldem_80s_20m.img`.
+The legacy Shirley artifact is preserved as our test baseline so we can
+compare against the C# Mapbuilder pipeline (which used the same Shirley
+file) byte-for-byte. **Migration plan:** repin against either current
+WUSTL 2017 or 2023 Barker, regenerate the bit-exact tables, drop the
+legacy Shirley dependency.
 
 **Grid offset gotcha:** the native 2023 Barker grid is shifted 10 m W
 and 10 m N from Shirley's grid. Shirley's .img has UL ≈ (−303980,
@@ -214,7 +216,8 @@ save_indexed_png(dsn, DSN_PALETTE, "dsn.png")
 - `scripts/bench_workgroup.jl` — sweep workgroup sizes {128, 256, 512}
 - `scripts/generate_live_year.jl` — full year (2h cadence) with per-ts
   timing and SSIM vs an optional precomputed reference directory
-- `scripts/fetch_test_data.jl` — pull the LDEM and SPICE kernels
+- `scripts/fetch_test_data.jl` — validate local Shirley and derive the
+  Nobile GTiff used by diagnostic scripts
 - `scripts/azimuth_range.jl`, `scripts/select_test_timestamps.jl` —
   diagnostic helpers
 

@@ -9,7 +9,7 @@ import Hyperion as Hyp
 const KERNELS = joinpath(dirname(@__DIR__), "kernels")
 
 @info "Loading"
-_, nobile_path = Hyp.ensure_test_data!()
+_, nobile_path = Hyp.require_test_data!()
 dem = Hyp.load_shadow_dem(nobile_path)
 H, W = dem.H, dem.W
 mr, mc = H ÷ 2 + 1, W ÷ 2 + 1

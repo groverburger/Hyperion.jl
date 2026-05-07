@@ -13,7 +13,7 @@ const DEVICE_ARR = Metal.MtlArray
 # const BACKEND    = CUDA.CUDABackend()
 # const DEVICE_ARR = CUDA.CuArray
 
-ldem = Hyp.load_ldem(Hyp.ensure_ldem!())
+ldem = Hyp.load_ldem(Hyp.require_shirley_ldem!())
 Hyp.init_spice(joinpath(dirname(@__DIR__), "kernels"))
 max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 

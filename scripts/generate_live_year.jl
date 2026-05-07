@@ -26,7 +26,7 @@ mkpath(joinpath(OUT_ROOT, "dsn_000"))
 
 # ─── Setup ────────────────────────────────────────────────────────────────
 @info "Loading LDEM + SPICE"
-ldem = Hyp.load_ldem(Hyp.ensure_ldem!())
+ldem = Hyp.load_ldem(Hyp.require_shirley_ldem!())
 Hyp.init_spice(KERNELS)
 
 @info "Building mipmap pyramids"
