@@ -485,7 +485,8 @@ function score_tier(tier::Symbol = :tier0;
             _LNSI_SIZE[1], _LNSI_SIZE[2],
             sun_pos, earth_pos, 0.0;
             max_mipmaps = max_mipmaps, min_mipmaps = min_mipmaps,
-            backend = backend, DeviceArray = DeviceArray)
+            backend = backend, DeviceArray = DeviceArray,
+            elev_scale_to_m = ldem.elev_scale_to_m)
         for pid in group
             _write_lnsi_render(joinpath(sim_dir, "$(pid).tif"), sun)
         end
@@ -656,7 +657,7 @@ Compare two sets of per-NAC metric rows. Returns a NamedTuple with:
   per_nac        Vector{NamedTuple} of (nac_id, metric, baseline,
                  current, delta, direction, classification) — one
                  row per (NAC, metric) cell.
-  n_regressions  count of cells where current is worse than baseline
+  n_regressions  count of per-NAC cells where current is worse than baseline
   n_improvements count where current is better than baseline
   n_unchanged    count where |current - baseline| <= tolerance
   regressions    Vector of nac_id strings with at least one regression
@@ -711,6 +712,82 @@ function compare_to_baseline(current::Vector, baseline::Vector)
     )
 end
 
+_finite_median(xs) = begin
+    finite = filter(isfinite, collect(xs))
+    isempty(finite) ? NaN : _Stats.median(finite)
+end
+
+_finite_mean(xs) = begin
+    finite = filter(isfinite, collect(xs))
+    isempty(finite) ? NaN : _Stats.mean(finite)
+end
+
+const _CORE_QUALITY_METRICS = (:ber, :iou_shadow, :ssim_continuous, :mae, :p99_abs_err)
+
+function _relative_improvement(current::Real, baseline::Real, direction::Symbol)
+    (!isfinite(current) || !isfinite(baseline) || baseline == 0) && return NaN
+    if direction === :lower_is_better
+        return (baseline - current) / abs(baseline)
+    elseif direction === :higher_is_better
+        return (current - baseline) / abs(baseline)
+    else
+        error("unknown direction $direction")
+    end
+end
+
+"""
+    compare_metric_summaries_to_baseline(current::Vector{NamedTuple},
+                                         baseline::Vector{NamedTuple})
+        -> Vector{NamedTuple}
+
+Build aggregate summary rows. The returned rows have `summary` set
+to `"median"`, `"mean"`, or `"quality_score"`.
+"""
+function compare_metric_summaries_to_baseline(current::Vector, baseline::Vector)
+    rows = NamedTuple[]
+    median_by_metric = Dict{Symbol, Tuple{Float64, Float64}}()
+
+    for (summary_name, reducer) in (("median", _finite_median),
+                                    ("mean", _finite_mean))
+        for (metric, dir) in pairs(_METRIC_DIRECTIONS)
+            bv = reducer(getproperty(r, metric) for r in baseline)
+            cv = reducer(getproperty(r, metric) for r in current)
+            if summary_name == "median"
+                median_by_metric[metric] = (bv, cv)
+            end
+            cls = _classify_delta(cv, bv, dir)
+            push!(rows, (
+                summary        = summary_name,
+                metric         = String(metric),
+                baseline       = bv,
+                current        = cv,
+                delta          = isfinite(bv) && isfinite(cv) ? cv - bv : NaN,
+                direction      = String(dir),
+                classification = String(cls),
+            ))
+        end
+    end
+
+    relative_improvements = Float64[]
+    for metric in _CORE_QUALITY_METRICS
+        dir = getproperty(_METRIC_DIRECTIONS, metric)
+        bv, cv = median_by_metric[metric]
+        push!(relative_improvements, _relative_improvement(cv, bv, dir))
+    end
+    score = _finite_mean(relative_improvements)
+    cls = _classify_delta(score, 0.0, :higher_is_better)
+    push!(rows, (
+        summary        = "quality_score",
+        metric         = "core_mean_relative_improvement",
+        baseline       = 0.0,
+        current        = score,
+        delta          = score,
+        direction      = "higher_is_better",
+        classification = String(cls),
+    ))
+    return rows
+end
+
 """
 Write a per-NAC × per-metric delta CSV for the result of
 `compare_to_baseline(current, baseline)`. Columns: nac_id, metric,
@@ -721,6 +798,20 @@ function write_delta_csv(cmp::NamedTuple, path::AbstractString)
         println(io, "nac_id,metric,baseline,current,delta,direction,classification")
         for r in cmp.per_nac
             println(io, join((r.nac_id, r.metric, r.baseline, r.current,
+                              r.delta, r.direction, r.classification), ","))
+        end
+    end
+end
+
+"""
+Write aggregate metric summary rows. Columns: summary, metric,
+baseline, current, delta, direction, classification.
+"""
+function write_summary_delta_csv(rows::Vector, path::AbstractString)
+    open(path, "w") do io
+        println(io, "summary,metric,baseline,current,delta,direction,classification")
+        for r in rows
+            println(io, join((r.summary, r.metric, r.baseline, r.current,
                               r.delta, r.direction, r.classification), ","))
         end
     end

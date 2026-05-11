@@ -46,10 +46,11 @@ end
 Raw int16 south-polar DEM (LDEM format). Header-less binary file with
 known dimensions and polar stereographic projection.
 """
-struct LDEM
-    data::Matrix{Int16}       # raw int16 data, (H, W); elevation_m = 0.5 * value
+struct LDEM{T<:Real}
+    data::Matrix{T}           # DEM samples, (H, W)
     H::Int
     W::Int
+    elev_scale_to_m::Float32
 end
 
 """
@@ -58,18 +59,28 @@ end
 Elevation in metres at 0-indexed (row, col). Matches 0.5 * int16 value.
 """
 @inline function ldem_elevation_m(ldem::LDEM, row::Int, col::Int)
-    return 0.5 * Float64(ldem.data[row + 1, col + 1])  # 1-indexed
+    return Float64(ldem.elev_scale_to_m) * Float64(ldem.data[row + 1, col + 1])  # 1-indexed
 end
 
 function load_ldem(path::AbstractString;
                    H::Int=30400, W::Int=30400,
                    pixel_size_m::Float64=20.0,
                    R_m::Float64=MOON_RADIUS_M)
+    if lowercase(splitext(path)[2]) in (".tif", ".tiff")
+        dataset = ArchGDAL.read(path)
+        band = ArchGDAL.getband(dataset, 1)
+        raw = ArchGDAL.read(band)
+        elevation_m = Float32.(permutedims(raw, (2, 1)))
+        size(elevation_m) == (H, W) ||
+            error("Expected LDEM GeoTIFF size $(W)x$(H), got $(size(elevation_m, 2))x$(size(elevation_m, 1))")
+        return LDEM(elevation_m, H, W, 1.0f0)
+    end
+
     # Memory-map to avoid loading 1.7 GB eagerly
     raw = Mmap.mmap(open(path, "r"), Matrix{Int16}, (W, H))  # column-major read
     elevation = permutedims(raw, (2, 1))  # → (H, W) row-major view
 
-    return LDEM(elevation, H, W)
+    return LDEM(elevation, H, W, 0.5f0)
 end
 
 # ─── PNG output palettes ──────────────────────────────────────────────────

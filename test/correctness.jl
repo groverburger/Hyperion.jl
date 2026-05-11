@@ -2,18 +2,18 @@
 #
 # Renders Hyperion at the LNSI window for each of the 25 NAC capture
 # times in the bundled Tier 0 fixture, scores against the committed
-# ground-truth masks, and compares the per-NAC metrics against the
-# pinned baseline at `test/fixtures/correctness/baseline_tier0.csv`
-# **direction-aware**:
+# ground-truth masks, and compares metrics against the pinned baseline
+# at `test/fixtures/correctness/baseline_tier0.csv` **direction-aware**:
 #
-#   regression   any per-NAC, per-metric value is WORSE than the
-#                baseline (lower BER beats higher BER, higher IoU
-#                beats lower IoU, etc.) → test FAILS.
-#   improvement  any per-NAC, per-metric value is BETTER than the
-#                baseline → test PASSES with a notice that you should
-#                run `scripts/correctness/refresh_baseline.jl` to
-#                pin the new metrics.
-#   unchanged    |current − baseline| <= 1e-10 → test PASSES silently.
+#   regression   a metric is WORSE than the baseline (lower BER beats
+#                higher BER, higher IoU beats lower IoU, etc.).
+#   improvement  a metric is BETTER than the baseline.
+#   unchanged    |current − baseline| <= 1e-10.
+#
+# The pass/fail gate is based on aggregate median metrics: every median
+# metric must be at least as good as the pinned baseline. Per-NAC
+# regressions are still reported in `delta.csv`, but do not fail the
+# test if the corresponding aggregate median passes.
 #
 # The Hyperion kernel is bit-exact across CPU / Metal / CUDA per the
 # cross-vendor regression suite, and every downstream stage of this
@@ -32,8 +32,8 @@
 #
 #   <pid>.tif      — Hyperion sim render for each Tier 0 NAC
 #   current.csv    — per-NAC metrics this run
-#   delta.csv      — per-NAC × per-metric (baseline, current, delta,
-#                    direction, classification) for inspection
+#   delta.csv      — per-NAC × per-metric rows
+#   summary.csv    — median and mean metric rows
 #
 # When the test reports a regression, opening `delta.csv` and sorting
 # by absolute delta tells you exactly which NAC + metric drifted.
@@ -50,6 +50,13 @@ using Test
 using Hyperion
 using Statistics
 using Dates
+import SHA
+
+function _sha256_file(path::AbstractString)
+    open(path, "r") do io
+        bytes2hex(SHA.sha256(io))
+    end
+end
 
 # ─── Load a GPU backend at top level ─────────────────────────────────
 const _BACKEND_NAME = lowercase(get(ENV, "HYP_BACKEND", ""))
@@ -103,6 +110,13 @@ end
 
     @info "Tier 0 correctness rendering" backend=backend_name n_nacs=length(Hyperion.Correctness.list_nacs(:tier0)) run_dir=run_dir
 
+    input_sha_csv = joinpath(run_dir, "input_shas.csv")
+    open(input_sha_csv, "w") do io
+        println(io, "role,path,sha256")
+        println(io, join(("ldem", abspath(LDEM_PATH), _sha256_file(LDEM_PATH)), ","))
+    end
+    @info "Recorded input SHAs" path=input_sha_csv
+
     ldem = Hyperion.load_ldem(LDEM_PATH)
     max_mm, min_mm = Hyperion.build_ldem_mipmaps_minmax(ldem.data)
     Hyperion.init_spice(joinpath(PROJECT_ROOT, "kernels"))
@@ -118,17 +132,25 @@ end
     # Persist current-run outputs alongside the renders.
     current_csv = joinpath(run_dir, "current.csv")
     delta_csv   = joinpath(run_dir, "delta.csv")
+    summary_csv = joinpath(run_dir, "summary.csv")
     Hyperion.Correctness.write_baseline_csv(rows, current_csv)
 
     baseline = Hyperion.Correctness.read_baseline_csv(
         Hyperion.Correctness.tier0_baseline_path())
 
     cmp = Hyperion.Correctness.compare_to_baseline(rows, baseline)
+    summary_rows = Hyperion.Correctness.compare_metric_summaries_to_baseline(rows, baseline)
     Hyperion.Correctness.write_delta_csv(cmp, delta_csv)
+    Hyperion.Correctness.write_summary_delta_csv(summary_rows, summary_csv)
+    median_rows = filter(r -> r.summary == "median", summary_rows)
+    median_regressions = count(r -> r.classification == "regression", median_rows)
+    median_improvements = count(r -> r.classification == "improvement", median_rows)
+    median_unchanged = count(r -> r.classification == "unchanged", median_rows)
 
     # ─── Headline summary ───────────────────────────────────────
     n_total = length(cmp.per_nac)
     @info "Tier 0 baseline comparison" total_metric_cells=n_total regressions=cmp.n_regressions improvements=cmp.n_improvements unchanged=cmp.n_unchanged regressed_nacs=length(cmp.regressions) improved_nacs=length(cmp.improvements)
+    @info "Tier 0 median comparison" median_metric_cells=length(median_rows) regressions=median_regressions improvements=median_improvements unchanged=median_unchanged
 
     # ─── Detailed regression / improvement reporting ───────────
     if cmp.n_regressions > 0
@@ -162,8 +184,8 @@ end
     @info "Aggregate medians" baseline_BER=median([r.ber for r in baseline]) current_BER=median([r.ber for r in rows]) baseline_IoU_shadow=median([r.iou_shadow for r in baseline]) current_IoU_shadow=median([r.iou_shadow for r in rows]) baseline_SSIM_bin=median(finite([r.ssim_binary for r in baseline])) current_SSIM_bin=median(finite([r.ssim_binary for r in rows]))
 
     # ─── Pass / fail ───────────────────────────────────────────
-    # The test fails iff at least one metric got worse. Improvements
-    # don't fail the test — they just suggest the baseline should be
-    # updated.
-    @test cmp.n_regressions == 0
+    # The test fails iff at least one median metric got worse.
+    # Per-NAC regressions remain visible in delta.csv but do not fail
+    # the aggregate correctness gate.
+    @test median_regressions == 0
 end

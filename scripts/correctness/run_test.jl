@@ -23,11 +23,19 @@ using Dates
 
 const PROJECT_ROOT = joinpath(@__DIR__, "..", "..")
 
-const LDEM_PATH = try
-    Hyp.require_shirley_ldem!()
-catch e
-    @warn "Could not provision LDEM" exception=e
-    ""
+const LDEM_PATH = begin
+    override = get(ENV, "HYP_LDEM_PATH", "")
+    if !isempty(override)
+        isfile(override) || error("HYP_LDEM_PATH does not point to a file: $override")
+        abspath(override)
+    else
+        try
+            Hyp.require_shirley_ldem!()
+        catch e
+            @warn "Could not locate Shirley LDEM" exception=e
+            ""
+        end
+    end
 end
 const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
 

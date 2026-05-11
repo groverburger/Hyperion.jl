@@ -209,7 +209,7 @@ end
 Build 5-level max-pooled and min-pooled pyramids. Each level halves
 the base dimensions. The hierarchical ray-cast uses both.
 """
-function build_ldem_mipmaps_minmax(ldem::Matrix{Int16})
+function build_ldem_mipmaps_minmax(ldem::Matrix{T}) where {T<:Real}
     return (_build_pool(ldem, max), _build_pool(ldem, min))
 end
 
