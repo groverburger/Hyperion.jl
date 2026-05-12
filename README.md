@@ -86,9 +86,8 @@ The Tier 0 correctness runner can also be pointed at another local LDEM
 without replacing the Shirley baseline file:
 
 ```
-HYP_BACKEND=metal HYP_RUN_CORRECTNESS=1 \
-HYP_LDEM_PATH=data/inputs/LDEM_80S_20MPP_ADJ.TIF \
-julia --project scripts/correctness/run_test.jl
+HYP_BACKEND=metal HYP_LDEM_PATH=data/inputs/LDEM_80S_20MPP_ADJ.TIF \
+    julia --project scripts/correctness/run_test.jl
 ```
 
 ### Farfield LDEM versions
@@ -198,12 +197,12 @@ The test requires a GPU backend (Metal or CUDA must be loaded in your
 active environment) since each LNSI render takes ~200 s on CPU; with
 Metal it is usable interactively.
 
-Because `Pkg.test()` runs in a sub-environment that doesn't see
-globally-installed Metal/CUDA, run the test directly via the
+The default test suite runs the Tier 0 correctness check unless
+`HYP_SKIP_CORRECTNESS=1` is set. You can also run it directly via the
 convenience runner:
 
 ```
-HYP_BACKEND=metal HYP_RUN_CORRECTNESS=1 julia --project scripts/correctness/run_test.jl
+HYP_BACKEND=metal julia --project scripts/correctness/run_test.jl
 ```
 
 This renders Hyperion at 25 NAC capture times (the bundled "Tier 0"

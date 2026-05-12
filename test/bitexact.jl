@@ -391,61 +391,59 @@ if TEST_BACKEND_NAME == "none"
     @warn "No render backend selected — skipping cross-platform bit-exactness test"
 else
 
-@testset "Cross-platform bit-exactness (20 timestamps, $(TEST_BACKEND_NAME))" begin
-    ldem = Hyp.load_ldem(LDEM_PATH)
-    Hyp.init_spice(joinpath(PROJECT_ROOT, "kernels"))
-    max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
-    origin_r, origin_c = 8960, 18432
-    H, W = 512, 896
+ldem = Hyp.load_ldem(LDEM_PATH)
+Hyp.init_spice(joinpath(PROJECT_ROOT, "kernels"))
+max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
+origin_r, origin_c = 8960, 18432
+H, W = 512, 896
 
-    for (tag, expected) in sort(collect(KNOWN_GOOD), by = first)
-        @testset "$tag" begin
-            dt = DateTime(tag, dateformat"yyyy-mm-ddTHH-MM-SS")
-            et = Hyp.datetime_to_et(dt)
-            sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
-            earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
+for (tag, expected) in sort(collect(KNOWN_GOOD), by = first)
+    @testset "Cross-platform bit-exactness $tag ($(TEST_BACKEND_NAME))" begin
+        dt = DateTime(tag, dateformat"yyyy-mm-ddTHH-MM-SS")
+        et = Hyp.datetime_to_et(dt)
+        sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+        earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
-            # Run kernel on the selected machine-appropriate backend. Output
-            # matches CPU, Metal, and CUDA bit-for-bit per the verified
-            # 3-way invariant.
-            sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_gpu(
-                ldem.data, origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
-                max_mipmaps = max_mm, min_mipmaps = min_mm,
-                backend = TEST_BACKEND, DeviceArray = TEST_DEVICE_ARRAY)
+        # Run kernel on the selected machine-appropriate backend. Output
+        # matches CPU, Metal, and CUDA bit-for-bit per the verified
+        # 3-way invariant.
+        sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_gpu(
+            ldem.data, origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
+            max_mipmaps = max_mm, min_mipmaps = min_mm,
+            backend = TEST_BACKEND, DeviceArray = TEST_DEVICE_ARRAY)
 
-            # CPU precompute buffer — its SHA is part of the audit trail
-            # because a drift in CPU math would silently corrupt GPU input.
-            sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
-                Hyp._precompute_azel(ldem.data, origin_r, origin_c, H, W,
-                                    sun_t, earth_t, Float32(0.0))
-            azel_bytes = vcat(vec(sun_rc), vec(sun_rs), vec(sun_el),
-                              vec(earth_rc), vec(earth_rs), vec(earth_el),
-                              vec(sun_tan), vec(dsn_tan))
+        # CPU precompute buffer — its SHA is part of the audit trail
+        # because a drift in CPU math would silently corrupt GPU input.
+        sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
+            Hyp._precompute_azel(ldem.data, origin_r, origin_c, H, W,
+                                sun_t, earth_t, Float32(0.0))
+        azel_bytes = vcat(vec(sun_rc), vec(sun_rs), vec(sun_el),
+                          vec(earth_rc), vec(earth_rs), vec(earth_el),
+                          vec(sun_tan), vec(dsn_tan))
 
-            # Kernel raw outputs
-            @test sha256_bytes(sun) == expected.sun
-            @test sha256_bytes(dsn) == expected.dsn
-            @test bytes2hex(SHA.sha256(reinterpret(UInt8, azel_bytes))) == expected.azel
-            @test sha256_bytes(de) == expected.de
-            for k in 1:8
-                @test sha256_bytes(view(sun_rays, :, :, k)) ==
-                      getfield(expected, Symbol("d_$(k-1)"))
-            end
-
-            # Palette-applied RGB (the user-visible content)
-            sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
-            dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
-            @test sha256_bytes(sun_rgb) == expected.sun_rgb
-            @test sha256_bytes(dsn_rgb) == expected.dsn_rgb
-
-            # PNG fixture comparison — decode the committed reference and
-            # verify pixel-for-pixel equality. On a mismatch, the reference
-            # PNG is directly openable for visual inspection.
-            ref_sun = _load_png_rgb(joinpath(FIXTURES, "$(tag)_sun.png"))
-            ref_dsn = _load_png_rgb(joinpath(FIXTURES, "$(tag)_dsn.png"))
-            @test ref_sun == sun_rgb
-            @test ref_dsn == dsn_rgb
+        # Kernel raw outputs
+        @test sha256_bytes(sun) == expected.sun
+        @test sha256_bytes(dsn) == expected.dsn
+        @test bytes2hex(SHA.sha256(reinterpret(UInt8, azel_bytes))) == expected.azel
+        @test sha256_bytes(de) == expected.de
+        for k in 1:8
+            @test sha256_bytes(view(sun_rays, :, :, k)) ==
+                  getfield(expected, Symbol("d_$(k-1)"))
         end
+
+        # Palette-applied RGB (the user-visible content)
+        sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
+        dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
+        @test sha256_bytes(sun_rgb) == expected.sun_rgb
+        @test sha256_bytes(dsn_rgb) == expected.dsn_rgb
+
+        # PNG fixture comparison — decode the committed reference and
+        # verify pixel-for-pixel equality. On a mismatch, the reference
+        # PNG is directly openable for visual inspection.
+        ref_sun = _load_png_rgb(joinpath(FIXTURES, "$(tag)_sun.png"))
+        ref_dsn = _load_png_rgb(joinpath(FIXTURES, "$(tag)_dsn.png"))
+        @test ref_sun == sun_rgb
+        @test ref_dsn == dsn_rgb
     end
 end
 

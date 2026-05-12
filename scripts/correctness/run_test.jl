@@ -6,10 +6,10 @@
 # each LNSI render takes ~200 s and the 25-NAC sweep would be ~85 min.
 #
 # Run:
-#   HYP_RUN_CORRECTNESS=1 julia --project scripts/correctness/run_test.jl
+#   julia --project scripts/correctness/run_test.jl
 #
 # Backend override (defaults to first of metal / cuda available):
-#   HYP_BACKEND=cuda HYP_RUN_CORRECTNESS=1 julia --project ...
+#   HYP_BACKEND=cuda julia --project scripts/correctness/run_test.jl
 
 using Pkg; Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
@@ -39,7 +39,8 @@ const LDEM_PATH = begin
 end
 const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
 
-# Force the gate on so `runtests.jl`-style scripts don't have to.
-ENV["HYP_RUN_CORRECTNESS"] = "1"
+# This runner invokes correctness directly; clear the default-suite skip flag
+# unless the caller explicitly wants to test the skip path.
+delete!(ENV, "HYP_SKIP_CORRECTNESS")
 
 include(joinpath(PROJECT_ROOT, "test", "correctness.jl"))
