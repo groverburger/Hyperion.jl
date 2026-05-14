@@ -46,6 +46,12 @@ using KernelAbstractions: CPU
         @test abs(elevated_row - query_row) < 0.01f0
         @test Hyp._stack_next_layer_start_d(300.0f0, 1.0f0, 20.0f0) == 15.0f0
         @test Hyp._stack_next_layer_start_d(5.0f0, 1.0f0, 20.0f0) == 1.0f0
+        @test Hyp._stack_ray_exit_distance_pixels(
+            10.0f0, 10.0f0, 1.0f0, 0.0f0, 32, 64) == 53.0f0
+        @test Hyp._stack_ray_exit_distance_pixels(
+            10.0f0, 10.0f0, -1.0f0, 0.0f0, 32, 64) == 10.0f0
+        @test Hyp._stack_ray_exit_distance_pixels(
+            10.0f0, 10.0f0, 0.0f0, 1.0f0, 32, 64) == 21.0f0
     end
 
     H = 16

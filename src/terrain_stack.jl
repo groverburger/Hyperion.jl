@@ -286,9 +286,25 @@ end
 @inline function _stack_dynamic_max_pixels(threshold::Float32,
                                            max_terrain_m::Float32,
                                            pixel_size_m::Float32)
-    hard_cap = 15000.0f0
     scaled = max_terrain_m * (Float32(1.5) / pixel_size_m)
-    return threshold > 0.005f0 ? min(hard_cap, scaled / threshold) : hard_cap
+    return threshold > 0.005f0 ? scaled / threshold : typemax(Float32)
+end
+
+@inline function _stack_ray_exit_distance_pixels(query_col::Float32,
+                                                 query_row::Float32,
+                                                 ray_cos::Float32,
+                                                 ray_sin::Float32,
+                                                 H, W)
+    far = typemax(Float32)
+    max_col = Float32(W - 1)
+    max_row = Float32(H - 1)
+    d_col = ray_cos > 0.0f0 ? (max_col - query_col) / ray_cos :
+            ray_cos < 0.0f0 ? (0.0f0 - query_col) / ray_cos :
+            far
+    d_row = ray_sin > 0.0f0 ? (max_row - query_row) / ray_sin :
+            ray_sin < 0.0f0 ? (0.0f0 - query_row) / ray_sin :
+            far
+    return min(d_col, d_row)
 end
 
 @inline function _query_setup_components(cx::Float32, cy::Float32,
@@ -731,17 +747,25 @@ end
             srs = fma( site_sun_rc, s_k, site_sun_rs * c_k)
             lrc = fma(-ldem_sun_rs, s_k, ldem_sun_rc * c_k)
             lrs = fma( ldem_sun_rc, s_k, ldem_sun_rs * c_k)
+            site_max_d = min(
+                sun_max_site,
+                _stack_ray_exit_distance_pixels(
+                    Float32(site_col), Float32(site_row),
+                    src, srs, site_H_total, site_W_total))
             n, d2, exit_d, hit = _gpu_cast_stack_segment_level0(
                 site0, site_H_total, site_W_total,
                 Float32(site_col), Float32(site_row), q_elev_m,
                 qx, qy, qz, qz_pos, M31, M32, M33,
-                src, srs, observer_km, sun_thresh, sun_max_site,
+                src, srs, observer_km, sun_thresh, site_max_d,
                 site_s0, site_l0, site_pixel_size_km,
                 site_elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
             if !hit
                 start_ldem = _stack_next_layer_start_d(
                     exit_d, site_pixel_size_m, ldem_pixel_size_m)
-                max_ldem = max(start_ldem, sun_max_ldem)
+                max_ldem = min(
+                    sun_max_ldem,
+                    _stack_ray_exit_distance_pixels(
+                        ldem_col, ldem_row, lrc, lrs, ldem_H, ldem_W))
                 n, d2, _, _ = _gpu_cast_stack_segment_level0(
                     ldem0, ldem_H, ldem_W,
                     ldem_col, ldem_row, q_elev_m,
@@ -764,17 +788,26 @@ end
     end
 
     if !earth_below
+        site_max_d = min(
+            dsn_max_site,
+            _stack_ray_exit_distance_pixels(
+                Float32(site_col), Float32(site_row),
+                site_earth_rc, site_earth_rs, site_H_total, site_W_total))
         n, d2, exit_d, hit = _gpu_cast_stack_segment_level0(
             site0, site_H_total, site_W_total,
             Float32(site_col), Float32(site_row), q_elev_m,
             qx, qy, qz, qz_pos, M31, M32, M33,
-            site_earth_rc, site_earth_rs, observer_km, dsn_thresh, dsn_max_site,
+            site_earth_rc, site_earth_rs, observer_km, dsn_thresh, site_max_d,
             site_s0, site_l0, site_pixel_size_km,
             site_elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
         if !hit
             start_ldem = _stack_next_layer_start_d(
                 exit_d, site_pixel_size_m, ldem_pixel_size_m)
-            max_ldem = max(start_ldem, dsn_max_ldem)
+            max_ldem = min(
+                dsn_max_ldem,
+                _stack_ray_exit_distance_pixels(
+                    ldem_col, ldem_row, ldem_earth_rc, ldem_earth_rs,
+                    ldem_H, ldem_W))
             n, d2, _, _ = _gpu_cast_stack_segment_level0(
                 ldem0, ldem_H, ldem_W,
                 ldem_col, ldem_row, q_elev_m,
@@ -993,16 +1026,24 @@ function _generate_site_polar_stack_cpu(
                     rs = fma( sun_rc, s_k, sun_rs * c_k)
                     lrc = fma(-lsun_rs, s_k, lsun_rc * c_k)
                     lrs = fma( lsun_rc, s_k, lsun_rs * c_k)
+                    site_max_d = min(
+                        sun_max_site,
+                        _stack_ray_exit_distance_pixels(
+                            Float32(sc), Float32(sr), rc, rs, site.H, site.W))
                     n, d2, exit_d, hit = _cast_stack_segment(
                         site.data, Float32(sc), Float32(sr), q_elev_m,
                         qx, qy, qz, qz_pos, M31, M32, M33,
-                        rc, rs, observer_km, sun_thresh, sun_max_site,
+                        rc, rs, observer_km, sun_thresh, site_max_d,
                         site_s0, site_l0, site_pix_km, site_pix_m,
                         site.elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
                     if !hit
                         start_ldem = _stack_next_layer_start_d(
                             exit_d, site_pix_m, farfield.pixel_size_m)
-                        max_ldem = max(start_ldem, sun_max_ldem)
+                        max_ldem = min(
+                            sun_max_ldem,
+                            _stack_ray_exit_distance_pixels(
+                                ldem_col, ldem_row, lrc, lrs,
+                                size(farfield.data, 1), size(farfield.data, 2)))
                         n, d2, _, _ = _cast_stack_segment(
                             farfield.data, ldem_col, ldem_row, q_elev_m,
                             lqx, lqy, lqz, lqz_pos, lM31, lM32, lM33,
@@ -1018,16 +1059,25 @@ function _generate_site_polar_stack_cpu(
 
             de = Float32(-90.0)
             if !earth_below
+                site_max_d = min(
+                    dsn_max_site,
+                    _stack_ray_exit_distance_pixels(
+                        Float32(sc), Float32(sr),
+                        earth_rc, earth_rs, site.H, site.W))
                 n, d2, exit_d, hit = _cast_stack_segment(
                     site.data, Float32(sc), Float32(sr), q_elev_m,
                     qx, qy, qz, qz_pos, M31, M32, M33,
-                    earth_rc, earth_rs, observer_km, dsn_thresh, dsn_max_site,
+                    earth_rc, earth_rs, observer_km, dsn_thresh, site_max_d,
                     site_s0, site_l0, site_pix_km, site_pix_m,
                     site.elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
                 if !hit
                     start_ldem = _stack_next_layer_start_d(
                         exit_d, site_pix_m, farfield.pixel_size_m)
-                    max_ldem = max(start_ldem, dsn_max_ldem)
+                    max_ldem = min(
+                        dsn_max_ldem,
+                        _stack_ray_exit_distance_pixels(
+                            ldem_col, ldem_row, learth_rc, learth_rs,
+                            size(farfield.data, 1), size(farfield.data, 2)))
                     n, d2, _, _ = _cast_stack_segment(
                         farfield.data, ldem_col, ldem_row, q_elev_m,
                         lqx, lqy, lqz, lqz_pos, lM31, lM32, lM33,
