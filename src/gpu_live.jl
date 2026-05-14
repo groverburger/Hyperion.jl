@@ -666,7 +666,8 @@ Required kwargs:
 Optional:
   `workgroup_size`  — total threads per workgroup (default 512, keep ≤1024)
 """
-function generate_live_shadow_frame_gpu(ldem::Matrix{T},
+function _render_stack_source_gpu(
+                                         ldem::Matrix{T},
                                          ldem_origin_row::Int, ldem_origin_col::Int,
                                          H::Int, W::Int,
                                          sun_pos_km::NTuple{3, Float64},
@@ -734,4 +735,41 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{T},
     KernelAbstractions.synchronize(backend)
 
     return Array(d_sun_out), Array(d_dsn_out), Array(d_de_dbg), Array(d_sun_rays_dbg)
+end
+
+function generate_live_shadow_frame_gpu(ldem::Matrix{T},
+                                         ldem_origin_row::Int, ldem_origin_col::Int,
+                                         H::Int, W::Int,
+                                         sun_pos_km::NTuple{3, Float64},
+                                         earth_pos_km::NTuple{3, Float64},
+                                         observer_height_m::Float64;
+                                         max_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{T}},
+                                         min_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{T}},
+                                         backend,
+                                         DeviceArray,
+                                         workgroup_size::Int=512,
+                                         s0::Float32 = LDEM_S0_F32,
+                                         l0::Float32 = LDEM_L0_F32,
+                                         pixel_size_km::Float32 = 0.02f0,
+                                         pixel_size_m::Float32 = 20.0f0,
+                                         max_terrain_pix_scale::Float32 = 0.075f0,
+                                         mipmap_base::Float32 = 100.0f0,
+                                         elev_scale_to_m::Float32 = 0.5f0) where {T<:Real}
+    stack = TerrainStack(PolarStereoTerrain(
+        ldem;
+        window = (ldem_origin_row, ldem_origin_col, H, W),
+        max_mipmaps = max_mipmaps,
+        min_mipmaps = min_mipmaps,
+        s0 = s0,
+        l0 = l0,
+        pixel_size_km = pixel_size_km,
+        pixel_size_m = pixel_size_m,
+        max_terrain_pix_scale = max_terrain_pix_scale,
+        mipmap_base = mipmap_base,
+        elev_scale_to_m = elev_scale_to_m))
+    return render_terrain_stack_gpu(
+        stack, sun_pos_km, earth_pos_km, observer_height_m;
+        backend = backend,
+        DeviceArray = DeviceArray,
+        workgroup_size = workgroup_size)
 end

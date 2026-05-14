@@ -248,23 +248,20 @@ function generate_live_shadow_frame_site_gpu(site::SiteDEM{T},
     l0            = Float32(site.l0)
     max_terrain_pix_scale = Float32(1.5 / site.pixel_size_m)
 
-    # `mipmap_base` is the pixel-distance at which the kernel starts
-    # using max-pooled mipmap levels instead of fine-grained level-0
-    # samples. Default `100.0f0` matches the LDEM convention: level 0
-    # covers the first 100 px of the ray. After commit 3a57940 the
-    # mipmap-on path is byte-exact with mipmap-off (verified across 9
-    # site-DEM timestamps), so the optimization is "free" — typically
-    # 1.5–2× speedup, no quality cost.
-    return generate_live_shadow_frame_gpu(
-        site.data, origin_r, origin_c, H, W,
-        sun_local, earth_local, observer_height_m;
-        max_mipmaps = max_mipmaps, min_mipmaps = min_mipmaps,
-        backend = backend, DeviceArray = DeviceArray,
+    stack = TerrainStack(SiteTerrain(site; window = (origin_r, origin_c, H, W)))
+    return render_terrain_stack_gpu(
+        stack, sun_pos_km, earth_pos_km, observer_height_m;
+        site_max_mipmaps = max_mipmaps,
+        site_min_mipmaps = min_mipmaps,
+        backend = backend,
+        DeviceArray = DeviceArray,
         workgroup_size = workgroup_size,
-        s0 = s0, l0 = l0,
-        pixel_size_km = pixel_size_km,
-        pixel_size_m  = pixel_size_m,
-        max_terrain_pix_scale = max_terrain_pix_scale,
-        mipmap_base = mipmap_base,
-        elev_scale_to_m = site.elev_scale_to_m)
+        site_mipmap_base = mipmap_base,
+        site_sun_local = sun_local,
+        site_earth_local = earth_local,
+        site_s0 = s0,
+        site_l0 = l0,
+        site_pixel_size_km = pixel_size_km,
+        site_pixel_size_m = pixel_size_m,
+        site_max_terrain_pix_scale = max_terrain_pix_scale)
 end

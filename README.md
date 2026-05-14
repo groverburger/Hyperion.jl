@@ -16,19 +16,27 @@ and values in between mean partial illumination. Hyperion can also emit
 binary lit/shadow masks, Earth visibility maps, DSN-style communication
 maps, and diagnostic images used by the test suite.
 
-The current branch (`1m-shadows`) contains the live
-KernelAbstractions GPU pipeline, 20 m south-polar LDEM support, and
-native high-resolution site DEM support. The older precomputed-horizons
-pipeline and the older hand-written CPU live path have been removed.
-The KA CPU backend still exists as a slow reference backend.
+The current `master` branch contains the live KernelAbstractions GPU
+pipeline, 20 m south-polar LDEM support, and native high-resolution
+site DEM support. The older precomputed-horizons pipeline and the older
+hand-written CPU live path have been removed. The KA CPU backend still
+exists as a slow reference backend.
 
-Hyperion is not tied to one output resolution. The same live kernel is
-parameterized by DEM origin, pixel size, projection frame, and elevation
-scale, so it can render the 20 m LOLA south-polar LDEM, native 1 m
-site DEMs, and other local products such as 5 m DEMs when they are
-stereographic GeoTIFFs with dimensions compatible with the mipmap
-pyramid. The bundled tests pin both the 20 m LDEM path and the 1 m
-site-DEM path.
+Hyperion is not tied to one output resolution. The terrain-stack kernel
+executor is parameterized by DEM origin, pixel size, projection frame,
+and elevation scale, so it can render the 20 m LOLA south-polar LDEM,
+native 1 m site DEMs, and other local products such as 5 m DEMs when
+they are locally tangent stereographic GeoTIFFs with dimensions
+compatible with the mipmap pyramid. The bundled tests pin both the 20 m
+LDEM path and the current 1 m site-DEM path.
+
+The shadow-generation architecture is a terrain stack: render output on
+the first terrain source, cast through that source first, then continue
+rays through lower-resolution polar-stereographic farfield sources after
+they leave the nearfield tile. A one-source stack covers the current
+20 m LDEM and site-only cases. The first multi-source configuration is
+the practical one: a 1 m site DEM nearfield plus the 20 m south-polar
+LDEM farfield.
 
 Some terms used below:
 
@@ -58,7 +66,6 @@ Fresh clone to running tests is three commands:
 ```
 git clone <repo-url>
 cd Hyperion.jl
-git checkout 1m-shadows
 julia --project -e 'using Pkg; Pkg.instantiate()'
 julia --project -e 'using Pkg; Pkg.test()'
 ```
@@ -346,6 +353,24 @@ sun, dsn, _, _ = generate_live_shadow_frame_site_gpu(
 Float32 metre elevations for DEMs where sub-half-metre precision is
 worth the extra memory. Site DEM dimensions must be divisible by 16 so
 the 5-level min/max mipmap pyramid can be built.
+
+This is the current site-only path. It renders in the site DEM's native
+pixel grid, but a ray stops when it leaves the site tile. That means
+interior terrain occluders are captured at native resolution, while
+low-sun shadows whose actual caster is outside the site DEM can be
+incorrectly lit. The terrain-stack farfield path preserves the same
+output alignment and continues those exited rays into the 20 m LDEM.
+
+The terrain-stack data model is designed for more than two terrain sources:
+the highest-resolution site source is the output grid, while
+lower-resolution farfield sources are polar-stereographic DEMs ordered
+from near to far. Existing public 20 m and site render APIs now route
+through the same stack dispatcher while preserving their bit-exact
+outputs. The first multi-source implementation establishes the
+site-to-20 m-LDEM continuation in the same stack model. Future work can
+extend that same public model to more than two terrain sources and to
+site loaders that preserve arbitrary source projections without changing
+the existing bit-exact APIs.
 
 ## Scripts
 

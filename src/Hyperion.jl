@@ -10,6 +10,7 @@ include("io.jl")
 include("live_helpers.jl")     # CPU helpers used to fill GPU buffers
 include("gpu_live.jl")          # the one and only GPU kernel + driver
 include("site_dem.jl")          # 1m site DEM: load, resample, run kernel
+include("terrain_stack.jl")     # site-aligned terrain-stack render model
 include("test_data.jl")         # local Shirley LDEM validation + derived fixtures
 include("correctness.jl")       # NAC ground-truth correctness data discovery
 

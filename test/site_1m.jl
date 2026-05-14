@@ -130,6 +130,51 @@ _sha(v) = bytes2hex(SHA.sha256(collect(reinterpret(UInt8, vec(v)))))
                   getfield(SITE_KNOWN_GOOD, Symbol("d_$(k-1)"))
         end
     end
+
+    @testset "terrain-stack single-site wrapper" begin
+        stack = Hyp.TerrainStack(
+            Hyp.SiteTerrain(site; window = (
+                SITE_KNOWN_GOOD.origin_r,
+                SITE_KNOWN_GOOD.origin_c,
+                SITE_KNOWN_GOOD.H,
+                SITE_KNOWN_GOOD.W)))
+        l_sun, l_dsn, l_de, l_sun_rays =
+            Hyp.render_terrain_stack_gpu(
+                stack, sun_t, earth_t, 0.0;
+                site_max_mipmaps = max_mm,
+                site_min_mipmaps = min_mm,
+                backend = TEST_BACKEND,
+                DeviceArray = TEST_DEVICE_ARRAY)
+
+        @test l_sun == sun
+        @test l_dsn == dsn
+        @test l_de == de
+        @test l_sun_rays == sun_rays
+    end
+
+    @testset "Float32 loader avoids low-sun quantization self-casting" begin
+        site_f32 = Hyp.load_site_dem_f32(SITE_TIF_PATH)
+        max_f32, min_f32 = Hyp.build_site_mipmaps_minmax(site_f32)
+        dt_q = DateTime("2027-01-22T07-00-00", dateformat"yyyy-mm-ddTHH-MM-SS")
+        et_q = Hyp.datetime_to_et(dt_q)
+        sun_q = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN, et_q))
+        earth_q = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et_q))
+        _, _, de_q, _ = Hyp.generate_live_shadow_frame_site_gpu(
+            site_f32, sun_q, earth_q, 0.0;
+            max_mipmaps = max_f32,
+            min_mipmaps = min_f32,
+            backend = TEST_BACKEND,
+            DeviceArray = TEST_DEVICE_ARRAY,
+            origin_r = 496,
+            origin_c = 1246,
+            H = 9,
+            W = 9,
+            mipmap_base = 1.0f9)
+
+        @test minimum(de_q) < -10.95f0
+        @test maximum(de_q) < -10.80f0
+        @test maximum(de_q) - minimum(de_q) < 0.20f0
+    end
 end
 
 end  # if isfile(SITE_TIF_PATH)

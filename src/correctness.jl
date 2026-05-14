@@ -362,7 +362,7 @@ function score_one(sim_path::AbstractString,
     sim_v  = @view sim[o.b_rows, o.b_cols]
 
     @assert size(nac_u8) == size(sim_v) == size(nac_sf)
-    valid = nac_u8 .!= _NAC_NODATA
+    valid = (nac_u8 .!= _NAC_NODATA) .& isfinite.(sim_v)
     n_valid = count(valid)
 
     obs_lit_raw = nac_u8 .== UInt8(255)
@@ -388,11 +388,11 @@ function score_one(sim_path::AbstractString,
     eroded = _binary_erode4(valid, pad)
     n_strict = count(eroded)
     if n_strict >= 1
-        obs_bin = ifelse.(valid, Float64.(obs_lit_raw), Float64.(sim_lit_raw))
-        sim_bin = Float64.(sim_lit_raw)
+        sim_bin = ifelse.(isfinite.(sim_v), Float64.(sim_lit_raw), 0.0)
+        obs_bin = ifelse.(valid, Float64.(obs_lit_raw), sim_bin)
         ssim_b = _Stats.mean(_ssim_map(obs_bin, sim_bin)[eroded])
-        obs_c = ifelse.(valid, Float64.(nac_sf), Float64.(sim_v))
-        sim_c = Float64.(sim_v)
+        sim_c = ifelse.(isfinite.(sim_v), Float64.(sim_v), 0.0)
+        obs_c = ifelse.(valid, Float64.(nac_sf), sim_c)
         ssim_c = _Stats.mean(_ssim_map(obs_c, sim_c)[eroded])
     else
         ssim_b = NaN; ssim_c = NaN

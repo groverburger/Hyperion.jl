@@ -124,6 +124,9 @@ end
 # ─── 1m site DEM bit-exactness (skipped if site TIF not present) ──────────
 include("site_1m.jl")
 
+# ─── Terrain-stack site/farfield path ────────────────────────────────────
+include("terrain_stack.jl")
+
 # ─── Tier 0 correctness regression (default; skip via HYP_SKIP_CORRECTNESS=1)
 # Requires a GPU backend (Metal or CUDA) in the active environment;
 # CPU is far too slow (~85 min for 25 renders). When invoked via
