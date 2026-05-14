@@ -6,6 +6,48 @@ using KernelAbstractions: CPU
 @isdefined(TEST_BACKEND_NAME) || include("test_backend.jl")
 
 @testset "Terrain-stack farfield continuation" begin
+    @testset "handoff projects datum position, not elevated terrain" begin
+        site_for_handoff = Hyp.SiteDEM{Float32}(
+            zeros(Float32, 1, 1), 1, 1,
+            1023.5, 1023.5, 20.0,
+            -pi / 2, 0.0,
+            1.0f0)
+        far_data = zeros(Float32, 2048, 2048)
+        no_mips = ntuple(_ -> far_data, Hyp.N_MIPMAP_LEVELS)
+        far = Hyp.PolarStereoTerrain(far_data;
+            max_mipmaps = no_mips,
+            min_mipmaps = no_mips,
+            s0 = 1023.5f0,
+            l0 = 1023.5f0,
+            elev_scale_to_m = 1.0f0)
+
+        query_col = 1800.0f0
+        query_row = 1024.0f0
+        qx, qy, qz, M31, M32, M33, _, _, _ =
+            Hyp._query_setup_components(
+                query_col, query_row, 6000.0f0,
+                Float32(site_for_handoff.s0),
+                Float32(site_for_handoff.l0),
+                Float32(site_for_handoff.pixel_size_m / 1000.0))
+
+        datum_col, datum_row =
+            Hyp._stack_handoff_colrow(site_for_handoff, far, M31, M32, M33)
+        elevated_moon =
+            Hyp._local_to_moonme((qx, qy, qz),
+                                 site_for_handoff.lat0,
+                                 site_for_handoff.lon0)
+        elevated_col, elevated_row =
+            Hyp._moonme_to_ldem_pixel(elevated_moon, far.s0, far.l0,
+                                      far.pixel_size_km)
+
+        @test datum_col ≈ query_col atol=2.0f-3
+        @test datum_row ≈ query_row atol=2.0f-3
+        @test abs(elevated_col - query_col) > 1.0f0
+        @test abs(elevated_row - query_row) < 0.01f0
+        @test Hyp._stack_next_layer_start_d(300.0f0, 1.0f0, 20.0f0) == 15.0f0
+        @test Hyp._stack_next_layer_start_d(5.0f0, 1.0f0, 20.0f0) == 1.0f0
+    end
+
     H = 16
     site = Hyp.SiteDEM{Float32}(
         zeros(Float32, H, H), H, H,

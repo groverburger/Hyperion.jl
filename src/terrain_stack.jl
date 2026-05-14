@@ -246,6 +246,51 @@ end
     return col, row
 end
 
+@inline function _stack_datum_local_xyz(M31::Float32, M32::Float32, M33::Float32)
+    return (R_KM_F32 * M31, R_KM_F32 * M32, R_KM_F32 * M33)
+end
+
+function _stack_handoff_colrow(site::SiteDEM,
+                               farfield::PolarStereoTerrain,
+                               M31::Float32, M32::Float32, M33::Float32)
+    q_moon = _local_to_moonme(_stack_datum_local_xyz(M31, M32, M33),
+                              site.lat0, site.lon0)
+    return _moonme_to_ldem_pixel(q_moon, farfield.s0, farfield.l0,
+                                 farfield.pixel_size_km)
+end
+
+@inline function _stack_handoff_colrow(M31::Float32, M32::Float32, M33::Float32,
+                                       moonme_r11::Float32, moonme_r12::Float32,
+                                       moonme_r13::Float32,
+                                       moonme_r21::Float32, moonme_r22::Float32,
+                                       moonme_r23::Float32,
+                                       moonme_r31::Float32, moonme_r32::Float32,
+                                       moonme_r33::Float32,
+                                       ldem_s0::Float32, ldem_l0::Float32,
+                                       ldem_pixel_size_km::Float32)
+    qx0, qy0, qz0 = _stack_datum_local_xyz(M31, M32, M33)
+    qmx = fma(moonme_r13, qz0, fma(moonme_r12, qy0, moonme_r11 * qx0))
+    qmy = fma(moonme_r23, qz0, fma(moonme_r22, qy0, moonme_r21 * qx0))
+    qmz = fma(moonme_r33, qz0, fma(moonme_r32, qy0, moonme_r31 * qx0))
+    return _gpu_project_moonme_to_polar(qmx, qmy, qmz,
+                                        ldem_s0, ldem_l0,
+                                        ldem_pixel_size_km)
+end
+
+@inline function _stack_next_layer_start_d(exit_d::Float32,
+                                           from_pixel_size_m::Float32,
+                                           to_pixel_size_m::Float32)
+    return max(1.0f0, (exit_d * from_pixel_size_m) / to_pixel_size_m)
+end
+
+@inline function _stack_dynamic_max_pixels(threshold::Float32,
+                                           max_terrain_m::Float32,
+                                           pixel_size_m::Float32)
+    hard_cap = 15000.0f0
+    scaled = max_terrain_m * (Float32(1.5) / pixel_size_m)
+    return threshold > 0.005f0 ? min(hard_cap, scaled / threshold) : hard_cap
+end
+
 @inline function _query_setup_components(cx::Float32, cy::Float32,
                                          elev_m::Float32,
                                          s0::Float32, l0::Float32,
@@ -432,12 +477,8 @@ function _precompute_site_polar_stack(site_source::SiteTerrain,
                 _query_setup_components(Float32(sc), Float32(sr), q_elev_m,
                                         site_s0, site_l0, site_pix_km)
             qz_pos = _query_z_pos(rho2, q_elev_m)
-            q_moon = _local_to_moonme((R_KM_F32 * M31,
-                                       R_KM_F32 * M32,
-                                       R_KM_F32 * M33),
-                                      site.lat0, site.lon0)
-            ldem_col, ldem_row = _moonme_to_ldem_pixel(
-                q_moon, farfield.s0, farfield.l0, farfield.pixel_size_km)
+            ldem_col, ldem_row =
+                _stack_handoff_colrow(site, farfield, M31, M32, M33)
             lqx, lqy, lqz, lM31, lM32, lM33, lqn, lqe, lrho2 =
                 _query_setup_components(ldem_col, ldem_row, q_elev_m,
                                         farfield.s0, farfield.l0,
@@ -618,14 +659,12 @@ end
     qz = R_total_q * M33
     qz_pos = R_total_q * ((rho2_q * (Float32(2.0) * INV_4R_KM2_F32)) * inv_denom_q)
 
-    qx0 = R_KM_F32 * M31
-    qy0 = R_KM_F32 * M32
-    qz0 = R_KM_F32 * M33
-    qmx = fma(moonme_r13, qz0, fma(moonme_r12, qy0, moonme_r11 * qx0))
-    qmy = fma(moonme_r23, qz0, fma(moonme_r22, qy0, moonme_r21 * qx0))
-    qmz = fma(moonme_r33, qz0, fma(moonme_r32, qy0, moonme_r31 * qx0))
-    ldem_col, ldem_row = _gpu_project_moonme_to_polar(
-        qmx, qmy, qmz, ldem_s0, ldem_l0, ldem_pixel_size_km)
+    ldem_col, ldem_row =
+        _stack_handoff_colrow(M31, M32, M33,
+                              moonme_r11, moonme_r12, moonme_r13,
+                              moonme_r21, moonme_r22, moonme_r23,
+                              moonme_r31, moonme_r32, moonme_r33,
+                              ldem_s0, ldem_l0, ldem_pixel_size_km)
 
     lqe_km = (ldem_col - ldem_s0) * ldem_pixel_size_km
     lqn_km = (ldem_l0 - ldem_row) * ldem_pixel_size_km
@@ -659,13 +698,10 @@ end
 
     sun_below = (sun_el_deg + SUN_HALF_ANGLE_DEG) <= TWILIGHT_SKIP_DEG
     earth_below = earth_el_deg <= TWILIGHT_SKIP_DEG
-    HARD_CAP = 15000.0f0
-    site_max_scaled = max_terrain_m * (Float32(1.5) / site_pixel_size_m)
-    sun_max_site = sun_thresh > 0.005f0 ? min(HARD_CAP, site_max_scaled / sun_thresh) : HARD_CAP
-    dsn_max_site = dsn_thresh > 0.005f0 ? min(HARD_CAP, site_max_scaled / dsn_thresh) : HARD_CAP
-    ldem_max_scaled = max_terrain_m * (Float32(1.5) / ldem_pixel_size_m)
-    sun_max_ldem = sun_thresh > 0.005f0 ? min(HARD_CAP, ldem_max_scaled / sun_thresh) : HARD_CAP
-    dsn_max_ldem = dsn_thresh > 0.005f0 ? min(HARD_CAP, ldem_max_scaled / dsn_thresh) : HARD_CAP
+    sun_max_site = _stack_dynamic_max_pixels(sun_thresh, max_terrain_m, site_pixel_size_m)
+    dsn_max_site = _stack_dynamic_max_pixels(dsn_thresh, max_terrain_m, site_pixel_size_m)
+    sun_max_ldem = _stack_dynamic_max_pixels(sun_thresh, max_terrain_m, ldem_pixel_size_m)
+    dsn_max_ldem = _stack_dynamic_max_pixels(dsn_thresh, max_terrain_m, ldem_pixel_size_m)
 
     d_0 = Float32(-90.0); d_1 = Float32(-90.0)
     d_2 = Float32(-90.0); d_3 = Float32(-90.0)
@@ -703,7 +739,8 @@ end
                 site_s0, site_l0, site_pixel_size_km,
                 site_elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
             if !hit
-                start_ldem = max(1.0f0, (exit_d * site_pixel_size_m) / ldem_pixel_size_m)
+                start_ldem = _stack_next_layer_start_d(
+                    exit_d, site_pixel_size_m, ldem_pixel_size_m)
                 max_ldem = max(start_ldem, sun_max_ldem)
                 n, d2, _, _ = _gpu_cast_stack_segment_level0(
                     ldem0, ldem_H, ldem_W,
@@ -735,7 +772,8 @@ end
             site_s0, site_l0, site_pixel_size_km,
             site_elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
         if !hit
-            start_ldem = max(1.0f0, (exit_d * site_pixel_size_m) / ldem_pixel_size_m)
+            start_ldem = _stack_next_layer_start_d(
+                exit_d, site_pixel_size_m, ldem_pixel_size_m)
             max_ldem = max(start_ldem, dsn_max_ldem)
             n, d2, _, _ = _gpu_cast_stack_segment_level0(
                 ldem0, ldem_H, ldem_W,
@@ -906,12 +944,8 @@ function _generate_site_polar_stack_cpu(
             qx, qy, qz, M31, M32, M33, qn, qe, rho2 =
                 _query_setup_components(Float32(sc), Float32(sr), q_elev_m,
                                         site_s0, site_l0, site_pix_km)
-            q_moon = _local_to_moonme((R_KM_F32 * M31,
-                                       R_KM_F32 * M32,
-                                       R_KM_F32 * M33),
-                                      site.lat0, site.lon0)
-            ldem_col, ldem_row = _moonme_to_ldem_pixel(
-                q_moon, farfield.s0, farfield.l0, farfield.pixel_size_km)
+            ldem_col, ldem_row =
+                _stack_handoff_colrow(site, farfield, M31, M32, M33)
             lqx, lqy, lqz, lM31, lM32, lM33, lqn, lqe, lrho2 =
                 _query_setup_components(ldem_col, ldem_row, q_elev_m,
                                         farfield.s0, farfield.l0,
@@ -937,17 +971,14 @@ function _generate_site_polar_stack_cpu(
             cs_e, sn_e = cos_sin_lut(θe)
             dsn_thresh = sn_e / cs_e
 
-            max_terrain_pix_scale = Float32(1.5 / site.pixel_size_m)
-            max_terrain_scaled = MAX_TERRAIN_M_F32 * max_terrain_pix_scale
-            sun_max_site = sun_thresh > 0.005f0 ?
-                min(15000.0f0, max_terrain_scaled / sun_thresh) : 15000.0f0
-            dsn_max_site = dsn_thresh > 0.005f0 ?
-                min(15000.0f0, max_terrain_scaled / dsn_thresh) : 15000.0f0
-            max_terrain_ldem_scaled = MAX_TERRAIN_M_F32 * Float32(1.5 / farfield.pixel_size_m)
-            sun_max_ldem = sun_thresh > 0.005f0 ?
-                min(15000.0f0, max_terrain_ldem_scaled / sun_thresh) : 15000.0f0
-            dsn_max_ldem = dsn_thresh > 0.005f0 ?
-                min(15000.0f0, max_terrain_ldem_scaled / dsn_thresh) : 15000.0f0
+            sun_max_site = _stack_dynamic_max_pixels(
+                sun_thresh, MAX_TERRAIN_M_F32, site_pix_m)
+            dsn_max_site = _stack_dynamic_max_pixels(
+                dsn_thresh, MAX_TERRAIN_M_F32, site_pix_m)
+            sun_max_ldem = _stack_dynamic_max_pixels(
+                sun_thresh, MAX_TERRAIN_M_F32, farfield.pixel_size_m)
+            dsn_max_ldem = _stack_dynamic_max_pixels(
+                dsn_thresh, MAX_TERRAIN_M_F32, farfield.pixel_size_m)
 
             sun_below = (sun_el_deg + SUN_HALF_ANGLE_DEG) <= TWILIGHT_SKIP_DEG
             earth_below = earth_el_deg <= TWILIGHT_SKIP_DEG
@@ -969,7 +1000,8 @@ function _generate_site_polar_stack_cpu(
                         site_s0, site_l0, site_pix_km, site_pix_m,
                         site.elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
                     if !hit
-                        start_ldem = max(1.0f0, (exit_d * site_pix_m) / farfield.pixel_size_m)
+                        start_ldem = _stack_next_layer_start_d(
+                            exit_d, site_pix_m, farfield.pixel_size_m)
                         max_ldem = max(start_ldem, sun_max_ldem)
                         n, d2, _, _ = _cast_stack_segment(
                             farfield.data, ldem_col, ldem_row, q_elev_m,
@@ -993,7 +1025,8 @@ function _generate_site_polar_stack_cpu(
                     site_s0, site_l0, site_pix_km, site_pix_m,
                     site.elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
                 if !hit
-                    start_ldem = max(1.0f0, (exit_d * site_pix_m) / farfield.pixel_size_m)
+                    start_ldem = _stack_next_layer_start_d(
+                        exit_d, site_pix_m, farfield.pixel_size_m)
                     max_ldem = max(start_ldem, dsn_max_ldem)
                     n, d2, _, _ = _cast_stack_segment(
                         farfield.data, ldem_col, ldem_row, q_elev_m,
