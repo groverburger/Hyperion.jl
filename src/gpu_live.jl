@@ -135,6 +135,65 @@ end
     end
 end
 
+@inline function _gpu_accumulate_level0_sample_sq(
+        dem, row_i::Int32, col_i::Int32,
+        cx::Float32, cy::Float32,
+        q_elev_m::Float32,
+        qx::Float32, qy::Float32,
+        qz_pos::Float32,
+        M31::Float32, M32::Float32, M33::Float32,
+        observer_km::Float32,
+        threshold::Float32, threshold_sq::Float32,
+        s0::Float32, l0::Float32,
+        pixel_size_km::Float32,
+        elev_scale_to_m::Float32,
+        R_km::Float32,
+        max_num::Float32, max_den_sq::Float32)
+    @inbounds e11 = Float32(dem[row_i + Int32(1), col_i + Int32(1)])
+    @inbounds e21 = Float32(dem[row_i + Int32(1), col_i + Int32(2)])
+    @inbounds e12 = Float32(dem[row_i + Int32(2), col_i + Int32(1)])
+    @inbounds e22 = Float32(dem[row_i + Int32(2), col_i + Int32(2)])
+    fx = cx - Float32(col_i)
+    fy = cy - Float32(row_i)
+    # Bilinear with explicit fma chain for vendor-independent
+    # single-rounding semantics.
+    w11 = (1.0f0 - fx) * (1.0f0 - fy)
+    w21 =       fx   * (1.0f0 - fy)
+    w12 = (1.0f0 - fx) *       fy
+    w22 =       fx   *       fy
+    elev_raw = fma(w22, e22,
+                 fma(w12, e12,
+                   fma(w21, e21, w11 * e11)))
+    elev_m = elev_raw * elev_scale_to_m
+
+    # Stereographic projection — zero sqrt, one division per step.
+    e_km = (cx - s0) * pixel_size_km
+    n_km = (l0 - cy) * pixel_size_km
+    rho2 = fma(n_km, n_km, e_km * e_km)
+    R_total = fma(elev_m, 0.001f0, R_km)
+    dn = fma(rho2, INV_4R_KM2_F32, 1.0f0)
+    two_u2 = rho2 * (Float32(2.0) * INV_4R_KM2_F32)
+    inv_dn = 1.0f0 / dn
+    scale = R_total * inv_dn
+    common = scale * INV_R_KM_F32
+    dx = fma(common, n_km, -qx)
+    dy = fma(common, e_km, -qy)
+    sample_minus_qz = fma(scale, two_u2, -qz_pos)
+    dz = fma(q_elev_m - elev_m, 0.001f0, sample_minus_qz)
+    lz_geom = fma(M33, dz, fma(M32, dy, M31 * dx))
+    lz = lz_geom - observer_km
+
+    d_sq = fma(dz, dz, fma(dy, dy, dx * dx))
+    alen_sq = fma(-lz_geom, lz_geom, d_sq)
+    hit = false
+    if alen_sq > 0.0f0 && _gpu_gt_slope_sq(lz, alen_sq, max_num, max_den_sq)
+        max_num = lz
+        max_den_sq = alen_sq
+        hit = _gpu_ge_threshold_sq(lz, alen_sq, threshold, threshold_sq)
+    end
+    return max_num, max_den_sq, hit
+end
+
 @inline function _gpu_cast_ray(
         max0, max1, max2, max3, max4,
         min1, min2, min3, min4,
@@ -263,79 +322,14 @@ end
             if col_i + Int32(1) >= ldem_W || row_i + Int32(1) >= ldem_H
                 d += base_step
             else
-                @inbounds e11 = Float32(max0[row_i + Int32(1), col_i + Int32(1)])
-                @inbounds e21 = Float32(max0[row_i + Int32(1), col_i + Int32(2)])
-                @inbounds e12 = Float32(max0[row_i + Int32(2), col_i + Int32(1)])
-                @inbounds e22 = Float32(max0[row_i + Int32(2), col_i + Int32(2)])
-                fx = cx - Float32(col_i)
-                fy = cy - Float32(row_i)
-                # Bilinear with explicit fma chain for vendor-independent
-                # single-rounding semantics.
-                w11 = (1.0f0 - fx) * (1.0f0 - fy)
-                w21 =       fx   * (1.0f0 - fy)
-                w12 = (1.0f0 - fx) *       fy
-                w22 =       fx   *       fy
-                telev_raw = fma(w22, e22,
-                              fma(w12, e12,
-                                fma(w21, e21, w11 * e11)))
-                telev_m = telev_raw * elev_scale_to_m
-
-                # Stereographic projection — zero sqrt, one division per step.
-                # Both `dn = 1 + u²` and `u² - 1` are written as explicit fmas
-                # so neither Metal nor CUDA can decide independently whether to
-                # contract `mul + add` patterns into fma (that contraction is
-                # per-platform and was the dominant drift source after we
-                # cleared the inner-loop sqrt/div).
-                e_km = (cx - ldem_s0) * pixel_size_km
-                n_km = (ldem_l0 - cy) * pixel_size_km
-                rho2 = fma(n_km, n_km, e_km * e_km)
-                R_total = fma(telev_m, 0.001f0, R_km)
-                dn = fma(rho2, INV_4R_KM2_F32, 1.0f0)
-                two_u2 = rho2 * (Float32(2.0) * INV_4R_KM2_F32)
-                inv_dn = 1.0f0 / dn
-                scale = R_total * inv_dn
-                common = scale * INV_R_KM_F32
-                # dx, dy: explicit fma so neither Metal nor CUDA can pick
-                # `(a*b) − c` fusion independently (the dominant prior drift
-                # source after we cleared sqrt/div from the loop).
-                dx = fma(common, n_km, -qx)
-                dy = fma(common, e_km, -qy)
-                # dz: well-conditioned form. The naive `scale*u2_m1 − qz`
-                # was a ~−R − (−R) cancellation. The first replacement
-                #   (qR_total − R_total) + (scale·2u² − qz_pos)
-                # was *also* broken — `qR_total` and `R_total` are both
-                # ~R in magnitude, so subtracting them in Float32 has
-                # ~0.2 m ULP at lunar radius, swamping the millimeter-
-                # scale signal we need. Compute the elevation-difference
-                # term directly from `q_elev_m − telev_m` (which lives in
-                # metres, not at lunar radius), so Float32 precision is
-                # in metres rather than at lunar radius:
-                #   (qR_total − R_total) = (qelev − telev) · 0.001
-                # Both `(a*b) ± c` patterns are wrapped in explicit `fma`
-                # (rules 5/8/14) so neither Metal nor CUDA can fuse one
-                # but not the other.
-                sample_minus_qz = fma(scale, two_u2, -qz_pos)
-                dz = fma(q_elev_m - telev_m, 0.001f0, sample_minus_qz)
-                # Only compute the radial ENU component (lz). Horizontal
-                # distance² follows from orthonormality of the ENU frame:
-                # |d|² = lx² + ly² + lz², so alen_sq = |d|² − lz². This skips
-                # M11..M23 entirely and halves the M-matrix fma work.
-                lz_geom = fma(M33, dz, fma(M32, dy, M31*dx))
-                lz = lz_geom - observer_km
-
-                d_sq = fma(dz, dz, fma(dy, dy, dx * dx))
-                # Explicit fma form of `d_sq - lz_geom²`: single-rounded, so
-                # both vendors compute the same bit pattern.
-                alen_sq = fma(-lz_geom, lz_geom, d_sq)
-                if alen_sq > 0.0f0
-                    if _gpu_gt_slope_sq(lz, alen_sq, max_num, max_den_sq)
-                        max_num = lz
-                        max_den_sq = alen_sq
-                        if _gpu_ge_threshold_sq(lz, alen_sq, threshold, threshold_sq)
-                            terminated = true
-                        end
-                    end
-                end
+                max_num, max_den_sq, terminated =
+                    _gpu_accumulate_level0_sample_sq(
+                        max0, row_i, col_i, cx, cy,
+                        q_elev_m, qx, qy, qz_pos, M31, M32, M33,
+                        observer_km, threshold, threshold_sq,
+                        ldem_s0, ldem_l0, pixel_size_km,
+                        elev_scale_to_m, R_km,
+                        max_num, max_den_sq)
                 d += base_step
             end
         end

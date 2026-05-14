@@ -567,41 +567,14 @@ end
             break
         end
 
-        e11 = Float32(dem[row_i + Int32(1), col_i + Int32(1)])
-        e21 = Float32(dem[row_i + Int32(1), col_i + Int32(2)])
-        e12 = Float32(dem[row_i + Int32(2), col_i + Int32(1)])
-        e22 = Float32(dem[row_i + Int32(2), col_i + Int32(2)])
-        fx = cx - Float32(col_i)
-        fy = cy - Float32(row_i)
-        w11 = (1.0f0 - fx) * (1.0f0 - fy)
-        w21 = fx * (1.0f0 - fy)
-        w12 = (1.0f0 - fx) * fy
-        w22 = fx * fy
-        elev_raw = fma(w22, e22, fma(w12, e12, fma(w21, e21, w11 * e11)))
-        elev_m = elev_raw * elev_scale_to_m
-
-        e_km = (cx - s0) * pixel_size_km
-        n_km = (l0 - cy) * pixel_size_km
-        rho2 = fma(n_km, n_km, e_km * e_km)
-        R_total = fma(elev_m, 0.001f0, R_KM_F32)
-        dn = fma(rho2, INV_4R_KM2_F32, 1.0f0)
-        inv_dn = 1.0f0 / dn
-        two_u2 = rho2 * (Float32(2.0) * INV_4R_KM2_F32)
-        scale = R_total * inv_dn
-        common = scale * INV_R_KM_F32
-        dx = fma(common, n_km, -qx)
-        dy = fma(common, e_km, -qy)
-        sample_minus_qz = fma(scale, two_u2, -qz_pos)
-        dz = fma(q_elev_m - elev_m, 0.001f0, sample_minus_qz)
-        lz_geom = fma(M33, dz, fma(M32, dy, M31 * dx))
-        lz = lz_geom - observer_km
-        d_sq = fma(dz, dz, fma(dy, dy, dx * dx))
-        alen_sq = fma(-lz_geom, lz_geom, d_sq)
-        if alen_sq > 0.0f0 && _gpu_gt_slope_sq(lz, alen_sq, max_num, max_den_sq)
-            max_num = lz
-            max_den_sq = alen_sq
-            hit = _gpu_ge_threshold_sq(lz, alen_sq, threshold, threshold_sq)
-        end
+        max_num, max_den_sq, hit =
+            _gpu_accumulate_level0_sample_sq(
+                dem, row_i, col_i, cx, cy,
+                q_elev_m, qx, qy, qz_pos, M31, M32, M33,
+                observer_km, threshold, threshold_sq,
+                s0, l0, pixel_size_km,
+                elev_scale_to_m, R_KM_F32,
+                max_num, max_den_sq)
         d += base_step
         exit_d = d
     end
