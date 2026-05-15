@@ -94,8 +94,9 @@ The implementation should grow in small, pinned steps:
    same LDEM is used as farfield.
 4. Introduce a fixed layout for layer metadata and projection kind. The
    current two-layer stack already passes dimensions, projection kind,
-   pixel size, elevation scale, and mipmap base through layer metadata.
+   pixel size, elevation scale, and mipmap base through fixed-capacity
+   layer metadata buffers sized for three layers.
 5. Move handoff transforms into edge metadata. The current site -> polar
    handoff already passes the 3x3 source-local-to-MOON_ME datum transform
-   through edge metadata.
+   through fixed-capacity edge metadata buffers sized for two handoff edges.
 6. Add geometry-grid inner layers only after the stereographic stack is stable.
