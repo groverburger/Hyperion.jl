@@ -370,7 +370,11 @@ outputs. The first multi-source implementation establishes the
 site-to-20 m-LDEM continuation in the same stack model. Future work can
 extend that same public model to more than two terrain sources and to
 site loaders that preserve arbitrary source projections without changing
-the existing bit-exact APIs.
+the existing bit-exact APIs. See
+[`docs/terrain-stack-kernel.md`](docs/terrain-stack-kernel.md) for the
+handoff rules, current shared-kernel status, and why arbitrary inner DEM
+projections require precomputed geometry buffers rather than GPU-side
+GDAL/PROJ calls.
 
 ## Scripts
 
