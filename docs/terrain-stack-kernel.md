@@ -81,8 +81,8 @@ model:
 
 - `20 m polar` only,
 - `1 m local stereographic -> 20 m polar`,
-- `1 m custom geometry grid -> 20 m polar`,
 - `1 m local/custom -> 5 m polar -> 20 m polar`,
+- `1 m custom geometry grid -> 20 m polar`,
 - more polar farfield layers, as long as the kernel launch specializes on
   the layer count and concrete buffer layout.
 
@@ -99,4 +99,8 @@ The implementation should grow in small, pinned steps:
 5. Move handoff transforms into edge metadata. The current site -> polar
    handoff already passes the 3x3 source-local-to-MOON_ME datum transform
    through fixed-capacity edge metadata buffers sized for two handoff edges.
-6. Add geometry-grid inner layers only after the stereographic stack is stable.
+6. Support three-layer local-stereo -> polar -> polar stacks. The current
+   GPU stack path supports a high-resolution local stereographic source
+   followed by two polar-stereographic farfield sources, including differing
+   pixel sizes such as `1 m -> 5 m -> 20 m`.
+7. Add geometry-grid inner layers only after the stereographic stack is stable.
