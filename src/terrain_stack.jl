@@ -10,6 +10,10 @@ from highest-resolution nearfield to lower-resolution farfield.
 """
 abstract type AbstractTerrainSource end
 
+const STACK_PROJ_LOCAL_STEREO = Int32(1)
+const STACK_PROJ_POLAR_STEREO = Int32(2)
+const STACK_PROJ_GEOMETRY_GRID = Int32(3)
+
 """
     PolarStereoTerrain(dem; window, max_mipmaps, min_mipmaps, ...)
 
@@ -588,8 +592,13 @@ end
 
     site_H_total = layer_iparams[Int32(1), Int32(1)]
     site_W_total = layer_iparams[Int32(2), Int32(1)]
+    site_projection_kind = layer_iparams[Int32(3), Int32(1)]
     ldem_H = layer_iparams[Int32(1), Int32(2)]
     ldem_W = layer_iparams[Int32(2), Int32(2)]
+    ldem_projection_kind = layer_iparams[Int32(3), Int32(2)]
+    supported_projection_stack =
+        site_projection_kind == STACK_PROJ_LOCAL_STEREO &&
+        ldem_projection_kind == STACK_PROJ_POLAR_STEREO
 
     site_s0 = layer_fparams[Int32(1), Int32(1)]
     site_l0 = layer_fparams[Int32(2), Int32(1)]
@@ -620,7 +629,7 @@ end
     idx = @index(Global)
     local_row = (idx - Int32(1)) ÷ W
     local_col = (idx - Int32(1)) % W
-    if local_row < H
+    if local_row < H && supported_projection_stack
     site_col = site_origin_col + local_col
     site_row = site_origin_row + local_row
     q_elev_m = Float32(site0[site_row + Int32(1), site_col + Int32(1)]) *
@@ -858,8 +867,9 @@ function _generate_site_polar_stack_gpu(
         origin_r, origin_c,
     ])
     d_layer_iparams = DeviceArray(Int32[
-        site_H_total ldem_H;
-        site_W_total ldem_W;
+        site_H_total            ldem_H;
+        site_W_total            ldem_W;
+        STACK_PROJ_LOCAL_STEREO STACK_PROJ_POLAR_STEREO;
     ])
     d_layer_fparams = DeviceArray(Float32[
         Float32(site.s0)                  farfield.s0;
