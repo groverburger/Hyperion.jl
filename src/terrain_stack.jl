@@ -577,40 +577,45 @@ end
     @Const(ldem0), @Const(ldem1), @Const(ldem2), @Const(ldem3), @Const(ldem4),
     @Const(ldem_min1), @Const(ldem_min2), @Const(ldem_min3), @Const(ldem_min4),
     @Const(stack_packed),
-    @Const(atan_lut), @Const(iparams), @Const(fparams))
+    @Const(atan_lut), @Const(iparams),
+    @Const(layer_iparams), @Const(layer_fparams),
+    @Const(fparams))
 
-    site_H_total = iparams[Int32(1)]
-    site_W_total = iparams[Int32(2)]
-    ldem_H = iparams[Int32(3)]
-    ldem_W = iparams[Int32(4)]
-    H = iparams[Int32(5)]
-    W = iparams[Int32(6)]
-    site_origin_row = iparams[Int32(7)]
-    site_origin_col = iparams[Int32(8)]
+    H = iparams[Int32(1)]
+    W = iparams[Int32(2)]
+    site_origin_row = iparams[Int32(3)]
+    site_origin_col = iparams[Int32(4)]
+
+    site_H_total = layer_iparams[Int32(1), Int32(1)]
+    site_W_total = layer_iparams[Int32(2), Int32(1)]
+    ldem_H = layer_iparams[Int32(1), Int32(2)]
+    ldem_W = layer_iparams[Int32(2), Int32(2)]
+
+    site_s0 = layer_fparams[Int32(1), Int32(1)]
+    site_l0 = layer_fparams[Int32(2), Int32(1)]
+    site_pixel_size_km = layer_fparams[Int32(3), Int32(1)]
+    site_pixel_size_m = layer_fparams[Int32(4), Int32(1)]
+    site_elev_scale_to_m = layer_fparams[Int32(5), Int32(1)]
+
+    ldem_s0 = layer_fparams[Int32(1), Int32(2)]
+    ldem_l0 = layer_fparams[Int32(2), Int32(2)]
+    ldem_pixel_size_km = layer_fparams[Int32(3), Int32(2)]
+    ldem_pixel_size_m = layer_fparams[Int32(4), Int32(2)]
+    ldem_elev_scale_to_m = layer_fparams[Int32(5), Int32(2)]
+    ldem_mipmap_base = layer_fparams[Int32(6), Int32(2)]
 
     atan_scale = fparams[Int32(1)]
     observer_km = fparams[Int32(2)]
-    site_s0 = fparams[Int32(3)]
-    site_l0 = fparams[Int32(4)]
-    site_pixel_size_km = fparams[Int32(5)]
-    site_pixel_size_m = fparams[Int32(6)]
-    site_elev_scale_to_m = fparams[Int32(7)]
-    ldem_s0 = fparams[Int32(8)]
-    ldem_l0 = fparams[Int32(9)]
-    ldem_pixel_size_km = fparams[Int32(10)]
-    ldem_pixel_size_m = fparams[Int32(11)]
-    ldem_elev_scale_to_m = fparams[Int32(12)]
-    moonme_r11 = fparams[Int32(13)]
-    moonme_r12 = fparams[Int32(14)]
-    moonme_r13 = fparams[Int32(15)]
-    moonme_r21 = fparams[Int32(16)]
-    moonme_r22 = fparams[Int32(17)]
-    moonme_r23 = fparams[Int32(18)]
-    moonme_r31 = fparams[Int32(19)]
-    moonme_r32 = fparams[Int32(20)]
-    moonme_r33 = fparams[Int32(21)]
-    max_terrain_m = fparams[Int32(22)]
-    ldem_mipmap_base = fparams[Int32(23)]
+    moonme_r11 = fparams[Int32(3)]
+    moonme_r12 = fparams[Int32(4)]
+    moonme_r13 = fparams[Int32(5)]
+    moonme_r21 = fparams[Int32(6)]
+    moonme_r22 = fparams[Int32(7)]
+    moonme_r23 = fparams[Int32(8)]
+    moonme_r31 = fparams[Int32(9)]
+    moonme_r32 = fparams[Int32(10)]
+    moonme_r33 = fparams[Int32(11)]
+    max_terrain_m = fparams[Int32(12)]
 
     idx = @index(Global)
     local_row = (idx - Int32(1)) ÷ W
@@ -849,25 +854,28 @@ function _generate_site_polar_stack_gpu(
     d_packed = DeviceArray(packed)
     d_atan = DeviceArray(ATAN_LUT)
     d_iparams = DeviceArray(Int32[
-        site_H_total, site_W_total,
-        ldem_H, ldem_W,
         H, W,
         origin_r, origin_c,
+    ])
+    d_layer_iparams = DeviceArray(Int32[
+        site_H_total ldem_H;
+        site_W_total ldem_W;
+    ])
+    d_layer_fparams = DeviceArray(Float32[
+        Float32(site.s0)                  farfield.s0;
+        Float32(site.l0)                  farfield.l0;
+        Float32(site.pixel_size_m / 1000.0) farfield.pixel_size_km;
+        Float32(site.pixel_size_m)        farfield.pixel_size_m;
+        site.elev_scale_to_m              farfield.elev_scale_to_m;
+        1.0f9                             farfield.mipmap_base;
     ])
     d_fparams = DeviceArray(Float32[
         ATAN_LUT_SCALE,
         observer_km,
-        Float32(site.s0), Float32(site.l0),
-        Float32(site.pixel_size_m / 1000.0), Float32(site.pixel_size_m),
-        site.elev_scale_to_m,
-        farfield.s0, farfield.l0,
-        farfield.pixel_size_km, farfield.pixel_size_m,
-        farfield.elev_scale_to_m,
         r11, r12, r13,
         r21, r22, r23,
         r31, r32, r33,
         MAX_TERRAIN_M_F32,
-        farfield.mipmap_base,
     ])
     d_sun_out = DeviceArray(zeros(UInt8, H, W))
     d_dsn_out = DeviceArray(zeros(UInt8, H, W))
@@ -880,7 +888,8 @@ function _generate_site_polar_stack_gpu(
            d_ldem_max[1], d_ldem_max[2], d_ldem_max[3],
            d_ldem_max[4], d_ldem_max[5],
            d_ldem_min[2], d_ldem_min[3], d_ldem_min[4], d_ldem_min[5],
-           d_packed, d_atan, d_iparams, d_fparams;
+           d_packed, d_atan, d_iparams,
+           d_layer_iparams, d_layer_fparams, d_fparams;
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 
