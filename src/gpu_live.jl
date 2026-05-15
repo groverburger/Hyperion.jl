@@ -430,6 +430,29 @@ end
                        Int32(0), Int32(250)))
 end
 
+@inline function _gpu_stereo_query_setup(
+        col::Float32, row::Float32, elev_m::Float32,
+        s0::Float32, l0::Float32,
+        pixel_size_km::Float32, R_km::Float32)
+    qe_km = (col - s0) * pixel_size_km
+    qn_km = (l0 - row) * pixel_size_km
+    rho2_q = fma(qn_km, qn_km, qe_km * qe_km)
+    R_total_q = fma(elev_m, 0.001f0, R_km)
+    denom_q = fma(rho2_q, INV_4R_KM2_F32, 1.0f0)
+    inv_denom_q = 1.0f0 / denom_q
+    u2_q_m1 = fma(rho2_q, INV_4R_KM2_F32, -1.0f0)
+    factor_M = INV_R_KM_F32 * inv_denom_q
+    M31 = qn_km * factor_M
+    M32 = qe_km * factor_M
+    M33 = u2_q_m1 * inv_denom_q
+    qx = R_total_q * M31
+    qy = R_total_q * M32
+    qz = R_total_q * M33
+    qz_pos = R_total_q * ((rho2_q * (Float32(2.0) * INV_4R_KM2_F32)) *
+                           inv_denom_q)
+    return qx, qy, qz, qz_pos, M31, M32, M33, rho2_q
+end
+
 # ─── Main kernel: one work item per pixel ────────────────────────────────
 
 @kernel function _gpu_live_pixel_kernel!(
@@ -465,32 +488,10 @@ end
     # the source of truth for `_precompute_azel` and tests.
     qelev_raw = Float32(max0[ldem_row + Int32(1), ldem_col + Int32(1)])
     qelev_m = qelev_raw * elev_scale_to_m
-    qe_km = (Float32(ldem_col) - ldem_s0) * pixel_size_km
-    qn_km = (ldem_l0 - Float32(ldem_row)) * pixel_size_km
-    rho2_q = fma(qn_km, qn_km, qe_km * qe_km)
-    R_total_q = fma(qelev_m, 0.001f0, R_km)
-    denom_q = fma(rho2_q, INV_4R_KM2_F32, 1.0f0)
-    u2_q_m1 = fma(rho2_q, INV_4R_KM2_F32, -1.0f0)
-    inv_denom_q = 1.0f0 / denom_q
-
-    # Simplified via qclat*qclon = qn/(R·denom), qclat*qslon = qe/(R·denom),
-    # qslat = (u²−1)/denom. All without rho_q or qclon/qslon.
-    factor_M = INV_R_KM_F32 * inv_denom_q
-    M31 = qn_km * factor_M
-    M32 = qe_km * factor_M
-    M33 = u2_q_m1 * inv_denom_q
-
-    qx = R_total_q * M31
-    qy = R_total_q * M32
-    qz = R_total_q * M33
-
-    # Precompute the well-conditioned reference for `dz` in the ray cast.
-    # `qz_pos = 2·R_total_q·u²_q/dn_q = R_total_q·(M_33 + 1)`. The naive
-    # `qz_pos = qz + R_total_q` is a catastrophic cancellation (both ≈ R
-    # in magnitude). Build it directly from `rho²_q · (2·INV_4R)` =
-    # `2·u²_q`, which lives in O(rho²/R²) — sub-ULP-of-R precision.
-    two_u2_q = rho2_q * (Float32(2.0) * INV_4R_KM2_F32)
-    qz_pos   = R_total_q * (two_u2_q * inv_denom_q)
+    qx, qy, qz, qz_pos, M31, M32, M33, rho2_q =
+        _gpu_stereo_query_setup(Float32(ldem_col), Float32(ldem_row),
+                                qelev_m, ldem_s0, ldem_l0,
+                                pixel_size_km, R_km)
 
     # `slope_safety` bounds the approximation error in `_gpu_approx_slope_sq`
     # vs the full level-0 stereographic projection. The missing term in

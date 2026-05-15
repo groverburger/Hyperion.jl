@@ -635,21 +635,10 @@ end
     q_elev_m = Float32(site0[site_row + Int32(1), site_col + Int32(1)]) *
                site_elev_scale_to_m
 
-    qe_km = (Float32(site_col) - site_s0) * site_pixel_size_km
-    qn_km = (site_l0 - Float32(site_row)) * site_pixel_size_km
-    rho2_q = fma(qn_km, qn_km, qe_km * qe_km)
-    R_total_q = fma(q_elev_m, 0.001f0, R_KM_F32)
-    denom_q = fma(rho2_q, INV_4R_KM2_F32, 1.0f0)
-    inv_denom_q = 1.0f0 / denom_q
-    u2_q_m1 = fma(rho2_q, INV_4R_KM2_F32, -1.0f0)
-    factor_M = INV_R_KM_F32 * inv_denom_q
-    M31 = qn_km * factor_M
-    M32 = qe_km * factor_M
-    M33 = u2_q_m1 * inv_denom_q
-    qx = R_total_q * M31
-    qy = R_total_q * M32
-    qz = R_total_q * M33
-    qz_pos = R_total_q * ((rho2_q * (Float32(2.0) * INV_4R_KM2_F32)) * inv_denom_q)
+    qx, qy, qz, qz_pos, M31, M32, M33, _ =
+        _gpu_stereo_query_setup(Float32(site_col), Float32(site_row),
+                                q_elev_m, site_s0, site_l0,
+                                site_pixel_size_km, R_KM_F32)
 
     ldem_col, ldem_row =
         _stack_handoff_colrow(M31, M32, M33,
@@ -658,22 +647,10 @@ end
                               moonme_r31, moonme_r32, moonme_r33,
                               ldem_s0, ldem_l0, ldem_pixel_size_km)
 
-    lqe_km = (ldem_col - ldem_s0) * ldem_pixel_size_km
-    lqn_km = (ldem_l0 - ldem_row) * ldem_pixel_size_km
-    lrho2_q = fma(lqn_km, lqn_km, lqe_km * lqe_km)
-    ldenom_q = fma(lrho2_q, INV_4R_KM2_F32, 1.0f0)
-    linv_denom_q = 1.0f0 / ldenom_q
-    lu2_q_m1 = fma(lrho2_q, INV_4R_KM2_F32, -1.0f0)
-    lfactor_M = INV_R_KM_F32 * linv_denom_q
-    lM31 = lqn_km * lfactor_M
-    lM32 = lqe_km * lfactor_M
-    lM33 = lu2_q_m1 * linv_denom_q
-    lR_total_q = fma(q_elev_m, 0.001f0, R_KM_F32)
-    lqx = lR_total_q * lM31
-    lqy = lR_total_q * lM32
-    lqz = lR_total_q * lM33
-    lqz_pos = lR_total_q * ((lrho2_q * (Float32(2.0) * INV_4R_KM2_F32)) *
-                             linv_denom_q)
+    lqx, lqy, lqz, lqz_pos, lM31, lM32, lM33, lrho2_q =
+        _gpu_stereo_query_setup(ldem_col, ldem_row, q_elev_m,
+                                ldem_s0, ldem_l0, ldem_pixel_size_km,
+                                R_KM_F32)
     lqrho_km = sqrt(lrho2_q)
     l_slope_safety = fma(lqrho_km, INV_R_KM_F32, Float32(0.01))
 
