@@ -13,6 +13,8 @@ abstract type AbstractTerrainSource end
 const STACK_PROJ_LOCAL_STEREO = Int32(1)
 const STACK_PROJ_POLAR_STEREO = Int32(2)
 const STACK_PROJ_GEOMETRY_GRID = Int32(3)
+const STACK_MAX_LAYERS = 3
+const STACK_MAX_EDGES = STACK_MAX_LAYERS - 1
 
 """
     PolarStereoTerrain(dem; window, max_mipmaps, min_mipmaps, ...)
@@ -589,6 +591,7 @@ end
     W = iparams[Int32(2)]
     site_origin_row = iparams[Int32(3)]
     site_origin_col = iparams[Int32(4)]
+    layer_count = iparams[Int32(5)]
 
     site_H_total = layer_iparams[Int32(1), Int32(1)]
     site_W_total = layer_iparams[Int32(2), Int32(1)]
@@ -597,6 +600,7 @@ end
     ldem_W = layer_iparams[Int32(2), Int32(2)]
     ldem_projection_kind = layer_iparams[Int32(3), Int32(2)]
     supported_projection_stack =
+        layer_count == Int32(2) &&
         site_projection_kind == STACK_PROJ_LOCAL_STEREO &&
         ldem_projection_kind == STACK_PROJ_POLAR_STEREO
 
@@ -843,21 +847,38 @@ function _generate_site_polar_stack_gpu(
     d_iparams = DeviceArray(Int32[
         H, W,
         origin_r, origin_c,
+        2,
     ])
-    d_layer_iparams = DeviceArray(Int32[
-        site_H_total            ldem_H;
-        site_W_total            ldem_W;
-        STACK_PROJ_LOCAL_STEREO STACK_PROJ_POLAR_STEREO;
-    ])
-    d_layer_fparams = DeviceArray(Float32[
-        Float32(site.s0)                  farfield.s0;
-        Float32(site.l0)                  farfield.l0;
-        Float32(site.pixel_size_m / 1000.0) farfield.pixel_size_km;
-        Float32(site.pixel_size_m)        farfield.pixel_size_m;
-        site.elev_scale_to_m              farfield.elev_scale_to_m;
-        1.0f9                             farfield.mipmap_base;
-    ])
-    d_edge_fparams = DeviceArray(Float32[
+    layer_iparams = zeros(Int32, 3, STACK_MAX_LAYERS)
+    layer_iparams[:, 1] .= Int32[
+        site_H_total,
+        site_W_total,
+        STACK_PROJ_LOCAL_STEREO,
+    ]
+    layer_iparams[:, 2] .= Int32[
+        ldem_H,
+        ldem_W,
+        STACK_PROJ_POLAR_STEREO,
+    ]
+    layer_fparams = zeros(Float32, 6, STACK_MAX_LAYERS)
+    layer_fparams[:, 1] .= Float32[
+        Float32(site.s0),
+        Float32(site.l0),
+        Float32(site.pixel_size_m / 1000.0),
+        Float32(site.pixel_size_m),
+        site.elev_scale_to_m,
+        1.0f9,
+    ]
+    layer_fparams[:, 2] .= Float32[
+        farfield.s0,
+        farfield.l0,
+        farfield.pixel_size_km,
+        farfield.pixel_size_m,
+        farfield.elev_scale_to_m,
+        farfield.mipmap_base,
+    ]
+    edge_fparams = zeros(Float32, 9, STACK_MAX_EDGES)
+    edge_fparams[:, 1] .= Float32[
         r11;
         r12;
         r13;
@@ -867,7 +888,10 @@ function _generate_site_polar_stack_gpu(
         r31;
         r32;
         r33;
-    ])
+    ]
+    d_layer_iparams = DeviceArray(layer_iparams)
+    d_layer_fparams = DeviceArray(layer_fparams)
+    d_edge_fparams = DeviceArray(edge_fparams)
     d_fparams = DeviceArray(Float32[
         ATAN_LUT_SCALE,
         observer_km,
