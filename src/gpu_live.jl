@@ -194,7 +194,7 @@ end
     return max_num, max_den_sq, hit
 end
 
-@inline function _gpu_cast_ray(
+@inline function _gpu_cast_ray_state(
         max0, max1, max2, max3, max4,
         min1, min2, min3, min4,
         ldem_H::Int32, ldem_W::Int32,
@@ -211,16 +211,15 @@ end
         R_km::Float32,
         pixel_size_km::Float32, pixel_size_m::Float32,
         mipmap_base::Float32, elev_scale_to_m::Float32,
-        atan_lut, atan_scale::Float32)
+        max_num::Float32, max_den_sq::Float32,
+        start_d_pixels::Float32)
     # Track the running max slope in (num, den_sq) form so the hot path uses
-    # only *, +, fma, and <. The one sqrt+div (inside the atan LUT) happens
-    # once, after the loop — not once per ray step. Sentinel (-1, 0) encodes
-    # "-Inf slope" and is strictly less than any real (num, den_sq>0) pair.
-    max_num = -1.0f0
-    max_den_sq = 0.0f0
+    # only *, +, fma, and <. Sentinel (-1, 0) encodes "-Inf slope" and is
+    # strictly less than any real (num, den_sq>0) pair.
     threshold_sq = threshold * threshold
     base_step = Float32(0.70710698)
-    d = 1.0f0
+    d = max(start_d_pixels, 1.0f0)
+    exit_d = d
     terminated = false
     @inbounds while d <= max_d_pixels && !terminated
         # Direct compares — log2 differs across compilers (CPU vs Metal
@@ -241,6 +240,7 @@ end
         col_i = unsafe_trunc(Int32, cx)
         row_i = unsafe_trunc(Int32, cy)
         if col_i < Int32(0) || col_i >= ldem_W || row_i < Int32(0) || row_i >= ldem_H
+            exit_d = d
             break
         end
 
@@ -294,6 +294,7 @@ end
                     ri_chk = unsafe_trunc(Int32, cy_chk)
                     if ci_chk < Int32(0) || ci_chk >= ldem_W || ri_chk < Int32(0) || ri_chk >= ldem_H
                         exited_in_skip = true
+                        exit_d = d
                         break
                     end
                 end
@@ -321,6 +322,7 @@ end
         if !skip_to_next && !terminated
             if col_i + Int32(1) >= ldem_W || row_i + Int32(1) >= ldem_H
                 d += base_step
+                exit_d = d
             else
                 max_num, max_den_sq, terminated =
                     _gpu_accumulate_level0_sample_sq(
@@ -331,9 +333,43 @@ end
                         elev_scale_to_m, R_km,
                         max_num, max_den_sq)
                 d += base_step
+                exit_d = d
             end
         end
     end
+    return max_num, max_den_sq, exit_d, terminated
+end
+
+@inline function _gpu_cast_ray(
+        max0, max1, max2, max3, max4,
+        min1, min2, min3, min4,
+        ldem_H::Int32, ldem_W::Int32,
+        query_col::Float32, query_row::Float32,
+        q_elev_m::Float32,
+        qx::Float32, qy::Float32, qz::Float32,
+        qz_pos::Float32, slope_safety::Float32,
+        M31::Float32, M32::Float32, M33::Float32,
+        ray_cos::Float32, ray_sin::Float32,
+        observer_km::Float32,
+        threshold::Float32,
+        max_d_pixels::Float32,
+        ldem_s0::Float32, ldem_l0::Float32,
+        R_km::Float32,
+        pixel_size_km::Float32, pixel_size_m::Float32,
+        mipmap_base::Float32, elev_scale_to_m::Float32,
+        atan_lut, atan_scale::Float32)
+    max_num, max_den_sq, _, _ = _gpu_cast_ray_state(
+        max0, max1, max2, max3, max4,
+        min1, min2, min3, min4,
+        ldem_H, ldem_W,
+        query_col, query_row, q_elev_m,
+        qx, qy, qz, qz_pos, slope_safety,
+        M31, M32, M33, ray_cos, ray_sin,
+        observer_km, threshold, max_d_pixels,
+        ldem_s0, ldem_l0, R_km,
+        pixel_size_km, pixel_size_m,
+        mipmap_base, elev_scale_to_m,
+        -1.0f0, 0.0f0, 1.0f0)
     # One-shot conversion back to degrees — the only sqrt+div in this call.
     return _gpu_slope_to_deg_sq(max_num, max_den_sq, atan_lut, atan_scale)
 end
