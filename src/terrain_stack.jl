@@ -583,7 +583,7 @@ end
     @Const(stack_packed),
     @Const(atan_lut), @Const(iparams),
     @Const(layer_iparams), @Const(layer_fparams),
-    @Const(fparams))
+    @Const(edge_fparams), @Const(fparams))
 
     H = iparams[Int32(1)]
     W = iparams[Int32(2)]
@@ -615,16 +615,17 @@ end
 
     atan_scale = fparams[Int32(1)]
     observer_km = fparams[Int32(2)]
-    moonme_r11 = fparams[Int32(3)]
-    moonme_r12 = fparams[Int32(4)]
-    moonme_r13 = fparams[Int32(5)]
-    moonme_r21 = fparams[Int32(6)]
-    moonme_r22 = fparams[Int32(7)]
-    moonme_r23 = fparams[Int32(8)]
-    moonme_r31 = fparams[Int32(9)]
-    moonme_r32 = fparams[Int32(10)]
-    moonme_r33 = fparams[Int32(11)]
-    max_terrain_m = fparams[Int32(12)]
+    max_terrain_m = fparams[Int32(3)]
+
+    moonme_r11 = edge_fparams[Int32(1), Int32(1)]
+    moonme_r12 = edge_fparams[Int32(2), Int32(1)]
+    moonme_r13 = edge_fparams[Int32(3), Int32(1)]
+    moonme_r21 = edge_fparams[Int32(4), Int32(1)]
+    moonme_r22 = edge_fparams[Int32(5), Int32(1)]
+    moonme_r23 = edge_fparams[Int32(6), Int32(1)]
+    moonme_r31 = edge_fparams[Int32(7), Int32(1)]
+    moonme_r32 = edge_fparams[Int32(8), Int32(1)]
+    moonme_r33 = edge_fparams[Int32(9), Int32(1)]
 
     idx = @index(Global)
     local_row = (idx - Int32(1)) ÷ W
@@ -856,12 +857,20 @@ function _generate_site_polar_stack_gpu(
         site.elev_scale_to_m              farfield.elev_scale_to_m;
         1.0f9                             farfield.mipmap_base;
     ])
+    d_edge_fparams = DeviceArray(Float32[
+        r11;
+        r12;
+        r13;
+        r21;
+        r22;
+        r23;
+        r31;
+        r32;
+        r33;
+    ])
     d_fparams = DeviceArray(Float32[
         ATAN_LUT_SCALE,
         observer_km,
-        r11, r12, r13,
-        r21, r22, r23,
-        r31, r32, r33,
         MAX_TERRAIN_M_F32,
     ])
     d_sun_out = DeviceArray(zeros(UInt8, H, W))
@@ -876,7 +885,7 @@ function _generate_site_polar_stack_gpu(
            d_ldem_max[4], d_ldem_max[5],
            d_ldem_min[2], d_ldem_min[3], d_ldem_min[4], d_ldem_min[5],
            d_packed, d_atan, d_iparams,
-           d_layer_iparams, d_layer_fparams, d_fparams;
+           d_layer_iparams, d_layer_fparams, d_edge_fparams, d_fparams;
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 
