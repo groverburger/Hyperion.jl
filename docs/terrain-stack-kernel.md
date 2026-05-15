@@ -10,20 +10,24 @@ new hot-loop transcendental calls, and test coverage against the pinned
 
 ## Current State
 
-The one-source 20 m renderer and the 1 m site -> 20 m farfield renderer now
-share the hot ray-marching core:
+The one-source 20 m renderer, the site -> polar farfield renderer, and the
+geometry-grid -> polar farfield renderer now share the hot ray-marching core:
 
 - level-0 bilinear terrain sampling and slope accumulation,
 - hierarchical mipmap skipping for polar-stereographic farfield layers,
 - sun-disk integration,
 - UInt8 output encoding.
 
-The two cases still have different outer GPU kernels because their per-pixel
-setup differs:
+The one-source polar case still has a separate outer GPU kernel because its
+per-pixel setup starts and ends in one polar grid. The layered stack kernel
+handles the mixed inner/farfield cases:
 
 - a single polar-stereographic layer starts and ends in one grid;
 - a site layer starts in a local stereographic grid, exits that raster, then
-  hands the ray to a polar-stereographic farfield grid.
+  hands the ray to one or two polar-stereographic farfield grids;
+- a geometry-grid layer starts in caller-supplied local coordinates, exits
+  that raster, then hands the ray to one or two polar-stereographic farfield
+  grids.
 
 ## Handoff Rules
 
@@ -36,6 +40,11 @@ Layer handoff has two separate pieces of geometry:
   The datum point is the surface point at lunar radius along the query
   normal. Projecting the elevated terrain point caused multi-cell farfield
   offsets at Nobile elevations.
+- **Inner arbitrary grids use local ray coordinates.** The geometry-grid
+  path does not subtract two MOON_ME positions at lunar-radius magnitude in
+  the device hot loop. Each cell supplies small local datum coordinates for
+  slope tests and separate MOON_ME datum coordinates for handoff projection.
+  This preserves the same precision rule as the stereographic path.
 
 When a ray exits a layer, the next layer starts at the same physical
 distance along the ray:
@@ -50,29 +59,23 @@ stacked path.
 
 ## Projection Model
 
-The current implementation supports two device-side projection formulas:
+The current implementation supports three innermost/farfield forms:
 
 - **Local stereographic site grid.** Used by `SiteDEM`; this is a
   stereographic grid centered on `(lat0, lon0)` and represented in a local
   frame before entering the kernel.
+- **Geometry-grid inner layer.** Used by `GeometryGridTerrain`; the GPU
+  bilinear-samples precomputed local datum coordinates and up vectors instead
+  of evaluating a map projection. CPU precompute uses the supplied local
+  frame to compute Sun/DSN ray directions and uses separate MOON_ME datum
+  rasters to project the handoff point.
 - **South polar stereographic grid.** Used by global or cropped LDEM
   farfield layers.
 
-Supporting arbitrary innermost DEM projections without resampling requires a
-different representation. The GPU cannot call GDAL/PROJ. A non-stereographic
-inner layer needs precomputed, device-resident geometry rasters, for example:
-
-- datum MOON_ME position per grid cell, or enough values to reconstruct it;
-- local surface normal / ENU frame per grid cell, or enough values to
-  reconstruct it;
-- pixel-to-metre scale information for distance stepping;
-- elevation scale and min/max mipmaps for terrain bounds.
-
-The ray marcher can then bilinear-sample both elevation and geometry fields
-instead of assuming stereographic `s0/l0/pixel_size` math. That is the right
-path for arbitrary first-layer projections. Polar-stereographic outer layers
-can keep the current analytic formula because it is compact, deterministic,
-and already byte-pinned.
+The GPU cannot call GDAL/PROJ. Arbitrary innermost DEM projections are
+therefore represented by precomputed geometry rasters, not by device-side
+projection callbacks. Polar-stereographic outer layers keep the analytic
+formula because it is compact, deterministic, and already byte-pinned.
 
 ## Target Layer Combinations
 
@@ -83,6 +86,7 @@ model:
 - `1 m local stereographic -> 20 m polar`,
 - `1 m local/custom -> 5 m polar -> 20 m polar`,
 - `1 m custom geometry grid -> 20 m polar`,
+- `1 m custom geometry grid -> 5 m polar -> 20 m polar`,
 - more polar farfield layers, as long as the kernel launch specializes on
   the layer count and concrete buffer layout.
 
@@ -103,4 +107,7 @@ The implementation should grow in small, pinned steps:
    GPU stack path supports a high-resolution local stereographic source
    followed by two polar-stereographic farfield sources, including differing
    pixel sizes such as `1 m -> 5 m -> 20 m`.
-7. Add geometry-grid inner layers only after the stereographic stack is stable.
+7. Support geometry-grid inner layers. The current GPU stack path supports
+   geometry-grid -> polar and geometry-grid -> polar -> polar stacks. Tests
+   cover geometry-grid handoff, flat-field equivalence, farfield blocking,
+   and three-layer continuation.

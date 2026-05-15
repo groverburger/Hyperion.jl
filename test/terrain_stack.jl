@@ -119,6 +119,55 @@ using KernelAbstractions: CPU
     @test maximum(de_uniform) - minimum(de_uniform) < 5.0f-4
     @test maximum(rays_uniform) - minimum(rays_uniform) < 5.0f-4
 
+    @testset "geometry-grid inner layer records datum handoff geometry" begin
+        geom_site = Hyp.geometry_grid_from_site(site; window = (8, 8, 1, 1))
+        @test geom_site.window == (8, 8, 1, 1)
+        @test size(geom_site.datum_x) == size(site.data)
+        @test geom_site.pixel_size_m == 1.0f0
+        col, row = Hyp._gpu_project_moonme_to_polar(
+            geom_site.handoff_x[9, 9],
+            geom_site.handoff_y[9, 9],
+            geom_site.handoff_z[9, 9],
+            far.s0, far.l0, far.pixel_size_km)
+        _, _, _, M31, M32, M33, _, _, _ =
+            Hyp._query_setup_components(8.0f0, 8.0f0, 0.0f0,
+                Float32(site.s0), Float32(site.l0),
+                Float32(site.pixel_size_m / 1000.0))
+        datum_col, datum_row = Hyp._stack_handoff_colrow(site, far, M31, M32, M33)
+        @test col ≈ datum_col atol=2.0f-3
+        @test row ≈ datum_row atol=2.0f-3
+
+        geom_flat, geom_dsn, geom_de, geom_rays =
+            Hyp.render_terrain_stack_gpu(
+                Hyp.TerrainStack(geom_site, far), sun, sun, 0.0;
+                backend = backend,
+                DeviceArray = DeviceArray)
+        @test geom_flat[1, 1] == sun_flat[1, 1]
+        @test geom_dsn[1, 1] == 0x0a
+        @test abs(geom_de[1, 1] - de_flat[1, 1]) < 0.01f0
+        @test maximum(abs, geom_rays .- rays_flat) < 0.01f0
+
+        blocked_for_geom = copy(flat)
+        blocked_for_geom[32, 35] = 1000.0f0
+        blocked_geom_mips = Hyp.build_ldem_mipmaps_minmax(blocked_for_geom)
+        geom_blocked, _, geom_de_blocked, geom_rays_blocked =
+            Hyp.render_terrain_stack_gpu(
+                Hyp.TerrainStack(
+                    geom_site,
+                    Hyp.PolarStereoTerrain(blocked_for_geom;
+                        max_mipmaps = blocked_geom_mips[1],
+                        min_mipmaps = blocked_geom_mips[2],
+                        s0 = 31.5f0,
+                        l0 = 31.5f0,
+                        elev_scale_to_m = 1.0f0)),
+                sun, sun, 0.0;
+                backend = backend,
+                DeviceArray = DeviceArray)
+        @test geom_blocked[1, 1] == 0x00
+        @test geom_de_blocked[1, 1] > 70.0f0
+        @test minimum(geom_rays_blocked) > 70.0f0
+    end
+
     @testset "polar crop as inner layer matches direct polar render" begin
         origin_r = 24
         origin_c = 24
@@ -236,6 +285,10 @@ using KernelAbstractions: CPU
             Hyp.SiteTerrain(site; window = (8, 8, 1, 1)),
             mid,
             far3)
+        stack_geom_three = Hyp.TerrainStack(
+            Hyp.geometry_grid_from_site(site; window = (8, 8, 1, 1)),
+            mid,
+            far3)
         backend = TEST_BACKEND_NAME == "none" ? CPU() : TEST_BACKEND
         DeviceArray = TEST_BACKEND_NAME == "none" ? Array : TEST_DEVICE_ARRAY
         sun_mid, _, de_mid, rays_mid = Hyp.render_terrain_stack_gpu(
@@ -246,11 +299,19 @@ using KernelAbstractions: CPU
             stack_three, sun, sun, 0.0;
             backend = backend,
             DeviceArray = DeviceArray)
+        sun_geom_three, _, de_geom_three, rays_geom_three =
+            Hyp.render_terrain_stack_gpu(
+                stack_geom_three, sun, sun, 0.0;
+                backend = backend,
+                DeviceArray = DeviceArray)
 
         @test sun_mid[1, 1] == 0xff
         @test maximum(abs, rays_mid) < 1.0f-3
         @test sun_three[1, 1] == 0x00
         @test de_three[1, 1] > de_mid[1, 1] + 1.0f0
         @test maximum(rays_three) > 2.0f0
+        @test sun_geom_three[1, 1] == 0x00
+        @test de_geom_three[1, 1] > de_mid[1, 1] + 1.0f0
+        @test maximum(rays_geom_three) > 2.0f0
     end
 end
