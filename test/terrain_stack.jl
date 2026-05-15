@@ -119,6 +119,54 @@ using KernelAbstractions: CPU
     @test maximum(de_uniform) - minimum(de_uniform) < 5.0f-4
     @test maximum(rays_uniform) - minimum(rays_uniform) < 5.0f-4
 
+    @testset "polar crop as inner layer matches direct polar render" begin
+        origin_r = 24
+        origin_c = 24
+        Hc = 16
+        Wc = 16
+        same_dem = zeros(Float32, 64, 64)
+        same_dem[32, 45] = 1000.0f0
+        same_max, same_min = Hyp.build_ldem_mipmaps_minmax(same_dem)
+        far_same = Hyp.PolarStereoTerrain(same_dem;
+            max_mipmaps = same_max,
+            min_mipmaps = same_min,
+            s0 = 31.5f0,
+            l0 = 31.5f0,
+            elev_scale_to_m = 1.0f0)
+        direct = Hyp.TerrainStack(Hyp.PolarStereoTerrain(same_dem;
+            window = (origin_r, origin_c, Hc, Wc),
+            max_mipmaps = same_max,
+            min_mipmaps = same_min,
+            s0 = 31.5f0,
+            l0 = 31.5f0,
+            elev_scale_to_m = 1.0f0))
+        crop = same_dem[origin_r+1:origin_r+Hc, origin_c+1:origin_c+Wc]
+        crop_site = Hyp.SiteDEM{Float32}(
+            copy(crop), Hc, Wc,
+            Float64(31.5 - origin_c), Float64(31.5 - origin_r), 20.0,
+            -pi / 2, 0.0,
+            1.0f0)
+        layered = Hyp.TerrainStack(
+            Hyp.SiteTerrain(crop_site; window = (0, 0, Hc, Wc)),
+            far_same)
+
+        direct_sun, direct_dsn, direct_de, direct_rays =
+            Hyp.render_terrain_stack_gpu(
+                direct, sun, sun, 0.0;
+                backend = backend,
+                DeviceArray = DeviceArray)
+        stack_sun, stack_dsn, stack_de, stack_rays =
+            Hyp.render_terrain_stack_gpu(
+                layered, sun, sun, 0.0;
+                backend = backend,
+                DeviceArray = DeviceArray)
+
+        @test stack_sun == direct_sun
+        @test count(!=(0x00), stack_dsn .- direct_dsn) <= 1
+        @test maximum(abs, stack_de .- direct_de) < 0.005f0
+        @test maximum(abs, stack_rays .- direct_rays) < 0.005f0
+    end
+
     blocked = copy(flat)
     blocked[32, 35] = 1000.0f0
     sun_blocked, _, de_blocked, rays_blocked = render_with_farfield(blocked)
