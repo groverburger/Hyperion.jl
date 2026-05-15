@@ -796,53 +796,15 @@ end
 
     sun_frac = 0.0f0
     if !sun_below
-        frac = SUN_TICK_FRAC_INITIAL
-        pos = Int32(0)
-        left_el = d_0
-        right_el = d_1
-        bucket_delta = right_el - left_el
-        px = 0.0f0
-        @inbounds for i in Int32(1):Int32(16)
-            sc = i == Int32(1)  ? 0.09395602f0 :
-                 i == Int32(2)  ? 0.15739954f0 :
-                 i == Int32(3)  ? 0.19606979f0 :
-                 i == Int32(4)  ? 0.22323528f0 :
-                 i == Int32(5)  ? 0.24278899f0 :
-                 i == Int32(6)  ? 0.25647780f0 :
-                 i == Int32(7)  ? 0.26521143f0 :
-                 i == Int32(8)  ? 0.26947215f0 :
-                 i == Int32(9)  ? 0.26947215f0 :
-                 i == Int32(10) ? 0.26521143f0 :
-                 i == Int32(11) ? 0.25647780f0 :
-                 i == Int32(12) ? 0.24278899f0 :
-                 i == Int32(13) ? 0.22323528f0 :
-                 i == Int32(14) ? 0.19606979f0 :
-                 i == Int32(15) ? 0.15739954f0 :
-                                  0.09395602f0
-            horizon_el = fma(frac, bucket_delta, left_el)
-            delta = (sun_el_deg + sc) - horizon_el
-            px += clamp(delta, 0.0f0, 2.0f0 * sc)
-            frac += SUN_TICK_STEP
-            if frac >= 1.0f0
-                pos += Int32(1)
-                left_el = right_el
-                right_el = pos == Int32(1) ? d_2 :
-                           pos == Int32(2) ? d_3 :
-                           pos == Int32(3) ? d_4 :
-                           pos == Int32(4) ? d_5 :
-                           pos == Int32(5) ? d_6 : d_7
-                bucket_delta = right_el - left_el
-                frac -= 1.0f0
-            end
-        end
-        sun_frac = px * INV_MAX_PHOTONS
+        sun_frac = _gpu_sun_fraction_from_rays(
+            sun_el_deg, d_0, d_1, d_2, d_3, d_4, d_5, d_6, d_7)
     end
 
     over_hz_deg = earth_below ? Float32(-90.0) : (earth_el_deg - de)
     sun_out[local_row + Int32(1), local_col + Int32(1)] =
-        UInt8(clamp(unsafe_trunc(Int32, 255.0f0 * sun_frac), Int32(0), Int32(255)))
+        _gpu_encode_sun_u8(sun_frac)
     dsn_out[local_row + Int32(1), local_col + Int32(1)] =
-        UInt8(clamp(unsafe_trunc(Int32, floor(over_hz_deg * 10.0f0)), Int32(0), Int32(250)))
+        _gpu_encode_dsn_u8(over_hz_deg)
     de_debug[local_row + Int32(1), local_col + Int32(1)] = de
     sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(1)] = d_0
     sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(2)] = d_1
