@@ -204,4 +204,53 @@ using KernelAbstractions: CPU
         @test de_far[1, 1] > 1.0f0
         @test maximum(rays_far) > 2.0f0
     end
+
+    @testset "third polar layer participates in continuation" begin
+        mid_data = zeros(Float32, 64, 64)
+        far_data = zeros(Float32, 128, 128)
+        far_data[32, 45] = 1000.0f0
+        mid_mips = Hyp.build_ldem_mipmaps_minmax(mid_data)
+        far_mips = Hyp.build_ldem_mipmaps_minmax(far_data)
+        mid = Hyp.PolarStereoTerrain(mid_data;
+            max_mipmaps = mid_mips[1],
+            min_mipmaps = mid_mips[2],
+            s0 = 31.5f0,
+            l0 = 31.5f0,
+            pixel_size_km = 0.005f0,
+            pixel_size_m = 5.0f0,
+            max_terrain_pix_scale = Float32(1.5 / 5.0),
+            elev_scale_to_m = 1.0f0)
+        far3 = Hyp.PolarStereoTerrain(far_data;
+            max_mipmaps = far_mips[1],
+            min_mipmaps = far_mips[2],
+            s0 = 31.5f0,
+            l0 = 31.5f0,
+            pixel_size_km = 0.02f0,
+            pixel_size_m = 20.0f0,
+            max_terrain_pix_scale = Float32(1.5 / 20.0),
+            elev_scale_to_m = 1.0f0)
+        stack_mid_only = Hyp.TerrainStack(
+            Hyp.SiteTerrain(site; window = (8, 8, 1, 1)),
+            mid)
+        stack_three = Hyp.TerrainStack(
+            Hyp.SiteTerrain(site; window = (8, 8, 1, 1)),
+            mid,
+            far3)
+        backend = TEST_BACKEND_NAME == "none" ? CPU() : TEST_BACKEND
+        DeviceArray = TEST_BACKEND_NAME == "none" ? Array : TEST_DEVICE_ARRAY
+        sun_mid, _, de_mid, rays_mid = Hyp.render_terrain_stack_gpu(
+            stack_mid_only, sun, sun, 0.0;
+            backend = backend,
+            DeviceArray = DeviceArray)
+        sun_three, _, de_three, rays_three = Hyp.render_terrain_stack_gpu(
+            stack_three, sun, sun, 0.0;
+            backend = backend,
+            DeviceArray = DeviceArray)
+
+        @test sun_mid[1, 1] == 0xff
+        @test maximum(abs, rays_mid) < 1.0f-3
+        @test sun_three[1, 1] == 0x00
+        @test de_three[1, 1] > de_mid[1, 1] + 1.0f0
+        @test maximum(rays_three) > 2.0f0
+    end
 end

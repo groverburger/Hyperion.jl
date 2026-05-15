@@ -211,17 +211,21 @@ function render_terrain_stack_gpu(
             elev_scale_to_m = site.elev_scale_to_m)
     end
 
-    if length(sources) == 2 && sources[2] isa PolarStereoTerrain
-        farfield = sources[2]::PolarStereoTerrain
-        farfield.window === nothing ||
-            error("farfield polar-stereographic terrain source must not define a render window")
+    if length(sources) in (2, 3) && all(s -> s isa PolarStereoTerrain, sources[2:end])
+        farfields = Tuple(s::PolarStereoTerrain for s in sources[2:end])
+        for farfield in farfields
+            farfield.window === nothing ||
+                error("farfield polar-stereographic terrain source must not define a render window")
+        end
         if backend === nothing
+            length(farfields) == 1 ||
+                error("CPU terrain-stack reference currently supports one farfield layer")
             return _generate_site_polar_stack_cpu(
-                site_source, farfield,
+                site_source, farfields[1],
                 sun_pos_km, earth_pos_km, observer_height_m)
         end
         return _generate_site_polar_stack_gpu(
-            site_source, farfield,
+            site_source, farfields,
             sun_pos_km, earth_pos_km, observer_height_m;
             backend = backend,
             DeviceArray = DeviceArray,
@@ -582,6 +586,8 @@ end
     @Const(site0),
     @Const(ldem0), @Const(ldem1), @Const(ldem2), @Const(ldem3), @Const(ldem4),
     @Const(ldem_min1), @Const(ldem_min2), @Const(ldem_min3), @Const(ldem_min4),
+    @Const(ldem2_0), @Const(ldem2_1), @Const(ldem2_2), @Const(ldem2_3), @Const(ldem2_4),
+    @Const(ldem2_min1), @Const(ldem2_min2), @Const(ldem2_min3), @Const(ldem2_min4),
     @Const(stack_packed),
     @Const(atan_lut), @Const(iparams),
     @Const(layer_iparams), @Const(layer_fparams),
@@ -599,10 +605,14 @@ end
     ldem_H = layer_iparams[Int32(1), Int32(2)]
     ldem_W = layer_iparams[Int32(2), Int32(2)]
     ldem_projection_kind = layer_iparams[Int32(3), Int32(2)]
+    ldem2_H = layer_iparams[Int32(1), Int32(3)]
+    ldem2_W = layer_iparams[Int32(2), Int32(3)]
+    ldem2_projection_kind = layer_iparams[Int32(3), Int32(3)]
     supported_projection_stack =
-        layer_count == Int32(2) &&
+        (layer_count == Int32(2) || layer_count == Int32(3)) &&
         site_projection_kind == STACK_PROJ_LOCAL_STEREO &&
-        ldem_projection_kind == STACK_PROJ_POLAR_STEREO
+        ldem_projection_kind == STACK_PROJ_POLAR_STEREO &&
+        (layer_count == Int32(2) || ldem2_projection_kind == STACK_PROJ_POLAR_STEREO)
 
     site_s0 = layer_fparams[Int32(1), Int32(1)]
     site_l0 = layer_fparams[Int32(2), Int32(1)]
@@ -616,6 +626,12 @@ end
     ldem_pixel_size_m = layer_fparams[Int32(4), Int32(2)]
     ldem_elev_scale_to_m = layer_fparams[Int32(5), Int32(2)]
     ldem_mipmap_base = layer_fparams[Int32(6), Int32(2)]
+    ldem2_s0 = layer_fparams[Int32(1), Int32(3)]
+    ldem2_l0 = layer_fparams[Int32(2), Int32(3)]
+    ldem2_pixel_size_km = layer_fparams[Int32(3), Int32(3)]
+    ldem2_pixel_size_m = layer_fparams[Int32(4), Int32(3)]
+    ldem2_elev_scale_to_m = layer_fparams[Int32(5), Int32(3)]
+    ldem2_mipmap_base = layer_fparams[Int32(6), Int32(3)]
 
     atan_scale = fparams[Int32(1)]
     observer_km = fparams[Int32(2)]
@@ -651,6 +667,12 @@ end
                               moonme_r21, moonme_r22, moonme_r23,
                               moonme_r31, moonme_r32, moonme_r33,
                               ldem_s0, ldem_l0, ldem_pixel_size_km)
+    ldem2_col, ldem2_row =
+        _stack_handoff_colrow(M31, M32, M33,
+                              moonme_r11, moonme_r12, moonme_r13,
+                              moonme_r21, moonme_r22, moonme_r23,
+                              moonme_r31, moonme_r32, moonme_r33,
+                              ldem2_s0, ldem2_l0, ldem2_pixel_size_km)
 
     lqx, lqy, lqz, lqz_pos, lM31, lM32, lM33, lrho2_q =
         _gpu_stereo_query_setup(ldem_col, ldem_row, q_elev_m,
@@ -658,6 +680,12 @@ end
                                 R_KM_F32)
     lqrho_km = sqrt(lrho2_q)
     l_slope_safety = fma(lqrho_km, INV_R_KM_F32, Float32(0.01))
+    l2qx, l2qy, l2qz, l2qz_pos, l2M31, l2M32, l2M33, l2rho2_q =
+        _gpu_stereo_query_setup(ldem2_col, ldem2_row, q_elev_m,
+                                ldem2_s0, ldem2_l0, ldem2_pixel_size_km,
+                                R_KM_F32)
+    l2rho_km = sqrt(l2rho2_q)
+    l2_slope_safety = fma(l2rho_km, INV_R_KM_F32, Float32(0.01))
 
     site_sun_rc = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(1)]
     site_sun_rs = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(2)]
@@ -678,6 +706,8 @@ end
     dsn_max_site = _stack_dynamic_max_pixels(dsn_thresh, max_terrain_m, site_pixel_size_m)
     sun_max_ldem = _stack_dynamic_max_pixels(sun_thresh, max_terrain_m, ldem_pixel_size_m)
     dsn_max_ldem = _stack_dynamic_max_pixels(dsn_thresh, max_terrain_m, ldem_pixel_size_m)
+    sun_max_ldem2 = _stack_dynamic_max_pixels(sun_thresh, max_terrain_m, ldem2_pixel_size_m)
+    dsn_max_ldem2 = _stack_dynamic_max_pixels(dsn_thresh, max_terrain_m, ldem2_pixel_size_m)
 
     d_0 = Float32(-90.0); d_1 = Float32(-90.0)
     d_2 = Float32(-90.0); d_3 = Float32(-90.0)
@@ -726,7 +756,7 @@ end
                     sun_max_ldem,
                     _stack_ray_exit_distance_pixels(
                         ldem_col, ldem_row, lrc, lrs, ldem_H, ldem_W))
-                n, d2, _, _ = _gpu_cast_ray_state(
+                n, d2, exit_ldem, hit_ldem = _gpu_cast_ray_state(
                     ldem0, ldem1, ldem2, ldem3, ldem4,
                     ldem_min1, ldem_min2, ldem_min3, ldem_min4,
                     ldem_H, ldem_W,
@@ -738,6 +768,27 @@ end
                     ldem_pixel_size_km, ldem_pixel_size_m,
                     ldem_mipmap_base, ldem_elev_scale_to_m,
                     n, d2, start_ldem)
+                if !hit_ldem && layer_count == Int32(3)
+                    start_ldem2 = _stack_next_layer_start_d(
+                        exit_ldem, ldem_pixel_size_m, ldem2_pixel_size_m)
+                    max_ldem2 = min(
+                        sun_max_ldem2,
+                        _stack_ray_exit_distance_pixels(
+                            ldem2_col, ldem2_row, lrc, lrs,
+                            ldem2_H, ldem2_W))
+                    n, d2, _, _ = _gpu_cast_ray_state(
+                        ldem2_0, ldem2_1, ldem2_2, ldem2_3, ldem2_4,
+                        ldem2_min1, ldem2_min2, ldem2_min3, ldem2_min4,
+                        ldem2_H, ldem2_W,
+                        ldem2_col, ldem2_row, q_elev_m,
+                        l2qx, l2qy, l2qz, l2qz_pos, l2_slope_safety,
+                        l2M31, l2M32, l2M33,
+                        lrc, lrs, observer_km, sun_thresh, max_ldem2,
+                        ldem2_s0, ldem2_l0, R_KM_F32,
+                        ldem2_pixel_size_km, ldem2_pixel_size_m,
+                        ldem2_mipmap_base, ldem2_elev_scale_to_m,
+                        n, d2, start_ldem2)
+                end
             end
             deg = _gpu_stack_slope_to_deg(n, d2, atan_lut, atan_scale)
             if k == Int32(1); d_0 = deg
@@ -773,7 +824,7 @@ end
                 _stack_ray_exit_distance_pixels(
                     ldem_col, ldem_row, ldem_earth_rc, ldem_earth_rs,
                     ldem_H, ldem_W))
-            n, d2, _, _ = _gpu_cast_ray_state(
+            n, d2, exit_ldem, hit_ldem = _gpu_cast_ray_state(
                 ldem0, ldem1, ldem2, ldem3, ldem4,
                 ldem_min1, ldem_min2, ldem_min3, ldem_min4,
                 ldem_H, ldem_W,
@@ -786,6 +837,28 @@ end
                 ldem_pixel_size_km, ldem_pixel_size_m,
                 ldem_mipmap_base, ldem_elev_scale_to_m,
                 n, d2, start_ldem)
+            if !hit_ldem && layer_count == Int32(3)
+                start_ldem2 = _stack_next_layer_start_d(
+                    exit_ldem, ldem_pixel_size_m, ldem2_pixel_size_m)
+                max_ldem2 = min(
+                    dsn_max_ldem2,
+                    _stack_ray_exit_distance_pixels(
+                        ldem2_col, ldem2_row, ldem_earth_rc, ldem_earth_rs,
+                        ldem2_H, ldem2_W))
+                n, d2, _, _ = _gpu_cast_ray_state(
+                    ldem2_0, ldem2_1, ldem2_2, ldem2_3, ldem2_4,
+                    ldem2_min1, ldem2_min2, ldem2_min3, ldem2_min4,
+                    ldem2_H, ldem2_W,
+                    ldem2_col, ldem2_row, q_elev_m,
+                    l2qx, l2qy, l2qz, l2qz_pos, l2_slope_safety,
+                    l2M31, l2M32, l2M33,
+                    ldem_earth_rc, ldem_earth_rs, observer_km, dsn_thresh,
+                    max_ldem2,
+                    ldem2_s0, ldem2_l0, R_KM_F32,
+                    ldem2_pixel_size_km, ldem2_pixel_size_m,
+                    ldem2_mipmap_base, ldem2_elev_scale_to_m,
+                    n, d2, start_ldem2)
+            end
         end
         de = _gpu_stack_slope_to_deg(n, d2, atan_lut, atan_scale)
     end
@@ -815,7 +888,7 @@ end
 
 function _generate_site_polar_stack_gpu(
         site_source::SiteTerrain,
-        farfield::PolarStereoTerrain,
+        farfields::Tuple,
         sun_pos_km::NTuple{3, Float64},
         earth_pos_km::NTuple{3, Float64},
         observer_height_m::Float64;
@@ -826,6 +899,9 @@ function _generate_site_polar_stack_gpu(
     site = site_source.site
     origin_r, origin_c, H, W = _source_window(site_source)
     observer_km = Float32(observer_height_m / 1000.0)
+    layer_count = length(farfields) + 1
+    farfield = farfields[1]
+    farfield2 = length(farfields) == 2 ? farfields[2] : farfield
     packed = _precompute_site_polar_stack(
         site_source, farfield, sun_pos_km, earth_pos_km, observer_km)
 
@@ -838,16 +914,19 @@ function _generate_site_polar_stack_gpu(
 
     site_H_total, site_W_total = size(site.data)
     ldem_H, ldem_W = size(farfield.data)
+    ldem2_H, ldem2_W = size(farfield2.data)
 
     d_site = DeviceArray(site.data)
     d_ldem_max = ntuple(i -> DeviceArray(farfield.max_mipmaps[i]), N_MIPMAP_LEVELS)
     d_ldem_min = ntuple(i -> DeviceArray(farfield.min_mipmaps[i]), N_MIPMAP_LEVELS)
+    d_ldem2_max = ntuple(i -> DeviceArray(farfield2.max_mipmaps[i]), N_MIPMAP_LEVELS)
+    d_ldem2_min = ntuple(i -> DeviceArray(farfield2.min_mipmaps[i]), N_MIPMAP_LEVELS)
     d_packed = DeviceArray(packed)
     d_atan = DeviceArray(ATAN_LUT)
     d_iparams = DeviceArray(Int32[
         H, W,
         origin_r, origin_c,
-        2,
+        layer_count,
     ])
     layer_iparams = zeros(Int32, 3, STACK_MAX_LAYERS)
     layer_iparams[:, 1] .= Int32[
@@ -858,6 +937,11 @@ function _generate_site_polar_stack_gpu(
     layer_iparams[:, 2] .= Int32[
         ldem_H,
         ldem_W,
+        STACK_PROJ_POLAR_STEREO,
+    ]
+    layer_iparams[:, 3] .= Int32[
+        ldem2_H,
+        ldem2_W,
         STACK_PROJ_POLAR_STEREO,
     ]
     layer_fparams = zeros(Float32, 6, STACK_MAX_LAYERS)
@@ -876,6 +960,14 @@ function _generate_site_polar_stack_gpu(
         farfield.pixel_size_m,
         farfield.elev_scale_to_m,
         farfield.mipmap_base,
+    ]
+    layer_fparams[:, 3] .= Float32[
+        farfield2.s0,
+        farfield2.l0,
+        farfield2.pixel_size_km,
+        farfield2.pixel_size_m,
+        farfield2.elev_scale_to_m,
+        farfield2.mipmap_base,
     ]
     edge_fparams = zeros(Float32, 9, STACK_MAX_EDGES)
     edge_fparams[:, 1] .= Float32[
@@ -908,6 +1000,9 @@ function _generate_site_polar_stack_gpu(
            d_ldem_max[1], d_ldem_max[2], d_ldem_max[3],
            d_ldem_max[4], d_ldem_max[5],
            d_ldem_min[2], d_ldem_min[3], d_ldem_min[4], d_ldem_min[5],
+           d_ldem2_max[1], d_ldem2_max[2], d_ldem2_max[3],
+           d_ldem2_max[4], d_ldem2_max[5],
+           d_ldem2_min[2], d_ldem2_min[3], d_ldem2_min[4], d_ldem2_min[5],
            d_packed, d_atan, d_iparams,
            d_layer_iparams, d_layer_fparams, d_edge_fparams, d_fparams;
            ndrange = H * W)
