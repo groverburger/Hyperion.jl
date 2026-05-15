@@ -573,7 +573,10 @@ end
 
 @kernel function _gpu_site_polar_stack_kernel!(
     sun_out, dsn_out, de_debug, sun_rays_debug,
-    @Const(site0), @Const(ldem0), @Const(stack_packed),
+    @Const(site0),
+    @Const(ldem0), @Const(ldem1), @Const(ldem2), @Const(ldem3), @Const(ldem4),
+    @Const(ldem_min1), @Const(ldem_min2), @Const(ldem_min3), @Const(ldem_min4),
+    @Const(stack_packed),
     @Const(atan_lut), @Const(iparams), @Const(fparams))
 
     site_H_total = iparams[Int32(1)]
@@ -607,6 +610,7 @@ end
     moonme_r32 = fparams[Int32(20)]
     moonme_r33 = fparams[Int32(21)]
     max_terrain_m = fparams[Int32(22)]
+    ldem_mipmap_base = fparams[Int32(23)]
 
     idx = @index(Global)
     local_row = (idx - Int32(1)) ÷ W
@@ -656,6 +660,8 @@ end
     lqz = lR_total_q * lM33
     lqz_pos = lR_total_q * ((lrho2_q * (Float32(2.0) * INV_4R_KM2_F32)) *
                              linv_denom_q)
+    lqrho_km = sqrt(lrho2_q)
+    l_slope_safety = fma(lqrho_km, INV_R_KM_F32, Float32(0.01))
 
     site_sun_rc = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(1)]
     site_sun_rs = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(2)]
@@ -724,13 +730,18 @@ end
                     sun_max_ldem,
                     _stack_ray_exit_distance_pixels(
                         ldem_col, ldem_row, lrc, lrs, ldem_H, ldem_W))
-                n, d2, _, _ = _gpu_cast_stack_segment_level0(
-                    ldem0, ldem_H, ldem_W,
+                n, d2, _, _ = _gpu_cast_ray_state(
+                    ldem0, ldem1, ldem2, ldem3, ldem4,
+                    ldem_min1, ldem_min2, ldem_min3, ldem_min4,
+                    ldem_H, ldem_W,
                     ldem_col, ldem_row, q_elev_m,
-                    lqx, lqy, lqz, lqz_pos, lM31, lM32, lM33,
+                    lqx, lqy, lqz, lqz_pos, l_slope_safety,
+                    lM31, lM32, lM33,
                     lrc, lrs, observer_km, sun_thresh, max_ldem,
-                    ldem_s0, ldem_l0, ldem_pixel_size_km,
-                    ldem_elev_scale_to_m, n, d2, start_ldem)
+                    ldem_s0, ldem_l0, R_KM_F32,
+                    ldem_pixel_size_km, ldem_pixel_size_m,
+                    ldem_mipmap_base, ldem_elev_scale_to_m,
+                    n, d2, start_ldem)
             end
             deg = _gpu_stack_slope_to_deg(n, d2, atan_lut, atan_scale)
             if k == Int32(1); d_0 = deg
@@ -766,13 +777,19 @@ end
                 _stack_ray_exit_distance_pixels(
                     ldem_col, ldem_row, ldem_earth_rc, ldem_earth_rs,
                     ldem_H, ldem_W))
-            n, d2, _, _ = _gpu_cast_stack_segment_level0(
-                ldem0, ldem_H, ldem_W,
+            n, d2, _, _ = _gpu_cast_ray_state(
+                ldem0, ldem1, ldem2, ldem3, ldem4,
+                ldem_min1, ldem_min2, ldem_min3, ldem_min4,
+                ldem_H, ldem_W,
                 ldem_col, ldem_row, q_elev_m,
-                lqx, lqy, lqz, lqz_pos, lM31, lM32, lM33,
-                ldem_earth_rc, ldem_earth_rs, observer_km, dsn_thresh, max_ldem,
-                ldem_s0, ldem_l0, ldem_pixel_size_km,
-                ldem_elev_scale_to_m, n, d2, start_ldem)
+                lqx, lqy, lqz, lqz_pos, l_slope_safety,
+                lM31, lM32, lM33,
+                ldem_earth_rc, ldem_earth_rs, observer_km, dsn_thresh,
+                max_ldem,
+                ldem_s0, ldem_l0, R_KM_F32,
+                ldem_pixel_size_km, ldem_pixel_size_m,
+                ldem_mipmap_base, ldem_elev_scale_to_m,
+                n, d2, start_ldem)
         end
         de = _gpu_stack_slope_to_deg(n, d2, atan_lut, atan_scale)
     end
@@ -865,7 +882,8 @@ function _generate_site_polar_stack_gpu(
     ldem_H, ldem_W = size(farfield.data)
 
     d_site = DeviceArray(site.data)
-    d_ldem = DeviceArray(farfield.data)
+    d_ldem_max = ntuple(i -> DeviceArray(farfield.max_mipmaps[i]), N_MIPMAP_LEVELS)
+    d_ldem_min = ntuple(i -> DeviceArray(farfield.min_mipmaps[i]), N_MIPMAP_LEVELS)
     d_packed = DeviceArray(packed)
     d_atan = DeviceArray(ATAN_LUT)
     d_iparams = DeviceArray(Int32[
@@ -887,6 +905,7 @@ function _generate_site_polar_stack_gpu(
         r21, r22, r23,
         r31, r32, r33,
         MAX_TERRAIN_M_F32,
+        farfield.mipmap_base,
     ])
     d_sun_out = DeviceArray(zeros(UInt8, H, W))
     d_dsn_out = DeviceArray(zeros(UInt8, H, W))
@@ -895,7 +914,11 @@ function _generate_site_polar_stack_gpu(
 
     kernel = _gpu_site_polar_stack_kernel!(backend, workgroup_size)
     kernel(d_sun_out, d_dsn_out, d_de_dbg, d_sun_rays_dbg,
-           d_site, d_ldem, d_packed, d_atan, d_iparams, d_fparams;
+           d_site,
+           d_ldem_max[1], d_ldem_max[2], d_ldem_max[3],
+           d_ldem_max[4], d_ldem_max[5],
+           d_ldem_min[2], d_ldem_min[3], d_ldem_min[4], d_ldem_min[5],
+           d_packed, d_atan, d_iparams, d_fparams;
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 
