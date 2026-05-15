@@ -92,6 +92,10 @@ The implementation should grow in small, pinned steps:
 2. Move shared device math into small helpers that Metal/CUDA inline cleanly.
 3. Add identity tests where an LDEM crop is used as the inner layer and the
    same LDEM is used as farfield.
-4. Introduce a fixed layout for layer metadata and projection kind.
-5. Add geometry-grid inner layers only after the stereographic stack is stable.
-
+4. Introduce a fixed layout for layer metadata and projection kind. The
+   current two-layer stack already passes dimensions, projection kind,
+   pixel size, elevation scale, and mipmap base through layer metadata.
+5. Move handoff transforms into edge metadata. The current site -> polar
+   handoff already passes the 3x3 source-local-to-MOON_ME datum transform
+   through edge metadata.
+6. Add geometry-grid inner layers only after the stereographic stack is stable.
