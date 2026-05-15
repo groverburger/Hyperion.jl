@@ -551,34 +551,19 @@ end
         pixel_size_km::Float32, elev_scale_to_m::Float32,
         max_num::Float32, max_den_sq::Float32,
         start_d_pixels::Float32)
-    threshold_sq = threshold * threshold
-    base_step = Float32(0.70710698)
-    d = max(start_d_pixels, 1.0f0)
-    hit = false
-    exit_d = d
-    @inbounds while d <= max_d_pixels && !hit
-        cx = fma(ray_cos, d, query_col)
-        cy = fma(ray_sin, d, query_row)
-        col_i = unsafe_trunc(Int32, cx)
-        row_i = unsafe_trunc(Int32, cy)
-        if col_i < Int32(0) || col_i + Int32(1) >= dem_W ||
-           row_i < Int32(0) || row_i + Int32(1) >= dem_H
-            exit_d = d
-            break
-        end
-
-        max_num, max_den_sq, hit =
-            _gpu_accumulate_level0_sample_sq(
-                dem, row_i, col_i, cx, cy,
-                q_elev_m, qx, qy, qz_pos, M31, M32, M33,
-                observer_km, threshold, threshold_sq,
-                s0, l0, pixel_size_km,
-                elev_scale_to_m, R_KM_F32,
-                max_num, max_den_sq)
-        d += base_step
-        exit_d = d
-    end
-    return max_num, max_den_sq, exit_d, hit
+    return _gpu_cast_ray_state(
+        dem, dem, dem, dem, dem,
+        dem, dem, dem, dem,
+        dem_H, dem_W,
+        query_col, query_row, q_elev_m,
+        qx, qy, qz, qz_pos, 0.0f0,
+        M31, M32, M33,
+        ray_cos, ray_sin, observer_km,
+        threshold, max_d_pixels,
+        s0, l0, R_KM_F32,
+        pixel_size_km, 1.0f0,
+        1.0f9, elev_scale_to_m,
+        max_num, max_den_sq, start_d_pixels)
 end
 
 @inline function _gpu_stack_slope_to_deg(num::Float32, den_sq::Float32,
