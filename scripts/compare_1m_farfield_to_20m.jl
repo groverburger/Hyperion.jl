@@ -5,7 +5,7 @@ const Hyp = Hyperion
 include(joinpath(@__DIR__, "..", "test", "test_backend.jl"))
 
 const SITE_TIF = get(ENV, "HYPERION_SITE_TIF",
-    "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
+    Hyp._nobile_1m_path())
 
 const TIMESTAMPS = [
     "2027-01-05T00-00-00", "2027-01-22T07-00-00", "2027-02-12T12-00-00",

@@ -14,11 +14,13 @@
 # Barker, regenerate the bit-exact pins, drop the Shirley dependency.
 #
 # `require_shirley_ldem!` is the minimum needed for `test/runtests.jl`
-# and `scripts/bitexact_test.jl`. `require_test_data!` additionally derives
-# `data/inputs/nobile_20m.tif` for diagnostic scripts that want a
-# pre-cropped Nobile window.
+# and `scripts/bitexact_test.jl`. `require_nobile_1m_tif!` verifies the
+# high-resolution Nobile site DEM used by the 1 m stack tests and baseline
+# generation. `require_test_data!` additionally derives `data/inputs/nobile_20m.tif`
+# for diagnostic scripts that want a pre-cropped Nobile window.
 
 const _LDEM_SHA   = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
+const _NOBILE_1M_SHA = "e8cc7e5b530972d1d84083b335f961f0aa87e64c39697d942f10589930dd69f4"
 const _LDEM_DIM   = 30400                     # LDEM is 30400×30400 Int16
 const _LDEM_SIZE_GB = 1.85
 
@@ -37,6 +39,7 @@ const _NOBILE_PROJ4 = "+proj=stere +lat_0=-90 +lon_0=0 +k=1 +x_0=0 +y_0=0 +R=173
 _data_dir()    = joinpath(dirname(@__DIR__), "data", "inputs")
 _ldem_path()   = joinpath(_data_dir(), "ldem_80s_20m.img")
 _nobile_path() = joinpath(_data_dir(), "nobile_20m.tif")
+_nobile_1m_path() = joinpath(_data_dir(), "nobile_1m.tif")
 
 function _sha256_file(path::AbstractString)
     open(path, "r") do io
@@ -46,6 +49,10 @@ end
 
 function _ldem_ok()
     isfile(_ldem_path()) && _sha256_file(_ldem_path()) == _LDEM_SHA
+end
+
+function _nobile_1m_ok()
+    isfile(_nobile_1m_path()) && _sha256_file(_nobile_1m_path()) == _NOBILE_1M_SHA
 end
 
 """
@@ -92,6 +99,49 @@ function require_shirley_ldem!()
 
         Expected format: raw 30400x30400 Int16 little-endian, scale 0.5 m,
         no header, about $(_LDEM_SIZE_GB) GB. See README.md -> Farfield LDEM versions.
+        """)
+    end
+end
+
+"""
+    require_nobile_1m_tif!() -> String
+
+Require the 1 m Nobile site DEM to be present and SHA-verified at
+`data/inputs/nobile_1m.tif`. Returns the path.
+"""
+function require_nobile_1m_tif!()
+    if _nobile_1m_ok()
+        return _nobile_1m_path()
+    end
+
+    if isfile(_nobile_1m_path())
+        actual = _sha256_file(_nobile_1m_path())
+        error("""
+        Local Nobile 1 m site DEM has the wrong SHA.
+
+          path:     $(_nobile_1m_path())
+          expected: $(_NOBILE_1M_SHA)
+          actual:   $actual
+
+        Place the SHA-pinned file at:
+
+          $(_nobile_1m_path())
+
+        See docs/input-data-hashes.md.
+        """)
+    else
+        error("""
+        Nobile 1 m site DEM not found.
+
+        Place the SHA-pinned file at:
+
+          $(_nobile_1m_path())
+
+        Expected SHA-256:
+
+          $(_NOBILE_1M_SHA)
+
+        See docs/input-data-hashes.md.
         """)
     end
 end

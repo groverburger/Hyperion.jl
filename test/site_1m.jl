@@ -27,7 +27,7 @@ using Dates
 @isdefined(PROJECT_ROOT) || (const PROJECT_ROOT = dirname(@__DIR__))
 
 const SITE_TIF_PATH = get(ENV, "HYPERION_SITE_TIF",
-    "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
+    Hyp._nobile_1m_path())
 
 if TEST_BACKEND_NAME == "none"
     @warn "No render backend selected — skipping 1m regression."

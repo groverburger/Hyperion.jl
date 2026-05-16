@@ -18,7 +18,7 @@ const DEVICE_ARR = Metal.MtlArray
 const REPO = dirname(@__DIR__)
 const DATA = joinpath(REPO, "data", "inputs")
 const KERNELS = joinpath(REPO, "kernels")
-const REFERENCE_ROOT = "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_27_28_20m"
+const REFERENCE_ROOT = joinpath(DATA, "nobile_27_28_20m")
 const OUT_ROOT = joinpath(REPO, "data", "outputs", "nobile_live_2027_2028")
 
 mkpath(joinpath(OUT_ROOT, "sun_000"))

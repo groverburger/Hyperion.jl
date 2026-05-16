@@ -12,7 +12,7 @@ include(joinpath(@__DIR__, "..", "..", "test", "test_backend.jl"))
 
 const PROJECT_ROOT = dirname(dirname(@__DIR__))
 const SITE_TIF = get(ENV, "HYPERION_SITE_TIF",
-    "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
+    Hyp._nobile_1m_path())
 const TIER1_DIR = get(ENV, "HYP_CORRECTNESS_TIER1_DIR",
     "/Volumes/WD_BLACK/lroc-nac-maps/derived")
 const DEFAULT_OUTROOT = joinpath(PROJECT_ROOT, "data", "outputs", "correctness_1m_site")

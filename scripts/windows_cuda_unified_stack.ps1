@@ -105,15 +105,14 @@ function Resolve-DefaultSiteTif() {
     if ($SiteTif -ne "") {
         return $SiteTif
     }
-    $sibling = Join-Path (Split-Path $ProjectRoot) "mapbuilder\test_inputs\nobile_1m.tif"
-    return $sibling
+    return Join-Path $ProjectRoot "data\inputs\nobile_1m.tif"
 }
 
 function Resolve-DefaultLdemSource() {
     if ($LdemSource -ne "") {
         return $LdemSource
     }
-    return Join-Path (Split-Path $ProjectRoot) "mapbuilder\test_inputs\ldem_80s_20m.img"
+    return ""
 }
 
 function Ensure-Ldem() {
@@ -136,8 +135,8 @@ function Ensure-Ldem() {
         Log "  LDEM target missing."
     }
 
-    if (-not (Test-Path $source)) {
-        throw "Cannot find Shirley LDEM source at $source. Put the file at $target or pass -LdemSource."
+    if ($source -eq "" -or -not (Test-Path $source)) {
+        throw "Shirley LDEM is not available at $target. Put the file under data\inputs or pass -LdemSource to copy it there."
     }
 
     Log "Copying Shirley LDEM from $source"
@@ -151,10 +150,15 @@ function Ensure-Ldem() {
 
 function Ensure-SiteTif() {
     $path = Resolve-DefaultSiteTif
+    $expectedSha = "e8cc7e5b530972d1d84083b335f961f0aa87e64c39697d942f10589930dd69f4"
     if (-not (Test-Path $path)) {
         throw "Site TIF not found at $path. Pass -SiteTif `"C:\path\to\nobile_1m.tif`"."
     }
     $resolved = (Resolve-Path $path).Path
+    $actualSha = (Get-FileHash $resolved -Algorithm SHA256).Hash.ToLower()
+    if ($actualSha -ne $expectedSha) {
+        throw "Site TIF SHA mismatch. Expected $expectedSha, got $actualSha at $resolved"
+    }
     $env:HYPERION_SITE_TIF = $resolved
     Log "Set HYPERION_SITE_TIF=$resolved"
 }

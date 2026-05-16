@@ -101,34 +101,27 @@ Log "=================================================================="
 
 # ─── Pre-flight: LDEM file ───────────────────────────────────────────────
 $LDEMTarget = Join-Path $ProjectRoot "data\inputs\ldem_80s_20m.img"
-$LDEMSource = Join-Path (Split-Path $ProjectRoot) "mapbuilder\test_inputs\ldem_80s_20m.img"
 $LDEMExpectedSHA = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
 
 Log ""
 Log "Pre-flight: ensuring LDEM is in place at $LDEMTarget"
 if (-not (Test-Path $LDEMTarget) -or ((Get-FileHash $LDEMTarget -Algorithm SHA256).Hash.ToLower() -ne $LDEMExpectedSHA)) {
-    if (Test-Path $LDEMSource) {
-        Log "  Target missing or wrong SHA — copying from $LDEMSource"
-        New-Item -ItemType Directory -Force (Split-Path $LDEMTarget) | Out-Null
-        Copy-Item $LDEMSource $LDEMTarget -Force
-        $ActualSHA = (Get-FileHash $LDEMTarget -Algorithm SHA256).Hash.ToLower()
-        if ($ActualSHA -eq $LDEMExpectedSHA) {
-            Log "  Copy verified: SHA matches"
-        } else {
-            Log "  ERROR: post-copy SHA mismatch. Expected $LDEMExpectedSHA, got $ActualSHA"
-            exit 1
-        }
-    } else {
-        Log "  ERROR: cannot find $LDEMSource. Aborting."
-        exit 1
-    }
+    Log "  ERROR: missing or wrong SHA. Place the Shirley LDEM at $LDEMTarget."
+    Log "  Expected SHA: $LDEMExpectedSHA"
+    exit 1
 } else {
     Log "  Target present and SHA matches; skipping copy."
 }
 
 # ─── Pre-flight: site TIF ────────────────────────────────────────────────
-$SiteTIF = Join-Path (Split-Path $ProjectRoot) "mapbuilder\test_inputs\nobile_1m.tif"
+$SiteTIF = Join-Path $ProjectRoot "data\inputs\nobile_1m.tif"
+$SiteExpectedSHA = "e8cc7e5b530972d1d84083b335f961f0aa87e64c39697d942f10589930dd69f4"
 if (Test-Path $SiteTIF) {
+    $SiteActualSHA = (Get-FileHash $SiteTIF -Algorithm SHA256).Hash.ToLower()
+    if ($SiteActualSHA -ne $SiteExpectedSHA) {
+        Log "ERROR: site TIF SHA mismatch. Expected $SiteExpectedSHA, got $SiteActualSHA"
+        exit 1
+    }
     $env:HYPERION_SITE_TIF = $SiteTIF
     Log "Set HYPERION_SITE_TIF = $SiteTIF"
 } else {

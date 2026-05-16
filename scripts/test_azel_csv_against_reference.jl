@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 # Regenerate the legacy reference `azimuths_elevations.csv` and verify
 # numerical parity column-by-column. The reference is at
-# /Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_27_28_20m/other/azimuths_elevations.csv
+# data/inputs/nobile_27_28_20m/other/azimuths_elevations.csv
 # and was generated with the same SPICE kernels Hyperion uses.
 #
 # Verification policy (per user request):
@@ -18,7 +18,8 @@ using Hyperion
 using Dates
 using Printf
 
-const REF_CSV = "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_27_28_20m/other/azimuths_elevations.csv"
+const REF_CSV = joinpath(dirname(@__DIR__), "data", "inputs", "nobile_27_28_20m",
+                         "other", "azimuths_elevations.csv")
 const OUT_CSV = "/tmp/azel_yearlong.csv"
 
 # Pixel that produced the reference: row=9216, col=18880 in the Shirley grid.

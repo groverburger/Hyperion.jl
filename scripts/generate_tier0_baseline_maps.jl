@@ -11,7 +11,7 @@ include(joinpath(@__DIR__, "..", "test", "test_backend.jl"))
 
 const PROJECT_ROOT = dirname(@__DIR__)
 const SITE_TIF = get(ENV, "HYPERION_SITE_TIF",
-    "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
+    Hyp._nobile_1m_path())
 const DEFAULT_OUTROOT = joinpath(PROJECT_ROOT, "data", "outputs",
                                  "baseline_maps", "tier0")
 
@@ -163,6 +163,7 @@ function main()
     site_gt = Float64[]
     site_wkt = ""
     if opts.only in ("1m", "both")
+        haskey(ENV, "HYPERION_SITE_TIF") || Hyp.require_nobile_1m_tif!()
         println("Loading full 1m site DEM as Float32: $SITE_TIF")
         site = Hyp.load_site_dem_f32(SITE_TIF)
         site_gt, site_wkt = _site_georef(SITE_TIF)

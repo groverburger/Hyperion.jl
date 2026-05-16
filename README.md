@@ -70,7 +70,8 @@ julia --project -e 'using Pkg; Pkg.instantiate()'
 julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-The test suite expects the Shirley LDEM to already be present at
+The test suite expects the canonical input DEMs to already be present
+under `data/inputs/`. At minimum, the Shirley LDEM must be present at
 `data/inputs/ldem_80s_20m.img`. It must be the raw 30400x30400 int16 LE
 artifact with SHA:
 
@@ -80,7 +81,15 @@ caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b
 
 If it is missing or has the wrong SHA, the LDEM-dependent tests are
 skipped or scripts fail with placement instructions. The test harness
-does not download DEM data. To validate the local file and derive the
+does not download DEM data. The 1 m site tests and Tier 0 1 m generation
+also expect `data/inputs/nobile_1m.tif` with SHA:
+
+```
+e8cc7e5b530972d1d84083b335f961f0aa87e64c39697d942f10589930dd69f4
+```
+
+See `docs/input-data-hashes.md` for the repo-local input hash dictionary.
+To validate the local file and derive the
 Nobile GeoTIFF used by diagnostic scripts:
 
 ```
@@ -146,9 +155,8 @@ it's a drop-in replacement; native-Barker crops are not. If you swap
 LDEM versions in any pipeline, expect a half-pixel realignment to be
 necessary downstream.
 
-See `/Volumes/WD_BLACK/mapbuilder/test_inputs/dem_grid_notes.md`
-(external to this repo, in the upstream Mapbuilder tree) for the
-full provenance + Nobile-crop alignment details.
+The relevant provenance and Nobile-crop alignment details are summarized
+above so the repo does not depend on external Mapbuilder paths.
 
 ### GPU backends (optional)
 

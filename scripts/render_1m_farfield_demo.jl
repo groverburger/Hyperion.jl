@@ -5,7 +5,7 @@ const Hyp = Hyperion
 include(joinpath(@__DIR__, "..", "test", "test_backend.jl"))
 
 const SITE_TIF = get(ENV, "HYPERION_SITE_TIF",
-    "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
+    Hyp._nobile_1m_path())
 
 timestamp_str = length(ARGS) >= 1 ? ARGS[1] : "2027-06-23T00-00-00"
 origin_r = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 3500

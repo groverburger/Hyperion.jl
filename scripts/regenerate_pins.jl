@@ -47,7 +47,7 @@ const TIMESTAMPS = [
 ]
 
 println("Regenerating LDEM bit-exact pins ($(length(TIMESTAMPS)) timestamps) ...")
-ldem = Hyp.load_ldem("/Volumes/WD_BLACK/mapbuilder/test_inputs/ldem_80s_20m.img")
+ldem = Hyp.load_ldem(Hyp.require_shirley_ldem!())
 Hyp.init_spice(joinpath(PROJECT_ROOT, "kernels"))
 max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 const ORIGIN_R, ORIGIN_C = 8960, 18432
@@ -114,7 +114,7 @@ end
 # ─── 1m site DEM regeneration ────────────────────────────────────────────
 println()
 println("Regenerating 1m site DEM bit-exact pin ...")
-site = Hyp.load_site_dem("/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif")
+site = Hyp.load_site_dem(Hyp.require_nobile_1m_tif!())
 max_smm, min_smm = Hyp.build_site_mipmaps_minmax(site)
 
 const SITE_TS = "2027-06-01T00-00-00"

@@ -1,7 +1,7 @@
 # Render a 1m sun + DSN map for the Nobile site DEM.
 #
-# Loads `/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif` (or a
-# path passed as ARGS[1]), resamples it onto LDEM south-polar PS at 1m,
+# Loads `data/inputs/nobile_1m.tif` (or a path passed as ARGS[1]),
+# resamples it onto LDEM south-polar PS at 1m,
 # builds mipmaps, and runs the live-shadow kernel for a chosen timestamp.
 # Writes `data/outputs/site_1m/<ts>_{sun,dsn}.png`.
 #
@@ -20,7 +20,7 @@ using KernelAbstractions: CPU
 import FileIO
 
 const SITE_TIF = length(ARGS) >= 1 ? ARGS[1] :
-    "/Volumes/WD_BLACK/mapbuilder/test_inputs/nobile_1m.tif"
+    Hyp._nobile_1m_path()
 
 const TIMESTAMP_STR = length(ARGS) >= 2 ? ARGS[2] : "2027-06-01T00-00-00"
 
