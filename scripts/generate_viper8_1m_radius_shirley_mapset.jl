@@ -33,6 +33,7 @@ Base.@kwdef struct Options
     origin_row::Union{Nothing,Int} = DEFAULT_ORIGIN_ROW
     origin_col::Union{Nothing,Int} = DEFAULT_ORIGIN_COL
     backend::Symbol = :auto
+    cutoff::Bool = true
     overwrite::Bool = false
     dry_run::Bool = false
 end
@@ -59,6 +60,7 @@ function _usage()
       --origin-row=$DEFAULT_ORIGIN_ROW
       --origin-col=$DEFAULT_ORIGIN_COL
       --backend=auto
+      --cutoff
 
     Options:
       --name=<name>             Output mapset directory name under --out.
@@ -75,6 +77,8 @@ function _usage()
       --origin-col=<col>        Fixed zero-based site window origin column.
       --from-lat-lon            Compute the window from --lat/--lon instead.
       --backend=auto|metal|cuda|cpu
+      --cutoff                  Crop the site DEM in memory to the window.
+      --no-cutoff               Render the window while retaining full 1 m nearfield.
       --overwrite               Reuse an existing output directory.
       --dry-run                 Print resolved settings without rendering.
       --help                    Show this help.
@@ -160,6 +164,10 @@ function _parse_args(args)
             opts = Options(opts; origin_row = nothing, origin_col = nothing)
         elseif startswith(arg, "--backend=")
             opts = Options(opts; backend = _parse_backend(split(arg, "=", limit = 2)[2]))
+        elseif arg == "--cutoff"
+            opts = Options(opts; cutoff = true)
+        elseif arg == "--no-cutoff"
+            opts = Options(opts; cutoff = false)
         elseif arg == "--overwrite"
             opts = Options(opts; overwrite = true)
         elseif arg == "--dry-run"
@@ -258,6 +266,7 @@ function _print_plan(opts::Options, site_path::AbstractString,
         println("Center:      lat=$(opts.lat_deg), lon=$(opts.lon_deg)")
     @printf("Center px:   row=%.3f, col=%.3f\n", center_pixel[1], center_pixel[2])
     println("Window:      $window (row, col, height, width)")
+    println("Cutoff:      $(opts.cutoff)")
     println("Radius:      $(opts.radius_m) m")
     println("Frames:      $frame_count at $(opts.frame_step)")
     println("Az/el rows:  $azel_count at $(opts.azel_step)")
@@ -281,7 +290,8 @@ function main()
         [
             Hyp.SiteDEMLayer(site_path;
                 name = "VIPER 8.0 full 1m DEM $(opts.radius_m)m radius",
-                window = window),
+                window = window,
+                cutoff = opts.cutoff),
             Hyp.PolarDEMLayer(farfield_path; name = "Shirley LDEM 80S 20m"),
         ],
         opts.start_time,

@@ -19,6 +19,7 @@ Base.@kwdef struct SiteDEMLayerSpec <: AbstractMapsetLayerSpec
     path::String
     name::Union{Nothing,String} = nothing
     window::Union{Nothing,NTuple{4,Int}} = nothing
+    cutoff::Bool = false
     float32::Bool = true
 end
 
@@ -291,8 +292,11 @@ function _load_mapset_layers(specs)
     for (i, spec) in pairs(specs)
         if spec isa SiteDEMLayerSpec
             site = spec.float32 ? load_site_dem_f32(spec.path) : load_site_dem(spec.path)
-            max_mm, min_mm = build_site_mipmaps_minmax(site)
-            source = SiteTerrain(site; window = _default_window(spec.window, site.H, site.W))
+            window = _default_window(spec.window, site.H, site.W)
+            site = spec.cutoff ? _cutoff_site_dem(site, window) : site
+            source_window = spec.cutoff ? (0, 0, site.H, site.W) : window
+            max_mm, min_mm = _site_mapset_mipmaps(site, length(specs) > 1)
+            source = SiteTerrain(site; window = source_window)
             push!(loaded, _LoadedMapsetLayer(
                 spec, _mapset_layer_name(spec), :site, site, source, max_mm, min_mm))
         elseif spec isa PolarDEMLayerSpec
@@ -315,6 +319,29 @@ function _load_mapset_layers(specs)
         end
     end
     return loaded
+end
+
+function _cutoff_site_dem(site::SiteDEM{T}, window::NTuple{4,Int}) where {T<:Real}
+    origin_r, origin_c, H, W = window
+    data = copy(site.data[origin_r + 1:origin_r + H, origin_c + 1:origin_c + W])
+    return SiteDEM{T}(
+        data,
+        H,
+        W,
+        site.s0 - origin_c,
+        site.l0 - origin_r,
+        site.pixel_size_m,
+        site.lat0,
+        site.lon0,
+        site.elev_scale_to_m)
+end
+
+function _site_mapset_mipmaps(site::SiteDEM, layered::Bool)
+    if site.H % 16 == 0 && site.W % 16 == 0
+        return build_site_mipmaps_minmax(site)
+    end
+    layered && return nothing, nothing
+    error("Site DEM dims must be a multiple of 16 for site-only mipmaps; got $(site.H)x$(site.W)")
 end
 
 function _mapset_stack(loaded)
@@ -421,6 +448,7 @@ function _write_manifest_csv(path::AbstractString, spec::MapsetSpec, backend, De
                 println(io, join((_csv_cell(prefix), _csv_cell("kind"), _csv_cell("site_dem")), ","))
                 println(io, join((_csv_cell(prefix), _csv_cell("datatype"),
                                   _csv_cell(layer_spec.float32 ? "Float32" : "Int16")), ","))
+                println(io, join((_csv_cell(prefix), _csv_cell("cutoff"), _csv_cell(layer_spec.cutoff)), ","))
             elseif layer_spec isa PolarDEMLayerSpec
                 println(io, join((_csv_cell(prefix), _csv_cell("kind"), _csv_cell("polar_dem")), ","))
                 println(io, join((_csv_cell(prefix), _csv_cell("height"), _csv_cell(layer_spec.H)), ","))
