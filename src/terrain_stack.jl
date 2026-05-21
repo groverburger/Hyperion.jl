@@ -1340,7 +1340,8 @@ function _generate_layered_polar_stack_gpu(
     observer_km = Float32(observer_height_m / 1000.0)
     layer_count = length(farfields) + 1
     farfield = farfields[1]
-    farfield2 = length(farfields) == 2 ? farfields[2] : farfield
+    has_second_farfield = length(farfields) == 2
+    farfield2 = has_second_farfield ? farfields[2] : farfield
     packed = inner_source isa SiteTerrain ?
         _precompute_site_polar_stack(inner_source, farfield,
                                      sun_pos_km, earth_pos_km, observer_km) :
@@ -1376,20 +1377,26 @@ function _generate_layered_polar_stack_gpu(
     ldem2_H, ldem2_W = size(farfield2.data)
 
     d_site = DeviceArray(inner_data)
-    geom_packed = zeros(Float32, site_H_total, site_W_total, 6)
-    if inner_source isa GeometryGridTerrain
-        geom_packed[:, :, 1] .= inner_source.datum_x
-        geom_packed[:, :, 2] .= inner_source.datum_y
-        geom_packed[:, :, 3] .= inner_source.datum_z
-        geom_packed[:, :, 4] .= inner_source.up_x
-        geom_packed[:, :, 5] .= inner_source.up_y
-        geom_packed[:, :, 6] .= inner_source.up_z
+    geom_packed = if inner_source isa GeometryGridTerrain
+        geom = zeros(Float32, site_H_total, site_W_total, 6)
+        geom[:, :, 1] .= inner_source.datum_x
+        geom[:, :, 2] .= inner_source.datum_y
+        geom[:, :, 3] .= inner_source.datum_z
+        geom[:, :, 4] .= inner_source.up_x
+        geom[:, :, 5] .= inner_source.up_y
+        geom[:, :, 6] .= inner_source.up_z
+        geom
+    else
+        zeros(Float32, 1, 1, 6)
     end
     d_geom = DeviceArray(geom_packed)
     d_ldem_max = ntuple(i -> DeviceArray(farfield.max_mipmaps[i]), N_MIPMAP_LEVELS)
-    d_ldem_min = ntuple(i -> DeviceArray(farfield.min_mipmaps[i]), N_MIPMAP_LEVELS)
-    d_ldem2_max = ntuple(i -> DeviceArray(farfield2.max_mipmaps[i]), N_MIPMAP_LEVELS)
-    d_ldem2_min = ntuple(i -> DeviceArray(farfield2.min_mipmaps[i]), N_MIPMAP_LEVELS)
+    min_placeholder = Matrix{eltype(farfield.data)}(undef, 1, 1)
+    d_ldem_min = ntuple(_ -> DeviceArray(min_placeholder), N_MIPMAP_LEVELS)
+    d_ldem2_max = has_second_farfield ?
+        ntuple(i -> DeviceArray(farfield2.max_mipmaps[i]), N_MIPMAP_LEVELS) :
+        ntuple(_ -> DeviceArray(min_placeholder), N_MIPMAP_LEVELS)
+    d_ldem2_min = ntuple(_ -> DeviceArray(min_placeholder), N_MIPMAP_LEVELS)
     d_packed = DeviceArray(packed)
     d_atan = DeviceArray(ATAN_LUT)
     d_iparams = DeviceArray(Int32[

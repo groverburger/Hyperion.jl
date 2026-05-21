@@ -757,7 +757,10 @@ function _render_stack_source_gpu(
     azel[:, :, 8] .= dsn_tan
 
     d_max = ntuple(i -> DeviceArray(max_mipmaps[i]), N_MIPMAP_LEVELS)
-    d_min = ntuple(i -> DeviceArray(min_mipmaps[i]), N_MIPMAP_LEVELS)
+    # The cmin early-termination path was removed from `_gpu_cast_ray_state`;
+    # min mipmaps remain part of the public API but are not read by the kernel.
+    min_placeholder = Matrix{T}(undef, 1, 1)
+    d_min = ntuple(_ -> DeviceArray(min_placeholder), N_MIPMAP_LEVELS)
     d_azel = DeviceArray(azel)
     d_atan = DeviceArray(ATAN_LUT)
     d_sun_out     = DeviceArray(zeros(UInt8, H, W))
