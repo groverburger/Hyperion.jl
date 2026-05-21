@@ -6,21 +6,23 @@ using Hyperion
 const Hyp = Hyperion
 
 const PROJECT_ROOT = dirname(@__DIR__)
-const DEFAULT_NAME = "viper8_1m_250m_radius_shirley_2027_09_24_10frames"
+const DEFAULT_NAME = "viper8_1m_full_250m_radius_shirley_2027_09_24_to_2027_10_12"
 const DEFAULT_OUTROOT = joinpath(PROJECT_ROOT, "data", "outputs")
 const DEFAULT_START = DateTime(2027, 9, 24, 6, 0, 0)
-const DEFAULT_STOP = DateTime(2027, 9, 25, 0, 0, 0)
+const DEFAULT_STOP = DateTime(2027, 10, 12, 0, 0, 0)
 const DEFAULT_FRAME_STEP = Hour(2)
 const DEFAULT_AZEL_STEP = Hour(1)
+const DEFAULT_SITE_TIF = joinpath(PROJECT_ROOT, "data", "inputs", "viper_sfs_dem_8_0.tif")
 const DEFAULT_LAT_DEG = -85.467
 const DEFAULT_LON_DEG = 32.015
 const DEFAULT_RADIUS_M = 250.0
-const DEFAULT_ORIGIN_ROW = 3361
-const DEFAULT_ORIGIN_COL = 3590
+const DEFAULT_ORIGIN_ROW = 9699
+const DEFAULT_ORIGIN_COL = 10028
 
 Base.@kwdef struct Options
     name::String = DEFAULT_NAME
     outroot::String = DEFAULT_OUTROOT
+    site_path::String = DEFAULT_SITE_TIF
     start_time::DateTime = DEFAULT_START
     stop_time::DateTime = DEFAULT_STOP
     frame_step::Period = DEFAULT_FRAME_STEP
@@ -40,14 +42,15 @@ function _usage()
     Usage:
       julia --project scripts/generate_viper8_1m_radius_shirley_mapset.jl [options]
 
-    Generates a VIPER 8.0 1 m site mapset for a square site window, with
-    the Shirley 20 m DEM as farfield.
+    Generates a VIPER 8.0 1 m mapset from the full VIPER 8.0 GeoTIFF for
+    a square site window, with the Shirley 20 m DEM as farfield.
 
     Defaults:
       --name=$DEFAULT_NAME
       --out=$(DEFAULT_OUTROOT)
+      --site=$(DEFAULT_SITE_TIF)
       --start=2027-09-24T06:00:00
-      --stop=2027-09-25T00:00:00
+      --stop=2027-10-12T00:00:00
       --step-hours=2
       --azel-step-hours=1
       --lat=-85.467
@@ -60,6 +63,7 @@ function _usage()
     Options:
       --name=<name>             Output mapset directory name under --out.
       --out=<path>              Output root directory.
+      --site=<path>             Full VIPER 8.0 site DEM GeoTIFF.
       --start=<datetime>        Start timestamp.
       --stop=<datetime>         Stop timestamp, inclusive.
       --step-hours=<n>          Sun/DSN frame cadence in hours.
@@ -132,6 +136,8 @@ function _parse_args(args)
             opts = Options(opts; name = split(arg, "=", limit = 2)[2])
         elseif startswith(arg, "--out=")
             opts = Options(opts; outroot = split(arg, "=", limit = 2)[2])
+        elseif startswith(arg, "--site=")
+            opts = Options(opts; site_path = split(arg, "=", limit = 2)[2])
         elseif startswith(arg, "--start=")
             opts = Options(opts; start_time = _parse_datetime(split(arg, "=", limit = 2)[2]))
         elseif startswith(arg, "--stop=")
@@ -262,7 +268,8 @@ end
 
 function main()
     opts = _parse_args(ARGS)
-    site_path = Hyp.require_viper8_nobile_crop_tif!()
+    site_path = abspath(opts.site_path)
+    isfile(site_path) || error("site DEM not found: $site_path")
     farfield_path = Hyp.require_shirley_ldem!()
     site = Hyp.load_site_dem_f32(site_path)
     (window, center_pixel), window_mode = _resolve_window(site, opts)
@@ -273,7 +280,7 @@ function main()
         opts.name,
         [
             Hyp.SiteDEMLayer(site_path;
-                name = "VIPER 8.0 Nobile 1m crop $(opts.radius_m)m radius",
+                name = "VIPER 8.0 full 1m DEM $(opts.radius_m)m radius",
                 window = window),
             Hyp.PolarDEMLayer(farfield_path; name = "Shirley LDEM 80S 20m"),
         ],
