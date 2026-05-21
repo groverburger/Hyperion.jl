@@ -22,7 +22,7 @@ All three ran the same `scripts/bitexact_test.jl` over the canonical
 
 ## How the audit was produced
 
-1. **Mac, before drive moved:** test/bitexact.jl + test/site_1m.jl SHAs
+1. **Mac, before drive moved:** `test/bitexact.jl` + legacy 1m site-only SHAs
    were freshly pinned on Apple Silicon (the canonical pin).
 2. **Windows machine** (drive plugged into a Windows PC with NVIDIA GPU):
    ran `scripts/cross_vendor_test.ps1` which:
@@ -50,7 +50,7 @@ pinned suites passed:
 
 - `test/bitexact.jl` — 20-timestamp 20m LDEM SHAs identical to the
   Apple-Silicon pin.
-- `test/site_1m.jl` — 256×256 1m nobile_1m.tif SHAs identical to the
+- Legacy 1m site-only pin — 256×256 1m nobile_1m.tif SHAs identical to the
   Apple-Silicon pin.
 
 This proves Windows x86 CPU Float32 is byte-identical to Apple Silicon

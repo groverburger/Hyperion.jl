@@ -207,10 +207,6 @@ Run-Step "CUDA targeted terrain stack tests" {
     julia --project test/terrain_stack.jl
 }
 
-Run-Step "CUDA 1m site regression" {
-    julia --project test/site_1m.jl
-}
-
 if (-not $SkipBitexactHarness) {
     Run-Step "CUDA forensic bitexact harness" {
         julia --project scripts/bitexact_test.jl

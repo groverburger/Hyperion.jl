@@ -30,11 +30,8 @@ site_max, site_min = Hyp.build_site_mipmaps_minmax(site)
 
 println("Loading 20m farfield LDEM ...")
 ldem = Hyp.load_ldem(Hyp.require_shirley_ldem!())
-# The current site+farfield continuation kernel samples the farfield at
-# level 0. Keep placeholder mipmap tuples for the terrain-source contract
-# without paying the full 30k x 30k pyramid build cost in this demo.
-ldem_max = ntuple(_ -> ldem.data, Hyp.N_MIPMAP_LEVELS)
-ldem_min = ntuple(_ -> ldem.data, Hyp.N_MIPMAP_LEVELS)
+println("Building 20m farfield mipmaps ...")
+ldem_max, ldem_min = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 
 println("Initialising SPICE ...")
 Hyp.init_spice(joinpath(@__DIR__, "..", "kernels"))

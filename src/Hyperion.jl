@@ -1,5 +1,7 @@
 module Hyperion
 
+export MapsetSpec, SiteDEMLayer, PolarDEMLayer, generate_mapset
+
 # Live-only build: GPU-first, cross-platform via KernelAbstractions.
 # The precomputed-horizons pipeline and the CPU live path have been removed.
 # See docs/algorithms.md on master for the full historical comparison.
@@ -13,6 +15,7 @@ include("site_dem.jl")          # 1m site DEM: load, resample, run kernel
 include("terrain_stack.jl")     # site-aligned terrain-stack render model
 include("test_data.jl")         # local Shirley LDEM validation + derived fixtures
 include("correctness.jl")       # NAC ground-truth correctness data discovery
+include("mapsets.jl")           # reproducible mapset generation entrypoint
 
 function __init__()
     if !verify_lut_integrity()
