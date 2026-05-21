@@ -15,6 +15,8 @@ const DEFAULT_AZEL_STEP = Hour(1)
 const DEFAULT_LAT_DEG = -85.467
 const DEFAULT_LON_DEG = 32.015
 const DEFAULT_RADIUS_M = 250.0
+const DEFAULT_ORIGIN_ROW = 3361
+const DEFAULT_ORIGIN_COL = 3590
 
 Base.@kwdef struct Options
     name::String = DEFAULT_NAME
@@ -26,6 +28,8 @@ Base.@kwdef struct Options
     lat_deg::Float64 = DEFAULT_LAT_DEG
     lon_deg::Float64 = DEFAULT_LON_DEG
     radius_m::Float64 = DEFAULT_RADIUS_M
+    origin_row::Union{Nothing,Int} = DEFAULT_ORIGIN_ROW
+    origin_col::Union{Nothing,Int} = DEFAULT_ORIGIN_COL
     backend::Symbol = :auto
     overwrite::Bool = false
     dry_run::Bool = false
@@ -36,8 +40,8 @@ function _usage()
     Usage:
       julia --project scripts/generate_viper8_1m_radius_shirley_mapset.jl [options]
 
-    Generates a VIPER 8.0 1 m site mapset for a runtime-computed square
-    window centered on a lat/lon, with the Shirley 20 m DEM as farfield.
+    Generates a VIPER 8.0 1 m site mapset for a square site window, with
+    the Shirley 20 m DEM as farfield.
 
     Defaults:
       --name=$DEFAULT_NAME
@@ -49,6 +53,8 @@ function _usage()
       --lat=-85.467
       --lon=32.015
       --radius-m=250
+      --origin-row=$DEFAULT_ORIGIN_ROW
+      --origin-col=$DEFAULT_ORIGIN_COL
       --backend=auto
 
     Options:
@@ -61,6 +67,9 @@ function _usage()
       --lat=<deg>               Center latitude in degrees.
       --lon=<deg>               Center longitude in degrees.
       --radius-m=<m>            Half-width/half-height of the square window.
+      --origin-row=<row>        Fixed zero-based site window origin row.
+      --origin-col=<col>        Fixed zero-based site window origin column.
+      --from-lat-lon            Compute the window from --lat/--lon instead.
       --backend=auto|metal|cuda|cpu
       --overwrite               Reuse an existing output directory.
       --dry-run                 Print resolved settings without rendering.
@@ -87,6 +96,12 @@ end
 function _parse_positive_float(s::AbstractString, flag::AbstractString)
     value = parse(Float64, s)
     value > 0 || error("$flag must be positive")
+    return value
+end
+
+function _parse_nonnegative_int(s::AbstractString, flag::AbstractString)
+    value = parse(Int, s)
+    value >= 0 || error("$flag must be non-negative")
     return value
 end
 
@@ -131,6 +146,12 @@ function _parse_args(args)
             opts = Options(opts; lon_deg = parse(Float64, split(arg, "=", limit = 2)[2]))
         elseif startswith(arg, "--radius-m=")
             opts = Options(opts; radius_m = _parse_positive_float(split(arg, "=", limit = 2)[2], "--radius-m"))
+        elseif startswith(arg, "--origin-row=")
+            opts = Options(opts; origin_row = _parse_nonnegative_int(split(arg, "=", limit = 2)[2], "--origin-row"))
+        elseif startswith(arg, "--origin-col=")
+            opts = Options(opts; origin_col = _parse_nonnegative_int(split(arg, "=", limit = 2)[2], "--origin-col"))
+        elseif arg == "--from-lat-lon"
+            opts = Options(opts; origin_row = nothing, origin_col = nothing)
         elseif startswith(arg, "--backend=")
             opts = Options(opts; backend = _parse_backend(split(arg, "=", limit = 2)[2]))
         elseif arg == "--overwrite"
@@ -184,6 +205,28 @@ function _runtime_window(site, lat_deg::Real, lon_deg::Real, radius_m::Real)
     return (origin_r, origin_c, H, W), (row, col)
 end
 
+function _fixed_window(site, origin_r::Int, origin_c::Int, radius_m::Real)
+    radius_px = round(Int, Float64(radius_m) / site.pixel_size_m)
+    radius_px > 0 || error("radius is smaller than one site pixel")
+    H = 2 * radius_px
+    W = 2 * radius_px
+    origin_r + H <= site.H ||
+        error("fixed window exceeds site DEM height: row=$origin_r height=$H site_height=$(site.H)")
+    origin_c + W <= site.W ||
+        error("fixed window exceeds site DEM width: col=$origin_c width=$W site_width=$(site.W)")
+    return (origin_r, origin_c, H, W), (Float64(origin_r + radius_px),
+                                       Float64(origin_c + radius_px))
+end
+
+function _resolve_window(site, opts::Options)
+    if opts.origin_row === nothing || opts.origin_col === nothing
+        opts.origin_row === nothing && opts.origin_col === nothing ||
+            error("--origin-row and --origin-col must be provided together")
+        return _runtime_window(site, opts.lat_deg, opts.lon_deg, opts.radius_m), "lat/lon"
+    end
+    return _fixed_window(site, opts.origin_row, opts.origin_col, opts.radius_m), "fixed origin"
+end
+
 function _count_timestamps(start_time::DateTime, stop_time::DateTime, step::Period)
     n = 0
     t = start_time
@@ -195,7 +238,8 @@ function _count_timestamps(start_time::DateTime, stop_time::DateTime, step::Peri
 end
 
 function _print_plan(opts::Options, site_path::AbstractString,
-                     farfield_path::AbstractString, window, center_pixel)
+                     farfield_path::AbstractString, window, center_pixel,
+                     window_mode::AbstractString)
     outdir = joinpath(opts.outroot, opts.name)
     frame_count = _count_timestamps(opts.start_time, opts.stop_time, opts.frame_step)
     azel_count = _count_timestamps(opts.start_time, opts.stop_time, opts.azel_step)
@@ -203,7 +247,9 @@ function _print_plan(opts::Options, site_path::AbstractString,
     println("Output:      $outdir")
     println("Site DEM:    $site_path")
     println("Farfield:    $farfield_path")
-    println("Center:      lat=$(opts.lat_deg), lon=$(opts.lon_deg)")
+    println("Window mode: $window_mode")
+    window_mode == "lat/lon" &&
+        println("Center:      lat=$(opts.lat_deg), lon=$(opts.lon_deg)")
     @printf("Center px:   row=%.3f, col=%.3f\n", center_pixel[1], center_pixel[2])
     println("Window:      $window (row, col, height, width)")
     println("Radius:      $(opts.radius_m) m")
@@ -219,8 +265,8 @@ function main()
     site_path = Hyp.require_viper8_nobile_crop_tif!()
     farfield_path = Hyp.require_shirley_ldem!()
     site = Hyp.load_site_dem_f32(site_path)
-    window, center_pixel = _runtime_window(site, opts.lat_deg, opts.lon_deg, opts.radius_m)
-    _print_plan(opts, site_path, farfield_path, window, center_pixel)
+    (window, center_pixel), window_mode = _resolve_window(site, opts)
+    _print_plan(opts, site_path, farfield_path, window, center_pixel, window_mode)
     opts.dry_run && return nothing
 
     spec = Hyp.MapsetSpec(
