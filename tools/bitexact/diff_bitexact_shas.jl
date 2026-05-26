@@ -3,10 +3,10 @@
 # data/outputs/bitexact/ (metal/, cuda/, cpu/). Prints the toolchain
 # triplet per backend (so regressions can be localized to a version bump)
 # then an all-pairs MATCH / DIFFER report.
-using Pkg; Pkg.activate(dirname(@__DIR__))
+using Pkg; Pkg.activate(dirname(dirname(@__DIR__)))
 using Printf
 
-const BASE = joinpath(dirname(@__DIR__), "data", "outputs", "bitexact")
+const BASE = joinpath(dirname(dirname(@__DIR__)), "data", "outputs", "bitexact")
 
 "Parse a SHAs.txt file into (header_lines, Vector{(section, Dict(key => sha))})."
 function parse_shas(path)

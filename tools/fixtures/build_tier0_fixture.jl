@@ -30,10 +30,11 @@
 #
 # Run:
 #   LROC_PIPELINE_DIR=/path/to/lroc-nac-maps/derived \
-#       julia --project scripts/correctness/build_tier0_fixture.jl
+#       julia --project tools/fixtures/build_tier0_fixture.jl
 
 using Pkg; Pkg.activate(joinpath(@__DIR__, "..", ".."))
 using Printf
+import SHA
 
 const LROC_PIPELINE_DIR = let raw = get(ENV, "LROC_PIPELINE_DIR", "")
     isempty(raw) && error("LROC_PIPELINE_DIR is required. Set it to the " *
@@ -53,6 +54,12 @@ function ensure_dir(d::AbstractString)
     isdir(d) || mkpath(d)
 end
 
+function sha256_file(path::AbstractString)
+    open(path, "r") do io
+        return bytes2hex(SHA.sha256(io))
+    end
+end
+
 function main()
     @info "building Tier 0 fixture" tier1=LROC_PIPELINE_DIR tier0=TIER0_DIR
 
@@ -64,6 +71,13 @@ function main()
 
     ids = String.(read_ids(ids_path))
     @info "selected NACs" n=length(ids)
+    input_rows = Tuple{String,String,String}[]
+    for (role, path) in (
+            ("smoke_subset_ids", ids_path),
+            ("smoke_subset", sel_csv),
+            ("timestamps", ts_csv))
+        push!(input_rows, (role, abspath(path), sha256_file(path)))
+    end
 
     # ── 1. Copy shadow_20m + sun_frac_20m masks ──────────────────
     for sub in ("shadow_20m", "sun_frac_20m")
@@ -79,6 +93,7 @@ function main()
             src = joinpath(src_dir, "$pid.tif")
             dst = joinpath(dst_dir, "$pid.tif")
             isfile(src) || (@warn "$pid: $sub mask missing at $src"; continue)
+            push!(input_rows, ("$sub/$pid", abspath(src), sha256_file(src)))
             cp(src, dst; force=true)
             n_copied += 1
         end
@@ -103,6 +118,14 @@ function main()
     # ── 3. Copy the selection rationale CSV ──────────────────────
     cp(sel_csv, joinpath(TIER0_DIR, "selection.csv"); force=true)
     @info "  selection.csv" copied=true
+
+    open(joinpath(TIER0_DIR, "input_shas.csv"), "w") do io
+        println(io, "role,path,sha256")
+        for (role, path, sha) in input_rows
+            println(io, join((role, path, sha), ","))
+        end
+    end
+    @info "  input_shas.csv" rows=length(input_rows)
 
     # ── 4. Strip any AppleDouble sidecars macOS may have left ────
     n_appledouble = 0

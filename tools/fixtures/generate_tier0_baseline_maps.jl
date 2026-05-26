@@ -7,9 +7,9 @@ using Hyperion
 const Hyp = Hyperion
 const C = Hyp.Correctness
 
-include(joinpath(@__DIR__, "..", "test", "test_backend.jl"))
+include(joinpath(@__DIR__, "..", "..", "test", "test_backend.jl"))
 
-const PROJECT_ROOT = dirname(@__DIR__)
+const PROJECT_ROOT = dirname(dirname(@__DIR__))
 const SITE_TIF = get(ENV, "HYPERION_SITE_TIF",
     Hyp._nobile_1m_path())
 const DEFAULT_OUTROOT = joinpath(PROJECT_ROOT, "data", "outputs",

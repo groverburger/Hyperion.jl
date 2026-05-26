@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 # A/B benchmark for GPU workgroup size on the live shadow kernel.
 # Pick your backend below.
-using Pkg; Pkg.activate(dirname(@__DIR__))
+using Pkg; Pkg.activate(dirname(dirname(@__DIR__)))
 using Dates, Printf, Statistics
 import Hyperion as Hyp
 
@@ -14,7 +14,7 @@ const DEVICE_ARR = Metal.MtlArray
 # const DEVICE_ARR = CUDA.CuArray
 
 ldem = Hyp.load_ldem(Hyp.require_shirley_ldem!())
-Hyp.init_spice(joinpath(dirname(@__DIR__), "kernels"))
+Hyp.init_spice(joinpath(dirname(dirname(@__DIR__)), "kernels"))
 max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
 
 # Use a high-sun timestamp (slowest in the year) to get the most signal

@@ -28,8 +28,8 @@
 #   # NAC-list mode using LROC capture-time CSV.
 #   julia --project scripts/generate_azel_csv.jl \\
 #       --pixel 9216 18880 \\
-#       --list /Volumes/WD_BLACK/lroc-nac-maps/derived/timestamps.csv \\
-#       --out /Volumes/WD_BLACK/lroc-nac-maps/derived/nac_azel.csv
+#       --list path/to/timestamps.csv \\
+#       --out path/to/nac_azel.csv
 
 using Pkg; Pkg.activate(dirname(@__DIR__))
 using Hyperion

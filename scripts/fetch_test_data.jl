@@ -11,7 +11,7 @@
 #
 # Use this after placing Shirley at `data/inputs/ldem_80s_20m.img`
 # to verify the SHA and produce `data/inputs/nobile_20m.tif` for
-# diagnostic scripts like scripts/azimuth_range.jl.
+# local validation and fixture-generation tools.
 
 using Pkg
 Pkg.activate(dirname(@__DIR__))

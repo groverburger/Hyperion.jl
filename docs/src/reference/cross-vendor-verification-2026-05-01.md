@@ -17,7 +17,7 @@ specific run.
 | `win_cpu/`  | x86_64 Windows            | Julia 1.11.5, KernelAbstractions 0.9.41           |
 | `win_cuda/` | x86_64 Windows + NVIDIA   | Julia 1.11.5, KernelAbstractions 0.9.41, CUDA 5.9.0 |
 
-All three ran the same `scripts/bitexact_test.jl` over the canonical
+All three ran the same `tools/bitexact/bitexact_test.jl` over the canonical
 20-timestamp LDEM region (`origin=(8960,18432)`, `size=512×896`).
 
 ## How the audit was produced
@@ -25,7 +25,7 @@ All three ran the same `scripts/bitexact_test.jl` over the canonical
 1. **Mac, before drive moved:** `test/bitexact.jl` + legacy 1m site-only SHAs
    were freshly pinned on Apple Silicon (the canonical pin).
 2. **Windows machine** (drive plugged into a Windows PC with NVIDIA GPU):
-   ran `scripts/cross_vendor_test.ps1` which:
+   ran `tools/bitexact/cross_vendor_test.ps1` which:
    - Stage 0: `Pkg.instantiate()`
    - Stage A: `Pkg.test()` — full regression on Windows CPU, including
      the 20m LDEM bit-exact pin and the 1m site DEM pin.
@@ -34,11 +34,11 @@ All three ran the same `scripts/bitexact_test.jl` over the canonical
    Then renamed `data/outputs/bitexact/cuda/` → `win_cuda/` and
    `data/outputs/bitexact/cpu/` → `win_cpu/` so they wouldn't be
    overwritten by the upcoming Mac run.
-3. **Mac, drive returned:** ran `scripts/bitexact_test.jl` to repopulate
+3. **Mac, drive returned:** ran `tools/bitexact/bitexact_test.jl` to repopulate
    `data/outputs/bitexact/cpu/`.
 4. **Comparison:**
-   - `scripts/diff_bitexact_shas.jl` — SHA-table all-pairs diff.
-   - `scripts/diff_bitexact_pixels.jl` — per-pixel UInt8 diff of the
+   - `tools/bitexact/diff_bitexact_shas.jl` — SHA-table all-pairs diff.
+   - `tools/bitexact/diff_bitexact_pixels.jl` — per-pixel UInt8 diff of the
      `sun`, `dsn`, `sun_rgb`, `dsn_rgb` raw buffers.
 
 ## What passed
@@ -106,14 +106,14 @@ This audit covers the kernel as of commit `300f557`, which includes:
 
 ```bash
 # Mac: regenerate cpu/ baseline
-julia --project scripts/bitexact_test.jl
+julia --project tools/bitexact/bitexact_test.jl
 
 # Windows (drive on Windows PC): regenerate win_cpu/ + win_cuda/
 .\scripts\cross_vendor_test.ps1
 
 # Compare (any machine with all three dirs present)
-julia --project scripts/diff_bitexact_shas.jl
-julia --project scripts/diff_bitexact_pixels.jl
+julia --project tools/bitexact/diff_bitexact_shas.jl
+julia --project tools/bitexact/diff_bitexact_pixels.jl
 ```
 
 The diff scripts auto-discover any subdirectory of

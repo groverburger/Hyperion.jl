@@ -1,8 +1,8 @@
 # Terrain-Stack Kernel Direction
 
 This note records the intended shape of the unified terrain-stack renderer.
-It should be read alongside `docs/algorithms.md` and
-`docs/cross-vendor-determinism.md`; all kernel changes must preserve the
+It should be read alongside `docs/src/reference/algorithms.md` and
+`docs/src/reference/cross-vendor-determinism.md`; all kernel changes must preserve the
 same bit-exactness rules: explicit `fma` for reconstructible multiply-add
 or multiply-subtract dataflow, no `log2` for mipmap level selection, no
 new hot-loop transcendental calls, and test coverage against the pinned

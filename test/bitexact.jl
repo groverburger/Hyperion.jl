@@ -11,13 +11,13 @@
 #
 # If this test fails, either:
 #   (a) you changed the kernel math intentionally → regenerate baselines
-#       (`julia --project scripts/bitexact_test.jl` on every backend you
-#        support, diff with scripts/diff_bitexact_shas.jl, then copy
+#       (`julia --project tools/bitexact/bitexact_test.jl` on every backend you
+#        support, diff with tools/bitexact/diff_bitexact_shas.jl, then copy
 #        `data/outputs/bitexact/metal/<ts>/sun.png,dsn.png` to
 #        `test/fixtures/bitexact/<ts>_{sun,dsn}.png`, and refresh the
 #        KNOWN_GOOD table below), or
 #   (b) cross-vendor determinism regressed → see
-#       docs/cross-vendor-determinism.md for the 14 documented sources
+#       docs/src/reference/cross-vendor-determinism.md for the 14 documented sources
 #       of FP divergence and how to audit.
 #
 # Skipped if the LDEM is not available (flagged as HAS_LDEM in runtests.jl).
@@ -369,7 +369,7 @@ const KNOWN_GOOD = Dict{String, NamedTuple}(
     ),
 )
 
-# Palette application — must match scripts/bitexact_test.jl's version
+# Palette application — must match tools/bitexact/bitexact_test.jl's version
 # exactly, since the sun_rgb / dsn_rgb SHAs in KNOWN_GOOD were computed
 # from this layout.
 function _palette_apply(data::Matrix{UInt8}, palette::Matrix{UInt8})

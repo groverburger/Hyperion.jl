@@ -2,6 +2,7 @@ __pycache__/
 Manifest.toml
 ._*
 .claude/
+docs/build/
 
 # Test data — fetched via scripts/fetch_test_data.jl, not stored in git
 data/inputs/

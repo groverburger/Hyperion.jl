@@ -145,7 +145,7 @@ include("terrain_stack.jl")
 #       include(joinpath(PROJECT_ROOT, "test", "correctness.jl"))'
 #
 # Or use the convenience runner:
-#   julia --project scripts/correctness/run_test.jl
+#   julia --project -e 'using Pkg; Pkg.test()'
 if get(ENV, "HYP_SKIP_CORRECTNESS", "0") == "1"
     @info "Tier 0 correctness test skipped (HYP_SKIP_CORRECTNESS=1)"
 else

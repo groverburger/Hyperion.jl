@@ -11,12 +11,12 @@
 # hardcoded SHA table + committed PNG fixtures. That test is the
 # canonical regression check. This script exists for:
 #   - generating fresh baselines after an intentional algorithm change
-#     (run on every backend, diff with scripts/diff_bitexact_shas.jl,
+#     (run on every backend, diff with tools/bitexact/diff_bitexact_shas.jl,
 #     then refresh test/fixtures/ + test/bitexact.jl's KNOWN_GOOD),
 #   - cross-vendor forensic audits with an actual Metal or CUDA GPU,
 #   - full-depth inspection via raw .bin buffers (test/bitexact.jl
 #     only loads PNG fixtures, not raw floats).
-using Pkg; Pkg.activate(dirname(@__DIR__))
+using Pkg; Pkg.activate(dirname(dirname(@__DIR__)))
 using Dates, Printf, SHA
 using KernelAbstractions: KernelAbstractions, @kernel, @index, synchronize
 import FileIO
@@ -42,7 +42,7 @@ end
 # and `sqrt` produce the IEEE-rn bit patterns our bit-exactness guarantees
 # require. If a compiler flag or math mode has shifted, the whole premise
 # of cross-vendor bit-exactness collapses — stop now rather than emit a
-# misleading SHA. See docs/cross-vendor-determinism.md §§ 8-9.
+# misleading SHA. See docs/src/reference/cross-vendor-determinism.md §§ 8-9.
 
 @kernel function _math_guard_kernel!(out, a::Float32)
     idx = @index(Global)
@@ -96,14 +96,14 @@ function _verify_math_semantics(backend, DeviceArray)
         error("IEEE math guard FAILED on backend=$BACKEND_NAME:\n" *
               join(fail, "\n") *
               "\n  Compiler or math mode has shifted. Cross-vendor bit-exactness" *
-              "\n  is no longer guaranteed. See docs/cross-vendor-determinism.md.")
+              "\n  is no longer guaranteed. See docs/src/reference/cross-vendor-determinism.md.")
     end
     @info "IEEE math guard PASSED" backend=BACKEND_NAME
 end
 
 _verify_math_semantics(BACKEND, DEVICE_ARR)
 
-const REPO    = dirname(@__DIR__)
+const REPO    = dirname(dirname(@__DIR__))
 const OUT     = joinpath(REPO, "data", "outputs", "bitexact", BACKEND_NAME)
 const KERNELS = joinpath(REPO, "kernels")
 mkpath(OUT)

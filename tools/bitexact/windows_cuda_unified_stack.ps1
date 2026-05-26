@@ -5,13 +5,13 @@
 # Run from PowerShell on the Windows machine:
 #
 #   cd D:\Hyperion.jl
-#   .\scripts\windows_cuda_unified_stack.ps1
+#   .\tools\bitexact\windows_cuda_unified_stack.ps1
 #
 # Optional:
 #
-#   .\scripts\windows_cuda_unified_stack.ps1 -SkipFullPkgTest
-#   .\scripts\windows_cuda_unified_stack.ps1 -SkipTier0Products
-#   .\scripts\windows_cuda_unified_stack.ps1 -SiteTif "E:\data\nobile_1m.tif"
+#   .\tools\bitexact\windows_cuda_unified_stack.ps1 -SkipFullPkgTest
+#   .\tools\bitexact\windows_cuda_unified_stack.ps1 -SkipTier0Products
+#   .\tools\bitexact\windows_cuda_unified_stack.ps1 -SiteTif "E:\data\nobile_1m.tif"
 #
 # What this does:
 #   1. Verifies/pulls the unified-terrain-kernel branch.
@@ -209,10 +209,10 @@ Run-Step "CUDA targeted terrain stack tests" {
 
 if (-not $SkipBitexactHarness) {
     Run-Step "CUDA forensic bitexact harness" {
-        julia --project scripts/bitexact_test.jl
+        julia --project tools/bitexact/bitexact_test.jl
     }
 } else {
-    Log "Skipping scripts/bitexact_test.jl because -SkipBitexactHarness was supplied."
+    Log "Skipping tools/bitexact/bitexact_test.jl because -SkipBitexactHarness was supplied."
 }
 
 if (-not $SkipFullPkgTest) {
@@ -225,7 +225,7 @@ if (-not $SkipFullPkgTest) {
 
 if (-not $SkipTier0Products) {
     Run-Step "Generate Tier 0 20m LNSI + full 1m farfield products" {
-        julia --project scripts/generate_tier0_baseline_maps.jl "--out=$Tier0Out"
+        julia --project tools/fixtures/generate_tier0_baseline_maps.jl "--out=$Tier0Out"
     }
 
     Run-Step "Verify generated Tier 0 product dimensions" {

@@ -3,10 +3,10 @@
 # every backend directory present in data/outputs/bitexact/ (cpu, metal,
 # cuda). Prints all pairs so three-way bit-exactness can be read at a
 # glance.
-using Pkg; Pkg.activate(dirname(@__DIR__))
+using Pkg; Pkg.activate(dirname(dirname(@__DIR__)))
 using Printf, Statistics
 
-const BASE = joinpath(dirname(@__DIR__), "data", "outputs", "bitexact")
+const BASE = joinpath(dirname(dirname(@__DIR__)), "data", "outputs", "bitexact")
 H, W = 512, 896
 
 load_u8(path) = reshape(read(path), (H, W))

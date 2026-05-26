@@ -1,6 +1,6 @@
 # Cross-vendor bit-exactness: Metal ↔ CUDA
 
-`docs/algorithms.md` documented seven bugs fixed to make the live shadow
+`docs/src/reference/algorithms.md` documented seven bugs fixed to make the live shadow
 pipeline bit-exact between CPU and Metal GPU on Apple Silicon. That
 establishes *intra-vendor* determinism. Cross-vendor (Metal ↔ CUDA) is
 a stricter bar: different LLVM backends compiling the same Julia source
@@ -44,7 +44,7 @@ Runtime on CPU backend: ~10-15 min for the 20-timestamp regression.
 
 For cross-vendor audits (actual Metal or CUDA hardware) and for
 regenerating baselines after an intentional algorithm change,
-`scripts/bitexact_test.jl` is the forensic harness. It produces the
+`tools/bitexact/bitexact_test.jl` is the forensic harness. It produces the
 same 20-timestamp SHA table the test checks against, plus raw .bin
 buffers for byte-level diffing via `diff_bitexact_shas.jl` /
 `diff_bitexact_pixels.jl`. To refresh committed baselines after a
@@ -75,7 +75,7 @@ so a broken host doesn't mask a broken backend.
 
 ### Production + cross-vendor shuttle
 
-1. **`scripts/bitexact_test.jl`** runs 20 representative timestamps
+1. **`tools/bitexact/bitexact_test.jl`** runs 20 representative timestamps
    spread across 2027 × full 896×512 frames: night (full-frame
    twilight-skip), twilight (terminator crossing the frame, hardest case
    for bit-exactness), high-sun (long rays), plus a dozen more spread by
@@ -106,21 +106,21 @@ so a broken host doesn't mask a broken backend.
    metadata chunks) are not vendor-stable — but PNG is lossless, so
    decoded content equals `sun_rgb` / `dsn_rgb` on any platform that
    reads the file.
-2. Run on all three backends: `julia --project scripts/bitexact_test.jl`
+2. Run on all three backends: `julia --project tools/bitexact/bitexact_test.jl`
    with `HYP_BACKEND ∈ {metal, cuda, cpu}`. Metal and cpu run on Mac;
    cuda runs on Windows (plug the drive in, `HYP_BACKEND=cuda julia
-   --project scripts/bitexact_test.jl`). A removable drive shuttles
+   --project tools/bitexact/bitexact_test.jl`). A removable drive shuttles
    outputs between the two machines.
 
 ### N-way comparison
 
-3. **`scripts/diff_bitexact_shas.jl`** — auto-discovers every backend
+3. **`tools/bitexact/diff_bitexact_shas.jl`** — auto-discovers every backend
    present in `data/outputs/bitexact/`, echoes each toolchain header
    (so a regression can be pinned to a specific version bump), then
    reports all-pairs MATCH/DIFFER per intermediate per timestamp. For
    three backends that's three pairs (cpu↔metal, cpu↔cuda, metal↔cuda)
    × 20 timestamps × 14 intermediates = 840 comparisons total.
-4. **`scripts/diff_bitexact_pixels.jl`** — for each pair of backends
+4. **`tools/bitexact/diff_bitexact_pixels.jl`** — for each pair of backends
    with UInt8 buffers on disk, per-timestamp diff stats: count of
    differing pixels, min / median / mean / max |Δ|. Essential for
    distinguishing three different fix paths: *bit-exact*, *isolated

@@ -15,13 +15,14 @@
 # stay reproducible across machines without a GPU.
 #
 # Run:
-#   julia --project scripts/correctness/refresh_baseline.jl
-#   HYP_BACKEND=metal julia --project scripts/correctness/refresh_baseline.jl
+#   julia --project tools/fixtures/refresh_correctness_baseline.jl
+#   HYP_BACKEND=metal julia --project tools/fixtures/refresh_correctness_baseline.jl
 
 using Pkg; Pkg.activate(joinpath(@__DIR__, "..", ".."))
 using Hyperion
 using KernelAbstractions: CPU
 using Printf
+import SHA
 
 const BACKEND_NAME = lowercase(get(ENV, "HYP_BACKEND", "cpu"))
 BACKEND, DEVICE_ARR = if BACKEND_NAME == "metal"
@@ -37,6 +38,12 @@ else
 end
 
 @info "refreshing Tier 0 baseline" backend=BACKEND_NAME
+
+function sha256_file(path::AbstractString)
+    open(path, "r") do io
+        return bytes2hex(SHA.sha256(io))
+    end
+end
 
 @info "loading LDEM"
 ldem_path = Hyperion.require_shirley_ldem!()
@@ -61,6 +68,14 @@ rows = Hyperion.Correctness.score_tier(:tier0;
 baseline_path = Hyperion.Correctness.tier0_baseline_path()
 Hyperion.Correctness.write_baseline_csv(rows, baseline_path)
 @info "baseline updated" path=baseline_path
+
+input_sha_path = joinpath(dirname(baseline_path), "baseline_tier0_input_shas.csv")
+open(input_sha_path, "w") do io
+    println(io, "role,path,sha256")
+    println(io, join(("ldem", abspath(ldem_path), sha256_file(ldem_path)), ","))
+    println(io, join(("baseline_tier0", abspath(baseline_path), sha256_file(baseline_path)), ","))
+end
+@info "baseline input hashes updated" path=input_sha_path
 
 # Brief summary so the user can sanity-check.
 using Statistics
