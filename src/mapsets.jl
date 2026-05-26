@@ -43,6 +43,8 @@ Base.@kwdef struct MapsetSpec
     output_root::String = joinpath(dirname(@__DIR__), "data", "outputs")
     kernels_dir::String = joinpath(dirname(@__DIR__), "kernels")
     workgroup_size::Int = 512
+    tile_height::Int = 1024
+    tile_width::Int = 1024
     verbose::Bool = true
 end
 
@@ -160,10 +162,28 @@ function generate_mapset(spec::MapsetSpec;
     _write_manifest_csv(joinpath(other_dir, "manifest.csv"), spec,
                         backend_obj, DeviceArray)
 
+    tile_height, tile_width = _mapset_tile_size(spec, stack, H, W)
+    tiled_layered = length(stack.sources) > 1 && tile_height > 0 && tile_width > 0
+
     progress = Progress(length(timestamps);
         desc = "Rendering mapset $(spec.name): ",
         showspeed = true,
         enabled = spec.verbose)
+    farfield_cache = tiled_layered ?
+        _prepare_layered_polar_stack_farfield_cache(
+            Tuple(stack.sources[2:end]);
+            DeviceArray = DeviceArray) :
+        nothing
+    mapset_renderer = length(stack.sources) > 1 && !tiled_layered ?
+        _prepare_layered_polar_stack_gpu_context(
+            stack.sources[1],
+            Tuple(stack.sources[2:end]),
+            spec.observer_height_m;
+            backend = backend_obj,
+            DeviceArray = DeviceArray,
+            workgroup_size = spec.workgroup_size,
+            debug_outputs = false) :
+        nothing
 
     for (idx, ts) in pairs(timestamps)
         frame_t0 = time()
@@ -179,13 +199,27 @@ function generate_mapset(spec::MapsetSpec;
                 backend = backend_obj,
                 DeviceArray = DeviceArray,
                 workgroup_size = spec.workgroup_size)
+        elseif mapset_renderer !== nothing
+            sun_frame, dsn_frame = _render_layered_polar_stack_gpu(
+                mapset_renderer, sun_t, earth_t)
+            (sun_frame, dsn_frame, nothing, nothing)
+        elseif tiled_layered
+            sun_frame, dsn_frame = _render_layered_mapset_frame_tiled(
+                first, Tuple(stack.sources[2:end]), sun_t, earth_t, spec;
+                backend = backend_obj,
+                DeviceArray = DeviceArray,
+                farfield_cache = farfield_cache,
+                tile_height = tile_height,
+                tile_width = tile_width)
+            (sun_frame, dsn_frame, nothing, nothing)
         else
             Base.invokelatest(
                 render_terrain_stack_gpu,
                 stack, sun_t, earth_t, spec.observer_height_m;
                 backend = backend_obj,
                 DeviceArray = DeviceArray,
-                workgroup_size = spec.workgroup_size)
+                workgroup_size = spec.workgroup_size,
+                debug_outputs = false)
         end
         tag = _mapset_timestamp_tag(ts)
         save_indexed_png(sun, SUN_PALETTE, joinpath(sun_dir, "sun.$tag.png"))
@@ -197,6 +231,59 @@ function generate_mapset(spec::MapsetSpec;
     end
 
     return outdir
+end
+
+function _mapset_tile_size(spec::MapsetSpec, stack::TerrainStack, H::Int, W::Int)
+    length(stack.sources) > 1 || return (0, 0)
+    spec.tile_height > 0 || error("tile_height must be positive for layered mapsets")
+    spec.tile_width > 0 || error("tile_width must be positive for layered mapsets")
+    if H <= spec.tile_height && W <= spec.tile_width
+        return (0, 0)
+    end
+    return min(spec.tile_height, H), min(spec.tile_width, W)
+end
+
+function _render_layered_mapset_frame_tiled(
+        first,
+        farfields::Tuple,
+        sun_pos_km::NTuple{3, Float64},
+        earth_pos_km::NTuple{3, Float64},
+        spec::MapsetSpec;
+        backend,
+        DeviceArray,
+        farfield_cache,
+        tile_height::Int,
+        tile_width::Int)
+
+    first.kind === :site ||
+        error("tiled layered mapset rendering currently requires a site DEM first layer")
+    origin_r, origin_c, H, W = _mapset_render_window(first)
+    sun = Matrix{UInt8}(undef, H, W)
+    dsn = Matrix{UInt8}(undef, H, W)
+    for local_r in 0:tile_height:(H - 1)
+        h = min(tile_height, H - local_r)
+        for local_c in 0:tile_width:(W - 1)
+            w = min(tile_width, W - local_c)
+            tile_window = (origin_r + local_r, origin_c + local_c, h, w)
+            tile_source = SiteTerrain(first.dem; window = tile_window)
+            ctx = _prepare_layered_polar_stack_gpu_context(
+                tile_source, farfields, spec.observer_height_m;
+                backend = backend,
+                DeviceArray = DeviceArray,
+                workgroup_size = spec.workgroup_size,
+                debug_outputs = false,
+                farfield_cache = farfield_cache)
+            sun_tile, dsn_tile = _render_layered_polar_stack_gpu(
+                ctx, sun_pos_km, earth_pos_km)
+            sun[local_r + 1:local_r + h, local_c + 1:local_c + w] .= sun_tile
+            dsn[local_r + 1:local_r + h, local_c + 1:local_c + w] .= dsn_tile
+            ctx = nothing
+            sun_tile = nothing
+            dsn_tile = nothing
+            GC.gc(false)
+        end
+    end
+    return sun, dsn
 end
 
 function _resolve_mapset_backend(backend)
@@ -291,9 +378,12 @@ function _load_mapset_layers(specs)
     loaded = _LoadedMapsetLayer[]
     for (i, spec) in pairs(specs)
         if spec isa SiteDEMLayerSpec
-            site = spec.float32 ? load_site_dem_f32(spec.path) : load_site_dem(spec.path)
-            window = _default_window(spec.window, site.H, site.W)
-            site = spec.cutoff ? _cutoff_site_dem(site, window) : site
+            info = read_site_dem_info(spec.path)
+            window = _default_window(spec.window, info.H, info.W)
+            load_window = spec.cutoff ? window : nothing
+            site = spec.float32 ?
+                load_site_dem_f32(spec.path; window = load_window) :
+                load_site_dem(spec.path; window = load_window)
             source_window = spec.cutoff ? (0, 0, site.H, site.W) : window
             max_mm, min_mm = _site_mapset_mipmaps(site, length(specs) > 1)
             source = SiteTerrain(site; window = source_window)
@@ -473,6 +563,8 @@ function _mapset_manifest_rows(spec::MapsetSpec)
         "output_root" => abspath(spec.output_root),
         "kernels_dir" => abspath(spec.kernels_dir),
         "workgroup_size" => string(spec.workgroup_size),
+        "tile_height" => string(spec.tile_height),
+        "tile_width" => string(spec.tile_width),
     ]
 end
 

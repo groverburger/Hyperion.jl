@@ -280,7 +280,7 @@ function main()
     site_path = abspath(opts.site_path)
     isfile(site_path) || error("site DEM not found: $site_path")
     farfield_path = Hyp.require_shirley_ldem!()
-    site = Hyp.load_site_dem_f32(site_path)
+    site = Hyp.read_site_dem_info(site_path)
     (window, center_pixel), window_mode = _resolve_window(site, opts)
     _print_plan(opts, site_path, farfield_path, window, center_pixel, window_mode)
     opts.dry_run && return nothing

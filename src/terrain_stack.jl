@@ -226,6 +226,7 @@ function render_terrain_stack_gpu(
         backend,
         DeviceArray,
         workgroup_size::Int = 512,
+        debug_outputs::Bool = true,
         site_mipmap_base::Float32 = MIPMAP_BASE_THRESH,
         site_sun_local = nothing,
         site_earth_local = nothing,
@@ -323,7 +324,8 @@ function render_terrain_stack_gpu(
             sun_pos_km, earth_pos_km, observer_height_m;
             backend = backend,
             DeviceArray = DeviceArray,
-            workgroup_size = workgroup_size)
+            workgroup_size = workgroup_size,
+            debug_outputs = debug_outputs)
     end
     error("unsupported terrain stack")
 end
@@ -677,8 +679,22 @@ function _precompute_site_polar_stack(site_source::SiteTerrain,
                                       sun_pos_km::NTuple{3, Float64},
                                       earth_pos_km::NTuple{3, Float64},
                                       observer_km::Float32)
+    origin_r, origin_c, H, W = _source_window(site_source)
+    packed = Array{Float32, 3}(undef, H, W, 14)
+    return _precompute_site_polar_stack!(
+        packed, site_source, farfield, sun_pos_km, earth_pos_km, observer_km)
+end
+
+function _precompute_site_polar_stack!(packed::Array{Float32,3},
+                                       site_source::SiteTerrain,
+                                       farfield::PolarStereoTerrain,
+                                       sun_pos_km::NTuple{3, Float64},
+                                       earth_pos_km::NTuple{3, Float64},
+                                       observer_km::Float32)
     site = site_source.site
     origin_r, origin_c, H, W = _source_window(site_source)
+    size(packed) == (H, W, 14) ||
+        error("packed site-polar stack buffer has size $(size(packed)); expected $((H, W, 14))")
     site_pix_km = Float32(site.pixel_size_m / 1000.0)
     site_s0 = Float32(site.s0)
     site_l0 = Float32(site.l0)
@@ -696,7 +712,6 @@ function _precompute_site_polar_stack(site_source::SiteTerrain,
         pixel_size_km = site_pix_km,
         elev_scale_to_m = site.elev_scale_to_m)
 
-    packed = Array{Float32, 3}(undef, H, W, 14)
     Threads.@threads for c in 1:W
         @inbounds for r in 1:H
             sc = origin_c + c - 1
@@ -1005,6 +1020,7 @@ end
     site_origin_row = iparams[Int32(3)]
     site_origin_col = iparams[Int32(4)]
     layer_count = iparams[Int32(5)]
+    debug_outputs = iparams[Int32(6)] != Int32(0)
 
     site_H_total = layer_iparams[Int32(1), Int32(1)]
     site_W_total = layer_iparams[Int32(2), Int32(1)]
@@ -1314,16 +1330,261 @@ end
         _gpu_encode_sun_u8(sun_frac)
     dsn_out[local_row + Int32(1), local_col + Int32(1)] =
         _gpu_encode_dsn_u8(over_hz_deg)
-    de_debug[local_row + Int32(1), local_col + Int32(1)] = de
-    sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(1)] = d_0
-    sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(2)] = d_1
-    sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(3)] = d_2
-    sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(4)] = d_3
-    sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(5)] = d_4
-    sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(6)] = d_5
-    sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(7)] = d_6
-    sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(8)] = d_7
+    if debug_outputs
+        de_debug[local_row + Int32(1), local_col + Int32(1)] = de
+        sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(1)] = d_0
+        sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(2)] = d_1
+        sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(3)] = d_2
+        sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(4)] = d_3
+        sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(5)] = d_4
+        sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(6)] = d_5
+        sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(7)] = d_6
+        sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(8)] = d_7
     end
+    end
+end
+
+struct _LayeredPolarStackGPUContext
+    inner_source::Any
+    farfields::Any
+    backend::Any
+    workgroup_size::Int
+    origin_r::Int
+    origin_c::Int
+    H::Int
+    W::Int
+    observer_km::Float32
+    packed::Array{Float32,3}
+    d_site::Any
+    d_geom::Any
+    d_ldem_max::Any
+    d_ldem_min::Any
+    d_ldem2_max::Any
+    d_ldem2_min::Any
+    d_packed::Any
+    d_atan::Any
+    d_iparams::Any
+    d_layer_iparams::Any
+    d_layer_fparams::Any
+    d_edge_fparams::Any
+    d_fparams::Any
+    d_sun_out::Any
+    d_dsn_out::Any
+    d_de_dbg::Any
+    d_sun_rays_dbg::Any
+end
+
+struct _LayeredPolarStackFarfieldDeviceCache
+    d_ldem_max::Any
+    d_ldem_min::Any
+    d_ldem2_max::Any
+    d_ldem2_min::Any
+end
+
+function _prepare_layered_polar_stack_farfield_cache(farfields::Tuple; DeviceArray)
+    farfield = farfields[1]
+    has_second_farfield = length(farfields) == 2
+    farfield2 = has_second_farfield ? farfields[2] : farfield
+    d_ldem_max = ntuple(i -> DeviceArray(farfield.max_mipmaps[i]), N_MIPMAP_LEVELS)
+    min_placeholder = Matrix{eltype(farfield.data)}(undef, 1, 1)
+    d_ldem_min = ntuple(_ -> DeviceArray(min_placeholder), N_MIPMAP_LEVELS)
+    d_ldem2_max = has_second_farfield ?
+        ntuple(i -> DeviceArray(farfield2.max_mipmaps[i]), N_MIPMAP_LEVELS) :
+        ntuple(_ -> DeviceArray(min_placeholder), N_MIPMAP_LEVELS)
+    d_ldem2_min = ntuple(_ -> DeviceArray(min_placeholder), N_MIPMAP_LEVELS)
+    return _LayeredPolarStackFarfieldDeviceCache(
+        d_ldem_max, d_ldem_min, d_ldem2_max, d_ldem2_min)
+end
+
+function _prepare_layered_polar_stack_gpu_context(
+        inner_source::Union{SiteTerrain, GeometryGridTerrain},
+        farfields::Tuple,
+        observer_height_m::Float64;
+        backend,
+        DeviceArray,
+        workgroup_size::Int = 512,
+        debug_outputs::Bool = false,
+        farfield_cache = nothing)
+
+    origin_r, origin_c, H, W = _source_window(inner_source)
+    observer_km = Float32(observer_height_m / 1000.0)
+    layer_count = length(farfields) + 1
+    farfield = farfields[1]
+    has_second_farfield = length(farfields) == 2
+    farfield2 = has_second_farfield ? farfields[2] : farfield
+
+    r11 = 1.0f0; r12 = 0.0f0; r13 = 0.0f0
+    r21 = 0.0f0; r22 = 1.0f0; r23 = 0.0f0
+    r31 = 0.0f0; r32 = 0.0f0; r33 = 1.0f0
+    inner_data = inner_source isa SiteTerrain ? inner_source.site.data : inner_source.data
+    inner_elev_scale = inner_source isa SiteTerrain ?
+        inner_source.site.elev_scale_to_m : inner_source.elev_scale_to_m
+    inner_pixel_size_m = inner_source isa SiteTerrain ?
+        Float32(inner_source.site.pixel_size_m) : inner_source.pixel_size_m
+    inner_pixel_size_km = inner_source isa SiteTerrain ?
+        Float32(inner_source.site.pixel_size_m / 1000.0) : inner_source.pixel_size_km
+    inner_s0 = inner_source isa SiteTerrain ? Float32(inner_source.site.s0) : 0.0f0
+    inner_l0 = inner_source isa SiteTerrain ? Float32(inner_source.site.l0) : 0.0f0
+    inner_projection_kind = inner_source isa SiteTerrain ?
+        STACK_PROJ_LOCAL_STEREO : STACK_PROJ_GEOMETRY_GRID
+    if inner_source isa SiteTerrain
+        site = inner_source.site
+        sl, cl = sincos(site.lat0)
+        sln, cln = sincos(site.lon0)
+        r11 = Float32(-sl * cln); r12 = Float32(-sln); r13 = Float32(-cl * cln)
+        r21 = Float32(-sl * sln); r22 = Float32( cln); r23 = Float32(-cl * sln)
+        r31 = Float32( cl);       r32 = 0.0f0;         r33 = Float32(-sl)
+    end
+
+    site_H_total, site_W_total = size(inner_data)
+    ldem_H, ldem_W = size(farfield.data)
+    ldem2_H, ldem2_W = size(farfield2.data)
+
+    d_site = DeviceArray(inner_data)
+    geom_packed = if inner_source isa GeometryGridTerrain
+        geom = zeros(Float32, site_H_total, site_W_total, 6)
+        geom[:, :, 1] .= inner_source.datum_x
+        geom[:, :, 2] .= inner_source.datum_y
+        geom[:, :, 3] .= inner_source.datum_z
+        geom[:, :, 4] .= inner_source.up_x
+        geom[:, :, 5] .= inner_source.up_y
+        geom[:, :, 6] .= inner_source.up_z
+        geom
+    else
+        zeros(Float32, 1, 1, 6)
+    end
+    d_geom = DeviceArray(geom_packed)
+    d_ldem_max, d_ldem_min, d_ldem2_max, d_ldem2_min =
+        if farfield_cache === nothing
+            cache = _prepare_layered_polar_stack_farfield_cache(
+                farfields; DeviceArray = DeviceArray)
+            (cache.d_ldem_max, cache.d_ldem_min,
+             cache.d_ldem2_max, cache.d_ldem2_min)
+        else
+            (farfield_cache.d_ldem_max, farfield_cache.d_ldem_min,
+             farfield_cache.d_ldem2_max, farfield_cache.d_ldem2_min)
+        end
+    packed = Array{Float32, 3}(undef, H, W, inner_source isa SiteTerrain ? 14 : 16)
+    d_packed = DeviceArray(packed)
+    d_atan = DeviceArray(ATAN_LUT)
+    d_iparams = DeviceArray(Int32[
+        H, W,
+        origin_r, origin_c,
+        layer_count,
+        debug_outputs ? 1 : 0,
+    ])
+    layer_iparams = zeros(Int32, 3, STACK_MAX_LAYERS)
+    layer_iparams[:, 1] .= Int32[
+        site_H_total,
+        site_W_total,
+        inner_projection_kind,
+    ]
+    layer_iparams[:, 2] .= Int32[
+        ldem_H,
+        ldem_W,
+        STACK_PROJ_POLAR_STEREO,
+    ]
+    layer_iparams[:, 3] .= Int32[
+        ldem2_H,
+        ldem2_W,
+        STACK_PROJ_POLAR_STEREO,
+    ]
+    layer_fparams = zeros(Float32, 6, STACK_MAX_LAYERS)
+    layer_fparams[:, 1] .= Float32[
+        inner_s0,
+        inner_l0,
+        inner_pixel_size_km,
+        inner_pixel_size_m,
+        inner_elev_scale,
+        1.0f9,
+    ]
+    layer_fparams[:, 2] .= Float32[
+        farfield.s0,
+        farfield.l0,
+        farfield.pixel_size_km,
+        farfield.pixel_size_m,
+        farfield.elev_scale_to_m,
+        farfield.mipmap_base,
+    ]
+    layer_fparams[:, 3] .= Float32[
+        farfield2.s0,
+        farfield2.l0,
+        farfield2.pixel_size_km,
+        farfield2.pixel_size_m,
+        farfield2.elev_scale_to_m,
+        farfield2.mipmap_base,
+    ]
+    edge_fparams = zeros(Float32, 9, STACK_MAX_EDGES)
+    edge_fparams[:, 1] .= Float32[
+        r11;
+        r12;
+        r13;
+        r21;
+        r22;
+        r23;
+        r31;
+        r32;
+        r33;
+    ]
+
+    return _LayeredPolarStackGPUContext(
+        inner_source, farfields, backend, workgroup_size,
+        origin_r, origin_c, H, W, observer_km, packed,
+        d_site, d_geom, d_ldem_max, d_ldem_min, d_ldem2_max, d_ldem2_min,
+        d_packed, d_atan, d_iparams,
+        DeviceArray(layer_iparams),
+        DeviceArray(layer_fparams),
+        DeviceArray(edge_fparams),
+        DeviceArray(Float32[
+            ATAN_LUT_SCALE,
+            observer_km,
+            MAX_TERRAIN_M_F32,
+        ]),
+        DeviceArray(zeros(UInt8, H, W)),
+        DeviceArray(zeros(UInt8, H, W)),
+        DeviceArray(zeros(Float32, debug_outputs ? H : 1,
+                          debug_outputs ? W : 1)),
+        DeviceArray(zeros(Float32, debug_outputs ? H : 1,
+                          debug_outputs ? W : 1,
+                          debug_outputs ? N_SUN_RAYS : 1)))
+end
+
+function _render_layered_polar_stack_gpu(ctx::_LayeredPolarStackGPUContext,
+                                         sun_pos_km::NTuple{3, Float64},
+                                         earth_pos_km::NTuple{3, Float64})
+    farfield = ctx.farfields[1]
+    if ctx.inner_source isa SiteTerrain
+        _precompute_site_polar_stack!(
+            ctx.packed, ctx.inner_source, farfield,
+            sun_pos_km, earth_pos_km, ctx.observer_km)
+    else
+        length(ctx.farfields) == 2 ||
+            error("geometry-grid mapset context requires two farfields")
+        ctx.packed .= _precompute_geometry_polar_stack(
+            ctx.inner_source, farfield, ctx.farfields[2],
+            sun_pos_km, earth_pos_km, ctx.observer_km)
+    end
+    Base.invokelatest(copyto!, ctx.d_packed, ctx.packed)
+
+    kernel = _gpu_site_polar_stack_kernel!(ctx.backend, ctx.workgroup_size)
+    Base.invokelatest(
+        kernel,
+        ctx.d_sun_out, ctx.d_dsn_out, ctx.d_de_dbg, ctx.d_sun_rays_dbg,
+        ctx.d_site,
+        ctx.d_geom,
+        ctx.d_ldem_max[1], ctx.d_ldem_max[2], ctx.d_ldem_max[3],
+        ctx.d_ldem_max[4], ctx.d_ldem_max[5],
+        ctx.d_ldem_min[2], ctx.d_ldem_min[3], ctx.d_ldem_min[4], ctx.d_ldem_min[5],
+        ctx.d_ldem2_max[1], ctx.d_ldem2_max[2], ctx.d_ldem2_max[3],
+        ctx.d_ldem2_max[4], ctx.d_ldem2_max[5],
+        ctx.d_ldem2_min[2], ctx.d_ldem2_min[3], ctx.d_ldem2_min[4], ctx.d_ldem2_min[5],
+        ctx.d_packed, ctx.d_atan, ctx.d_iparams,
+        ctx.d_layer_iparams, ctx.d_layer_fparams, ctx.d_edge_fparams, ctx.d_fparams;
+        ndrange = ctx.H * ctx.W)
+    Base.invokelatest(KernelAbstractions.synchronize, ctx.backend)
+
+    return Base.invokelatest(Array, ctx.d_sun_out),
+           Base.invokelatest(Array, ctx.d_dsn_out)
 end
 
 function _generate_layered_polar_stack_gpu(
@@ -1334,7 +1595,8 @@ function _generate_layered_polar_stack_gpu(
         observer_height_m::Float64;
         backend,
         DeviceArray,
-        workgroup_size::Int = 512)
+        workgroup_size::Int = 512,
+        debug_outputs::Bool = true)
 
     origin_r, origin_c, H, W = _source_window(inner_source)
     observer_km = Float32(observer_height_m / 1000.0)
@@ -1403,6 +1665,7 @@ function _generate_layered_polar_stack_gpu(
         H, W,
         origin_r, origin_c,
         layer_count,
+        debug_outputs ? 1 : 0,
     ])
     layer_iparams = zeros(Int32, 3, STACK_MAX_LAYERS)
     layer_iparams[:, 1] .= Int32[
@@ -1467,8 +1730,11 @@ function _generate_layered_polar_stack_gpu(
     ])
     d_sun_out = DeviceArray(zeros(UInt8, H, W))
     d_dsn_out = DeviceArray(zeros(UInt8, H, W))
-    d_de_dbg = DeviceArray(zeros(Float32, H, W))
-    d_sun_rays_dbg = DeviceArray(zeros(Float32, H, W, N_SUN_RAYS))
+    d_de_dbg = DeviceArray(zeros(Float32, debug_outputs ? H : 1,
+                                 debug_outputs ? W : 1))
+    d_sun_rays_dbg = DeviceArray(zeros(Float32, debug_outputs ? H : 1,
+                                       debug_outputs ? W : 1,
+                                       debug_outputs ? N_SUN_RAYS : 1))
 
     kernel = _gpu_site_polar_stack_kernel!(backend, workgroup_size)
     kernel(d_sun_out, d_dsn_out, d_de_dbg, d_sun_rays_dbg,
@@ -1485,7 +1751,9 @@ function _generate_layered_polar_stack_gpu(
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 
-    return Array(d_sun_out), Array(d_dsn_out), Array(d_de_dbg), Array(d_sun_rays_dbg)
+    de_dbg = debug_outputs ? Array(d_de_dbg) : Matrix{Float32}(undef, 0, 0)
+    sun_rays_dbg = debug_outputs ? Array(d_sun_rays_dbg) : Array{Float32,3}(undef, 0, 0, 0)
+    return Array(d_sun_out), Array(d_dsn_out), de_dbg, sun_rays_dbg
 end
 
 function _generate_site_polar_stack_cpu(

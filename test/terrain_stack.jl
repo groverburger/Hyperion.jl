@@ -54,6 +54,19 @@ using KernelAbstractions: CPU
             10.0f0, 10.0f0, 0.0f0, 1.0f0, 32, 64) == 21.0f0
     end
 
+    @testset "azimuth precompute is finite at stereographic origin" begin
+        data = zeros(Float32, 3, 3)
+        sun = (1000.0, 2000.0, -3000.0)
+        earth = (-2000.0, 1000.0, -2500.0)
+        vals = Hyp._compute_azel_at_pixel(
+            1, 1, data, sun, earth, 0.0f0;
+            s0 = 1.0f0,
+            l0 = 1.0f0,
+            pixel_size_km = 0.001f0,
+            elev_scale_to_m = 1.0f0)
+        @test all(isfinite, vals)
+    end
+
     H = 16
     site = Hyp.SiteDEM{Float32}(
         zeros(Float32, H, H), H, H,
