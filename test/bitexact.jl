@@ -11,13 +11,13 @@
 #
 # If this test fails, either:
 #   (a) you changed the kernel math intentionally → regenerate baselines
-#       (`julia --project scripts/bitexact_test.jl` on every backend you
-#        support, diff with scripts/diff_bitexact_shas.jl, then copy
+#       (`julia --project tools/bitexact/bitexact_test.jl` on every backend you
+#        support, diff with tools/bitexact/diff_bitexact_shas.jl, then copy
 #        `data/outputs/bitexact/metal/<ts>/sun.png,dsn.png` to
 #        `test/fixtures/bitexact/<ts>_{sun,dsn}.png`, and refresh the
 #        KNOWN_GOOD table below), or
 #   (b) cross-vendor determinism regressed → see
-#       docs/cross-vendor-determinism.md for the 14 documented sources
+#       docs/src/reference/cross-vendor-determinism.md for the 14 documented sources
 #       of FP divergence and how to audit.
 #
 # Skipped if the LDEM is not available (flagged as HAS_LDEM in runtests.jl).
@@ -30,6 +30,18 @@ import FileIO
 @isdefined(TEST_BACKEND_NAME) || include("test_backend.jl")
 
 const FIXTURES = joinpath(@__DIR__, "fixtures", "bitexact")
+const FIXTURES_1M = joinpath(@__DIR__, "fixtures", "bitexact_1m_full_farfield")
+const FIXTURES_1M_UP_TO_DATE =
+    joinpath(@__DIR__, "fixtures", "bitexact_1m_viper8_barker2023")
+include(joinpath(FIXTURES, "known_good_1m_full_farfield.jl"))
+include(joinpath(FIXTURES, "known_good_1m_viper8_barker2023.jl"))
+
+const HAS_SHIRLEY_BITEXACT =
+    @isdefined(HAS_LDEM) ? HAS_LDEM : Hyp._ldem_ok()
+const SHIRLEY_LDEM_PATH =
+    @isdefined(LDEM_PATH) ? LDEM_PATH : Hyp._ldem_path()
+const HAS_UP_TO_DATE_1M_BITEXACT =
+    Hyp._barker_2023_ldem_ok() && Hyp._viper8_nobile_crop_ok()
 
 # Known-good SHAs from the 3-way verified state on julia 1.11.5 +
 # KernelAbstractions 0.9.41 + Metal 1.9.3 + CUDA 5.9.0. Every entry
@@ -357,7 +369,7 @@ const KNOWN_GOOD = Dict{String, NamedTuple}(
     ),
 )
 
-# Palette application — must match scripts/bitexact_test.jl's version
+# Palette application — must match tools/bitexact/bitexact_test.jl's version
 # exactly, since the sun_rgb / dsn_rgb SHAs in KNOWN_GOOD were computed
 # from this layout.
 function _palette_apply(data::Matrix{UInt8}, palette::Matrix{UInt8})
@@ -391,60 +403,174 @@ if TEST_BACKEND_NAME == "none"
     @warn "No render backend selected — skipping cross-platform bit-exactness test"
 else
 
-ldem = Hyp.load_ldem(LDEM_PATH)
 Hyp.init_spice(joinpath(PROJECT_ROOT, "kernels"))
-max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
-origin_r, origin_c = 8960, 18432
-H, W = 512, 896
 
-for (tag, expected) in sort(collect(KNOWN_GOOD), by = first)
-    @testset "Cross-platform bit-exactness $tag ($(TEST_BACKEND_NAME))" begin
-        dt = DateTime(tag, dateformat"yyyy-mm-ddTHH-MM-SS")
-        et = Hyp.datetime_to_et(dt)
-        sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
-        earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
+if HAS_SHIRLEY_BITEXACT
+    ldem = Hyp.load_ldem(SHIRLEY_LDEM_PATH)
+    max_mm, min_mm = Hyp.build_ldem_mipmaps_minmax(ldem.data)
+    origin_r, origin_c = 8960, 18432
+    H, W = 512, 896
 
-        # Run kernel on the selected machine-appropriate backend. Output
-        # matches CPU, Metal, and CUDA bit-for-bit per the verified
-        # 3-way invariant.
-        sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_gpu(
-            ldem.data, origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
-            max_mipmaps = max_mm, min_mipmaps = min_mm,
-            backend = TEST_BACKEND, DeviceArray = TEST_DEVICE_ARRAY)
+    for (tag, expected) in sort(collect(KNOWN_GOOD), by = first)
+        @testset "Cross-platform bit-exactness $tag ($(TEST_BACKEND_NAME))" begin
+            dt = DateTime(tag, dateformat"yyyy-mm-ddTHH-MM-SS")
+            et = Hyp.datetime_to_et(dt)
+            sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+            earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
-        # CPU precompute buffer — its SHA is part of the audit trail
-        # because a drift in CPU math would silently corrupt GPU input.
-        sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
-            Hyp._precompute_azel(ldem.data, origin_r, origin_c, H, W,
-                                sun_t, earth_t, Float32(0.0))
-        azel_bytes = vcat(vec(sun_rc), vec(sun_rs), vec(sun_el),
-                          vec(earth_rc), vec(earth_rs), vec(earth_el),
-                          vec(sun_tan), vec(dsn_tan))
+            # Run kernel on the selected machine-appropriate backend. Output
+            # matches CPU, Metal, and CUDA bit-for-bit per the verified
+            # 3-way invariant.
+            sun, dsn, de, sun_rays = Hyp.generate_live_shadow_frame_gpu(
+                ldem.data, origin_r, origin_c, H, W, sun_t, earth_t, 0.0;
+                max_mipmaps = max_mm, min_mipmaps = min_mm,
+                backend = TEST_BACKEND, DeviceArray = TEST_DEVICE_ARRAY)
 
-        # Kernel raw outputs
-        @test sha256_bytes(sun) == expected.sun
-        @test sha256_bytes(dsn) == expected.dsn
-        @test bytes2hex(SHA.sha256(reinterpret(UInt8, azel_bytes))) == expected.azel
-        @test sha256_bytes(de) == expected.de
-        for k in 1:8
-            @test sha256_bytes(view(sun_rays, :, :, k)) ==
-                  getfield(expected, Symbol("d_$(k-1)"))
+            # CPU precompute buffer — its SHA is part of the audit trail
+            # because a drift in CPU math would silently corrupt GPU input.
+            sun_rc, sun_rs, sun_el, earth_rc, earth_rs, earth_el, sun_tan, dsn_tan =
+                Hyp._precompute_azel(ldem.data, origin_r, origin_c, H, W,
+                                    sun_t, earth_t, Float32(0.0))
+            azel_bytes = vcat(vec(sun_rc), vec(sun_rs), vec(sun_el),
+                              vec(earth_rc), vec(earth_rs), vec(earth_el),
+                              vec(sun_tan), vec(dsn_tan))
+
+            # Kernel raw outputs
+            @test sha256_bytes(sun) == expected.sun
+            @test sha256_bytes(dsn) == expected.dsn
+            @test bytes2hex(SHA.sha256(reinterpret(UInt8, azel_bytes))) == expected.azel
+            @test sha256_bytes(de) == expected.de
+            for k in 1:8
+                @test sha256_bytes(view(sun_rays, :, :, k)) ==
+                      getfield(expected, Symbol("d_$(k-1)"))
+            end
+
+            # Palette-applied RGB (the user-visible content)
+            sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
+            dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
+            @test sha256_bytes(sun_rgb) == expected.sun_rgb
+            @test sha256_bytes(dsn_rgb) == expected.dsn_rgb
+
+            # PNG fixture comparison — decode the committed reference and
+            # verify pixel-for-pixel equality. On a mismatch, the reference
+            # PNG is directly openable for visual inspection.
+            ref_sun = _load_png_rgb(joinpath(FIXTURES, "$(tag)_sun.png"))
+            ref_dsn = _load_png_rgb(joinpath(FIXTURES, "$(tag)_dsn.png"))
+            @test ref_sun == sun_rgb
+            @test ref_dsn == dsn_rgb
+        end
+    end
+
+    if !isfile(Hyp._nobile_1m_path())
+        @warn "Nobile 1m site DEM not found; skipping full 1m + Shirley farfield bit-exactness test." path=Hyp._nobile_1m_path()
+    else
+        site_path = Hyp.require_nobile_1m_tif!()
+        site = Hyp.load_site_dem_f32(site_path)
+        far = Hyp.PolarStereoTerrain(ldem.data;
+            max_mipmaps = max_mm,
+            min_mipmaps = min_mm,
+            elev_scale_to_m = ldem.elev_scale_to_m)
+        stack_1m = Hyp.TerrainStack(
+            Hyp.SiteTerrain(site; window = (0, 0, site.H, site.W)),
+            far)
+
+        @testset "1m full site + Shirley 20m farfield dimensions" begin
+            @test site.H == 4096
+            @test site.W == 4992
+            @test site.pixel_size_m ≈ 1.0
         end
 
-        # Palette-applied RGB (the user-visible content)
-        sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
-        dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
-        @test sha256_bytes(sun_rgb) == expected.sun_rgb
-        @test sha256_bytes(dsn_rgb) == expected.dsn_rgb
+        for (tag, expected) in sort(collect(KNOWN_GOOD_1M_FULL_FARFIELD), by = first)
+            @testset "1m full + 20m farfield bit-exactness $tag ($(TEST_BACKEND_NAME))" begin
+                dt = DateTime(tag, dateformat"yyyy-mm-ddTHH-MM-SS")
+                et = Hyp.datetime_to_et(dt)
+                sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+                earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
 
-        # PNG fixture comparison — decode the committed reference and
-        # verify pixel-for-pixel equality. On a mismatch, the reference
-        # PNG is directly openable for visual inspection.
-        ref_sun = _load_png_rgb(joinpath(FIXTURES, "$(tag)_sun.png"))
-        ref_dsn = _load_png_rgb(joinpath(FIXTURES, "$(tag)_dsn.png"))
-        @test ref_sun == sun_rgb
-        @test ref_dsn == dsn_rgb
+                sun, dsn, de, sun_rays = Hyp.render_terrain_stack_gpu(
+                    stack_1m, sun_t, earth_t, 0.0;
+                    backend = TEST_BACKEND,
+                    DeviceArray = TEST_DEVICE_ARRAY)
+
+                @test sha256_bytes(sun) == expected.sun
+                @test sha256_bytes(dsn) == expected.dsn
+                @test sha256_bytes(de)  == expected.de
+                for k in 1:8
+                    @test sha256_bytes(view(sun_rays, :, :, k)) ==
+                          getfield(expected, Symbol("d_$(k-1)"))
+                end
+
+                sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
+                dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
+                @test sha256_bytes(sun_rgb) == expected.sun_rgb
+                @test sha256_bytes(dsn_rgb) == expected.dsn_rgb
+
+                ref_sun = _load_png_rgb(joinpath(FIXTURES_1M, "$(tag)_sun.png"))
+                ref_dsn = _load_png_rgb(joinpath(FIXTURES_1M, "$(tag)_dsn.png"))
+                @test ref_sun == sun_rgb
+                @test ref_dsn == dsn_rgb
+            end
+        end
     end
+else
+    @warn "Shirley LDEM not available — skipping legacy bit-exactness tests"
+end
+
+if HAS_UP_TO_DATE_1M_BITEXACT
+    ldem_2023 = Hyp.load_ldem(Hyp.require_barker_2023_ldem!())
+    ldem_2023_max, ldem_2023_min = Hyp.build_ldem_mipmaps_minmax(ldem_2023.data)
+
+    site_8 = Hyp.load_site_dem_f32(Hyp.require_viper8_nobile_crop_tif!())
+    far_2023 = Hyp.PolarStereoTerrain(ldem_2023.data;
+        max_mipmaps = ldem_2023_max,
+        min_mipmaps = ldem_2023_min,
+        elev_scale_to_m = ldem_2023.elev_scale_to_m)
+    stack_8 = Hyp.TerrainStack(
+        Hyp.SiteTerrain(site_8; window = (0, 0, site_8.H, site_8.W)),
+        far_2023)
+
+    @testset "1m VIPER 8.0 crop + Barker 2023 20m farfield dimensions" begin
+        @test site_8.H == 4144
+        @test site_8.W == 5040
+        @test site_8.pixel_size_m ≈ 1.0
+        @test ldem_2023.H == 30400
+        @test ldem_2023.W == 30400
+        @test ldem_2023.elev_scale_to_m == 1.0f0
+    end
+
+    for (tag, expected) in sort(collect(KNOWN_GOOD_1M_VIPER8_BARKER2023), by = first)
+        @testset "1m VIPER 8.0 + Barker 2023 farfield bit-exactness $tag ($(TEST_BACKEND_NAME))" begin
+            dt = DateTime(tag, dateformat"yyyy-mm-ddTHH-MM-SS")
+            et = Hyp.datetime_to_et(dt)
+            sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
+            earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
+
+            sun, dsn, de, sun_rays = Hyp.render_terrain_stack_gpu(
+                stack_8, sun_t, earth_t, 0.0;
+                backend = TEST_BACKEND,
+                DeviceArray = TEST_DEVICE_ARRAY)
+
+            @test sha256_bytes(sun) == expected.sun
+            @test sha256_bytes(dsn) == expected.dsn
+            @test sha256_bytes(de)  == expected.de
+            for k in 1:8
+                @test sha256_bytes(view(sun_rays, :, :, k)) ==
+                      getfield(expected, Symbol("d_$(k-1)"))
+            end
+
+            sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
+            dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
+            @test sha256_bytes(sun_rgb) == expected.sun_rgb
+            @test sha256_bytes(dsn_rgb) == expected.dsn_rgb
+
+            ref_sun = _load_png_rgb(joinpath(FIXTURES_1M_UP_TO_DATE, "$(tag)_sun.png"))
+            ref_dsn = _load_png_rgb(joinpath(FIXTURES_1M_UP_TO_DATE, "$(tag)_dsn.png"))
+            @test ref_sun == sun_rgb
+            @test ref_dsn == dsn_rgb
+        end
+    end
+else
+    @warn "VIPER 8.0 crop and Barker 2023 LDEM not available — skipping up-to-date 1m bit-exactness tests"
 end
 
 end

@@ -2,9 +2,13 @@ __pycache__/
 Manifest.toml
 ._*
 .claude/
+docs/build/
 
-# Test data — fetched via scripts/fetch_test_data.jl, not stored in git
-data/inputs/
+# Test data -- fetched via scripts/fetch_test_data.jl, not stored in git
+data/inputs/*
+!data/inputs/mapsets/
+!data/inputs/mapsets/**
+data/inputs/mapsets/._*
 data/outputs/
 
 # Local-only working copy of data/, untracked by design.

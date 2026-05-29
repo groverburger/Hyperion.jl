@@ -314,8 +314,10 @@ function _compute_azel_at_pixel(ldem_col::Int, ldem_row::Int,
 
     # ENU-frame azimuth → LDEM-grid frame rotation (pixel-specific).
     # Same math as the old `off_rad` computation, only used on CPU now.
-    inv_rho = 1.0f0 / rho_q
-    off_rad = atan2_lut(qn_km * inv_rho, -qe_km * inv_rho) + F32_PI
+    inv_rho = rho_q > 0.0f0 ? 1.0f0 / rho_q : 0.0f0
+    off_rad = rho_q > 0.0f0 ?
+        atan2_lut(qn_km * inv_rho, -qe_km * inv_rho) + F32_PI :
+        0.0f0
 
     # Ray direction in LDEM-grid frame = rotation by (off_rad - az_enu).
     sun_ray_cos, sun_ray_sin     = cos_sin_lut(off_rad - sun_az_rad_enu)

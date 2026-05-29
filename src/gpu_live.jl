@@ -135,7 +135,66 @@ end
     end
 end
 
-@inline function _gpu_cast_ray(
+@inline function _gpu_accumulate_level0_sample_sq(
+        dem, row_i::Int32, col_i::Int32,
+        cx::Float32, cy::Float32,
+        q_elev_m::Float32,
+        qx::Float32, qy::Float32,
+        qz_pos::Float32,
+        M31::Float32, M32::Float32, M33::Float32,
+        observer_km::Float32,
+        threshold::Float32, threshold_sq::Float32,
+        s0::Float32, l0::Float32,
+        pixel_size_km::Float32,
+        elev_scale_to_m::Float32,
+        R_km::Float32,
+        max_num::Float32, max_den_sq::Float32)
+    @inbounds e11 = Float32(dem[row_i + Int32(1), col_i + Int32(1)])
+    @inbounds e21 = Float32(dem[row_i + Int32(1), col_i + Int32(2)])
+    @inbounds e12 = Float32(dem[row_i + Int32(2), col_i + Int32(1)])
+    @inbounds e22 = Float32(dem[row_i + Int32(2), col_i + Int32(2)])
+    fx = cx - Float32(col_i)
+    fy = cy - Float32(row_i)
+    # Bilinear with explicit fma chain for vendor-independent
+    # single-rounding semantics.
+    w11 = (1.0f0 - fx) * (1.0f0 - fy)
+    w21 =       fx   * (1.0f0 - fy)
+    w12 = (1.0f0 - fx) *       fy
+    w22 =       fx   *       fy
+    elev_raw = fma(w22, e22,
+                 fma(w12, e12,
+                   fma(w21, e21, w11 * e11)))
+    elev_m = elev_raw * elev_scale_to_m
+
+    # Stereographic projection — zero sqrt, one division per step.
+    e_km = (cx - s0) * pixel_size_km
+    n_km = (l0 - cy) * pixel_size_km
+    rho2 = fma(n_km, n_km, e_km * e_km)
+    R_total = fma(elev_m, 0.001f0, R_km)
+    dn = fma(rho2, INV_4R_KM2_F32, 1.0f0)
+    two_u2 = rho2 * (Float32(2.0) * INV_4R_KM2_F32)
+    inv_dn = 1.0f0 / dn
+    scale = R_total * inv_dn
+    common = scale * INV_R_KM_F32
+    dx = fma(common, n_km, -qx)
+    dy = fma(common, e_km, -qy)
+    sample_minus_qz = fma(scale, two_u2, -qz_pos)
+    dz = fma(q_elev_m - elev_m, 0.001f0, sample_minus_qz)
+    lz_geom = fma(M33, dz, fma(M32, dy, M31 * dx))
+    lz = lz_geom - observer_km
+
+    d_sq = fma(dz, dz, fma(dy, dy, dx * dx))
+    alen_sq = fma(-lz_geom, lz_geom, d_sq)
+    hit = false
+    if alen_sq > 0.0f0 && _gpu_gt_slope_sq(lz, alen_sq, max_num, max_den_sq)
+        max_num = lz
+        max_den_sq = alen_sq
+        hit = _gpu_ge_threshold_sq(lz, alen_sq, threshold, threshold_sq)
+    end
+    return max_num, max_den_sq, hit
+end
+
+@inline function _gpu_cast_ray_state(
         max0, max1, max2, max3, max4,
         min1, min2, min3, min4,
         ldem_H::Int32, ldem_W::Int32,
@@ -152,16 +211,15 @@ end
         R_km::Float32,
         pixel_size_km::Float32, pixel_size_m::Float32,
         mipmap_base::Float32, elev_scale_to_m::Float32,
-        atan_lut, atan_scale::Float32)
+        max_num::Float32, max_den_sq::Float32,
+        start_d_pixels::Float32)
     # Track the running max slope in (num, den_sq) form so the hot path uses
-    # only *, +, fma, and <. The one sqrt+div (inside the atan LUT) happens
-    # once, after the loop — not once per ray step. Sentinel (-1, 0) encodes
-    # "-Inf slope" and is strictly less than any real (num, den_sq>0) pair.
-    max_num = -1.0f0
-    max_den_sq = 0.0f0
+    # only *, +, fma, and <. Sentinel (-1, 0) encodes "-Inf slope" and is
+    # strictly less than any real (num, den_sq>0) pair.
     threshold_sq = threshold * threshold
     base_step = Float32(0.70710698)
-    d = 1.0f0
+    d = max(start_d_pixels, 1.0f0)
+    exit_d = d
     terminated = false
     @inbounds while d <= max_d_pixels && !terminated
         # Direct compares — log2 differs across compilers (CPU vs Metal
@@ -182,6 +240,7 @@ end
         col_i = unsafe_trunc(Int32, cx)
         row_i = unsafe_trunc(Int32, cy)
         if col_i < Int32(0) || col_i >= ldem_W || row_i < Int32(0) || row_i >= ldem_H
+            exit_d = d
             break
         end
 
@@ -235,6 +294,7 @@ end
                     ri_chk = unsafe_trunc(Int32, cy_chk)
                     if ci_chk < Int32(0) || ci_chk >= ldem_W || ri_chk < Int32(0) || ri_chk >= ldem_H
                         exited_in_skip = true
+                        exit_d = d
                         break
                     end
                 end
@@ -262,86 +322,135 @@ end
         if !skip_to_next && !terminated
             if col_i + Int32(1) >= ldem_W || row_i + Int32(1) >= ldem_H
                 d += base_step
+                exit_d = d
             else
-                @inbounds e11 = Float32(max0[row_i + Int32(1), col_i + Int32(1)])
-                @inbounds e21 = Float32(max0[row_i + Int32(1), col_i + Int32(2)])
-                @inbounds e12 = Float32(max0[row_i + Int32(2), col_i + Int32(1)])
-                @inbounds e22 = Float32(max0[row_i + Int32(2), col_i + Int32(2)])
-                fx = cx - Float32(col_i)
-                fy = cy - Float32(row_i)
-                # Bilinear with explicit fma chain for vendor-independent
-                # single-rounding semantics.
-                w11 = (1.0f0 - fx) * (1.0f0 - fy)
-                w21 =       fx   * (1.0f0 - fy)
-                w12 = (1.0f0 - fx) *       fy
-                w22 =       fx   *       fy
-                telev_raw = fma(w22, e22,
-                              fma(w12, e12,
-                                fma(w21, e21, w11 * e11)))
-                telev_m = telev_raw * elev_scale_to_m
-
-                # Stereographic projection — zero sqrt, one division per step.
-                # Both `dn = 1 + u²` and `u² - 1` are written as explicit fmas
-                # so neither Metal nor CUDA can decide independently whether to
-                # contract `mul + add` patterns into fma (that contraction is
-                # per-platform and was the dominant drift source after we
-                # cleared the inner-loop sqrt/div).
-                e_km = (cx - ldem_s0) * pixel_size_km
-                n_km = (ldem_l0 - cy) * pixel_size_km
-                rho2 = fma(n_km, n_km, e_km * e_km)
-                R_total = fma(telev_m, 0.001f0, R_km)
-                dn = fma(rho2, INV_4R_KM2_F32, 1.0f0)
-                two_u2 = rho2 * (Float32(2.0) * INV_4R_KM2_F32)
-                inv_dn = 1.0f0 / dn
-                scale = R_total * inv_dn
-                common = scale * INV_R_KM_F32
-                # dx, dy: explicit fma so neither Metal nor CUDA can pick
-                # `(a*b) − c` fusion independently (the dominant prior drift
-                # source after we cleared sqrt/div from the loop).
-                dx = fma(common, n_km, -qx)
-                dy = fma(common, e_km, -qy)
-                # dz: well-conditioned form. The naive `scale*u2_m1 − qz`
-                # was a ~−R − (−R) cancellation. The first replacement
-                #   (qR_total − R_total) + (scale·2u² − qz_pos)
-                # was *also* broken — `qR_total` and `R_total` are both
-                # ~R in magnitude, so subtracting them in Float32 has
-                # ~0.2 m ULP at lunar radius, swamping the millimeter-
-                # scale signal we need. Compute the elevation-difference
-                # term directly from `q_elev_m − telev_m` (which lives in
-                # metres, not at lunar radius), so Float32 precision is
-                # in metres rather than at lunar radius:
-                #   (qR_total − R_total) = (qelev − telev) · 0.001
-                # Both `(a*b) ± c` patterns are wrapped in explicit `fma`
-                # (rules 5/8/14) so neither Metal nor CUDA can fuse one
-                # but not the other.
-                sample_minus_qz = fma(scale, two_u2, -qz_pos)
-                dz = fma(q_elev_m - telev_m, 0.001f0, sample_minus_qz)
-                # Only compute the radial ENU component (lz). Horizontal
-                # distance² follows from orthonormality of the ENU frame:
-                # |d|² = lx² + ly² + lz², so alen_sq = |d|² − lz². This skips
-                # M11..M23 entirely and halves the M-matrix fma work.
-                lz_geom = fma(M33, dz, fma(M32, dy, M31*dx))
-                lz = lz_geom - observer_km
-
-                d_sq = fma(dz, dz, fma(dy, dy, dx * dx))
-                # Explicit fma form of `d_sq - lz_geom²`: single-rounded, so
-                # both vendors compute the same bit pattern.
-                alen_sq = fma(-lz_geom, lz_geom, d_sq)
-                if alen_sq > 0.0f0
-                    if _gpu_gt_slope_sq(lz, alen_sq, max_num, max_den_sq)
-                        max_num = lz
-                        max_den_sq = alen_sq
-                        if _gpu_ge_threshold_sq(lz, alen_sq, threshold, threshold_sq)
-                            terminated = true
-                        end
-                    end
-                end
+                max_num, max_den_sq, terminated =
+                    _gpu_accumulate_level0_sample_sq(
+                        max0, row_i, col_i, cx, cy,
+                        q_elev_m, qx, qy, qz_pos, M31, M32, M33,
+                        observer_km, threshold, threshold_sq,
+                        ldem_s0, ldem_l0, pixel_size_km,
+                        elev_scale_to_m, R_km,
+                        max_num, max_den_sq)
                 d += base_step
+                exit_d = d
             end
         end
     end
+    return max_num, max_den_sq, exit_d, terminated
+end
+
+@inline function _gpu_cast_ray(
+        max0, max1, max2, max3, max4,
+        min1, min2, min3, min4,
+        ldem_H::Int32, ldem_W::Int32,
+        query_col::Float32, query_row::Float32,
+        q_elev_m::Float32,
+        qx::Float32, qy::Float32, qz::Float32,
+        qz_pos::Float32, slope_safety::Float32,
+        M31::Float32, M32::Float32, M33::Float32,
+        ray_cos::Float32, ray_sin::Float32,
+        observer_km::Float32,
+        threshold::Float32,
+        max_d_pixels::Float32,
+        ldem_s0::Float32, ldem_l0::Float32,
+        R_km::Float32,
+        pixel_size_km::Float32, pixel_size_m::Float32,
+        mipmap_base::Float32, elev_scale_to_m::Float32,
+        atan_lut, atan_scale::Float32)
+    max_num, max_den_sq, _, _ = _gpu_cast_ray_state(
+        max0, max1, max2, max3, max4,
+        min1, min2, min3, min4,
+        ldem_H, ldem_W,
+        query_col, query_row, q_elev_m,
+        qx, qy, qz, qz_pos, slope_safety,
+        M31, M32, M33, ray_cos, ray_sin,
+        observer_km, threshold, max_d_pixels,
+        ldem_s0, ldem_l0, R_km,
+        pixel_size_km, pixel_size_m,
+        mipmap_base, elev_scale_to_m,
+        -1.0f0, 0.0f0, 1.0f0)
     # One-shot conversion back to degrees — the only sqrt+div in this call.
     return _gpu_slope_to_deg_sq(max_num, max_den_sq, atan_lut, atan_scale)
+end
+
+@inline function _gpu_sun_fraction_from_rays(
+        sun_el_deg::Float32,
+        d_0::Float32, d_1::Float32, d_2::Float32, d_3::Float32,
+        d_4::Float32, d_5::Float32, d_6::Float32, d_7::Float32)
+    frac = SUN_TICK_FRAC_INITIAL
+    pos = Int32(0)
+    left_el = d_0
+    right_el = d_1
+    bucket_delta = right_el - left_el
+    px = 0.0f0
+    @inbounds for i in Int32(1):Int32(16)
+        sc = i == Int32(1)  ? 0.09395602f0 :
+             i == Int32(2)  ? 0.15739954f0 :
+             i == Int32(3)  ? 0.19606979f0 :
+             i == Int32(4)  ? 0.22323528f0 :
+             i == Int32(5)  ? 0.24278899f0 :
+             i == Int32(6)  ? 0.25647780f0 :
+             i == Int32(7)  ? 0.26521143f0 :
+             i == Int32(8)  ? 0.26947215f0 :
+             i == Int32(9)  ? 0.26947215f0 :
+             i == Int32(10) ? 0.26521143f0 :
+             i == Int32(11) ? 0.25647780f0 :
+             i == Int32(12) ? 0.24278899f0 :
+             i == Int32(13) ? 0.22323528f0 :
+             i == Int32(14) ? 0.19606979f0 :
+             i == Int32(15) ? 0.15739954f0 :
+                              0.09395602f0
+        horizon_el = fma(frac, bucket_delta, left_el)
+        delta = (sun_el_deg + sc) - horizon_el
+        px += clamp(delta, 0.0f0, 2.0f0 * sc)
+        frac += SUN_TICK_STEP
+        if frac >= 1.0f0
+            pos += Int32(1)
+            left_el = right_el
+            right_el = pos == Int32(1) ? d_2 :
+                       pos == Int32(2) ? d_3 :
+                       pos == Int32(3) ? d_4 :
+                       pos == Int32(4) ? d_5 :
+                       pos == Int32(5) ? d_6 : d_7
+            bucket_delta = right_el - left_el
+            frac -= 1.0f0
+        end
+    end
+    return px * INV_MAX_PHOTONS
+end
+
+@inline function _gpu_encode_sun_u8(sun_frac::Float32)
+    return UInt8(clamp(unsafe_trunc(Int32, 255.0f0 * sun_frac),
+                       Int32(0), Int32(255)))
+end
+
+@inline function _gpu_encode_dsn_u8(over_hz_deg::Float32)
+    return UInt8(clamp(unsafe_trunc(Int32, floor(over_hz_deg * 10.0f0)),
+                       Int32(0), Int32(250)))
+end
+
+@inline function _gpu_stereo_query_setup(
+        col::Float32, row::Float32, elev_m::Float32,
+        s0::Float32, l0::Float32,
+        pixel_size_km::Float32, R_km::Float32)
+    qe_km = (col - s0) * pixel_size_km
+    qn_km = (l0 - row) * pixel_size_km
+    rho2_q = fma(qn_km, qn_km, qe_km * qe_km)
+    R_total_q = fma(elev_m, 0.001f0, R_km)
+    denom_q = fma(rho2_q, INV_4R_KM2_F32, 1.0f0)
+    inv_denom_q = 1.0f0 / denom_q
+    u2_q_m1 = fma(rho2_q, INV_4R_KM2_F32, -1.0f0)
+    factor_M = INV_R_KM_F32 * inv_denom_q
+    M31 = qn_km * factor_M
+    M32 = qe_km * factor_M
+    M33 = u2_q_m1 * inv_denom_q
+    qx = R_total_q * M31
+    qy = R_total_q * M32
+    qz = R_total_q * M33
+    qz_pos = R_total_q * ((rho2_q * (Float32(2.0) * INV_4R_KM2_F32)) *
+                           inv_denom_q)
+    return qx, qy, qz, qz_pos, M31, M32, M33, rho2_q
 end
 
 # ─── Main kernel: one work item per pixel ────────────────────────────────
@@ -379,32 +488,10 @@ end
     # the source of truth for `_precompute_azel` and tests.
     qelev_raw = Float32(max0[ldem_row + Int32(1), ldem_col + Int32(1)])
     qelev_m = qelev_raw * elev_scale_to_m
-    qe_km = (Float32(ldem_col) - ldem_s0) * pixel_size_km
-    qn_km = (ldem_l0 - Float32(ldem_row)) * pixel_size_km
-    rho2_q = fma(qn_km, qn_km, qe_km * qe_km)
-    R_total_q = fma(qelev_m, 0.001f0, R_km)
-    denom_q = fma(rho2_q, INV_4R_KM2_F32, 1.0f0)
-    u2_q_m1 = fma(rho2_q, INV_4R_KM2_F32, -1.0f0)
-    inv_denom_q = 1.0f0 / denom_q
-
-    # Simplified via qclat*qclon = qn/(R·denom), qclat*qslon = qe/(R·denom),
-    # qslat = (u²−1)/denom. All without rho_q or qclon/qslon.
-    factor_M = INV_R_KM_F32 * inv_denom_q
-    M31 = qn_km * factor_M
-    M32 = qe_km * factor_M
-    M33 = u2_q_m1 * inv_denom_q
-
-    qx = R_total_q * M31
-    qy = R_total_q * M32
-    qz = R_total_q * M33
-
-    # Precompute the well-conditioned reference for `dz` in the ray cast.
-    # `qz_pos = 2·R_total_q·u²_q/dn_q = R_total_q·(M_33 + 1)`. The naive
-    # `qz_pos = qz + R_total_q` is a catastrophic cancellation (both ≈ R
-    # in magnitude). Build it directly from `rho²_q · (2·INV_4R)` =
-    # `2·u²_q`, which lives in O(rho²/R²) — sub-ULP-of-R precision.
-    two_u2_q = rho2_q * (Float32(2.0) * INV_4R_KM2_F32)
-    qz_pos   = R_total_q * (two_u2_q * inv_denom_q)
+    qx, qy, qz, qz_pos, M31, M32, M33, rho2_q =
+        _gpu_stereo_query_setup(Float32(ldem_col), Float32(ldem_row),
+                                qelev_m, ldem_s0, ldem_l0,
+                                pixel_size_km, R_km)
 
     # `slope_safety` bounds the approximation error in `_gpu_approx_slope_sq`
     # vs the full level-0 stereographic projection. The missing term in
@@ -577,54 +664,16 @@ end
     # The 16 ticks span 3 anchor-intervals (= full sun disk).
     sun_frac = 0.0f0
     if !sun_below
-        frac = SUN_TICK_FRAC_INITIAL
-        pos = Int32(0)
-        left_el  = d_0
-        right_el = d_1
-        bucket_delta = right_el - left_el
-        px = 0.0f0
-        @inbounds for i in Int32(1):Int32(16)
-            sc = i == Int32(1)  ? 0.09395602f0 :
-                 i == Int32(2)  ? 0.15739954f0 :
-                 i == Int32(3)  ? 0.19606979f0 :
-                 i == Int32(4)  ? 0.22323528f0 :
-                 i == Int32(5)  ? 0.24278899f0 :
-                 i == Int32(6)  ? 0.25647780f0 :
-                 i == Int32(7)  ? 0.26521143f0 :
-                 i == Int32(8)  ? 0.26947215f0 :
-                 i == Int32(9)  ? 0.26947215f0 :
-                 i == Int32(10) ? 0.26521143f0 :
-                 i == Int32(11) ? 0.25647780f0 :
-                 i == Int32(12) ? 0.24278899f0 :
-                 i == Int32(13) ? 0.22323528f0 :
-                 i == Int32(14) ? 0.19606979f0 :
-                 i == Int32(15) ? 0.15739954f0 :
-                                  0.09395602f0
-            horizon_el = fma(frac, bucket_delta, left_el)
-            delta = (sun_el_deg + sc) - horizon_el
-            px += clamp(delta, 0.0f0, 2.0f0 * sc)
-            frac += SUN_TICK_STEP
-            if frac >= 1.0f0
-                pos += Int32(1)
-                left_el = right_el
-                right_el = pos == Int32(1) ? d_2 :
-                           pos == Int32(2) ? d_3 :
-                           pos == Int32(3) ? d_4 :
-                           pos == Int32(4) ? d_5 :
-                           pos == Int32(5) ? d_6 : d_7
-                bucket_delta = right_el - left_el
-                frac -= 1.0f0
-            end
-        end
-        sun_frac = px * INV_MAX_PHOTONS
+        sun_frac = _gpu_sun_fraction_from_rays(
+            sun_el_deg, d_0, d_1, d_2, d_3, d_4, d_5, d_6, d_7)
     end
 
     # ── DSN over-horizon — single ray, direct difference ─────────────
     over_hz_deg = earth_below ? Float32(-90.0) : (earth_el_deg - de)
 
     # ── Emit UInt8 ────────────────────────────────────────────────────
-    sun_u8 = UInt8(clamp(unsafe_trunc(Int32, 255.0f0 * sun_frac), Int32(0), Int32(255)))
-    dsn_u8 = UInt8(clamp(unsafe_trunc(Int32, floor(over_hz_deg * 10.0f0)), Int32(0), Int32(250)))
+    sun_u8 = _gpu_encode_sun_u8(sun_frac)
+    dsn_u8 = _gpu_encode_dsn_u8(over_hz_deg)
     sun_out[local_row + Int32(1), local_col + Int32(1)] = sun_u8
     dsn_out[local_row + Int32(1), local_col + Int32(1)] = dsn_u8
     # Diagnostic: raw `de` (horizon elev in degrees) from the DSN ray cast,
@@ -666,7 +715,8 @@ Required kwargs:
 Optional:
   `workgroup_size`  — total threads per workgroup (default 512, keep ≤1024)
 """
-function generate_live_shadow_frame_gpu(ldem::Matrix{T},
+function _render_stack_source_gpu(
+                                         ldem::Matrix{T},
                                          ldem_origin_row::Int, ldem_origin_col::Int,
                                          H::Int, W::Int,
                                          sun_pos_km::NTuple{3, Float64},
@@ -707,7 +757,10 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{T},
     azel[:, :, 8] .= dsn_tan
 
     d_max = ntuple(i -> DeviceArray(max_mipmaps[i]), N_MIPMAP_LEVELS)
-    d_min = ntuple(i -> DeviceArray(min_mipmaps[i]), N_MIPMAP_LEVELS)
+    # The cmin early-termination path was removed from `_gpu_cast_ray_state`;
+    # min mipmaps remain part of the public API but are not read by the kernel.
+    min_placeholder = Matrix{T}(undef, 1, 1)
+    d_min = ntuple(_ -> DeviceArray(min_placeholder), N_MIPMAP_LEVELS)
     d_azel = DeviceArray(azel)
     d_atan = DeviceArray(ATAN_LUT)
     d_sun_out     = DeviceArray(zeros(UInt8, H, W))
@@ -734,4 +787,41 @@ function generate_live_shadow_frame_gpu(ldem::Matrix{T},
     KernelAbstractions.synchronize(backend)
 
     return Array(d_sun_out), Array(d_dsn_out), Array(d_de_dbg), Array(d_sun_rays_dbg)
+end
+
+function generate_live_shadow_frame_gpu(ldem::Matrix{T},
+                                         ldem_origin_row::Int, ldem_origin_col::Int,
+                                         H::Int, W::Int,
+                                         sun_pos_km::NTuple{3, Float64},
+                                         earth_pos_km::NTuple{3, Float64},
+                                         observer_height_m::Float64;
+                                         max_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{T}},
+                                         min_mipmaps::NTuple{N_MIPMAP_LEVELS, Matrix{T}},
+                                         backend,
+                                         DeviceArray,
+                                         workgroup_size::Int=512,
+                                         s0::Float32 = LDEM_S0_F32,
+                                         l0::Float32 = LDEM_L0_F32,
+                                         pixel_size_km::Float32 = 0.02f0,
+                                         pixel_size_m::Float32 = 20.0f0,
+                                         max_terrain_pix_scale::Float32 = 0.075f0,
+                                         mipmap_base::Float32 = 100.0f0,
+                                         elev_scale_to_m::Float32 = 0.5f0) where {T<:Real}
+    stack = TerrainStack(PolarStereoTerrain(
+        ldem;
+        window = (ldem_origin_row, ldem_origin_col, H, W),
+        max_mipmaps = max_mipmaps,
+        min_mipmaps = min_mipmaps,
+        s0 = s0,
+        l0 = l0,
+        pixel_size_km = pixel_size_km,
+        pixel_size_m = pixel_size_m,
+        max_terrain_pix_scale = max_terrain_pix_scale,
+        mipmap_base = mipmap_base,
+        elev_scale_to_m = elev_scale_to_m))
+    return render_terrain_stack_gpu(
+        stack, sun_pos_km, earth_pos_km, observer_height_m;
+        backend = backend,
+        DeviceArray = DeviceArray,
+        workgroup_size = workgroup_size)
 end

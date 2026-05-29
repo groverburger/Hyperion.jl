@@ -63,6 +63,17 @@ struct SiteDEM{T<:Real}
     elev_scale_to_m::Float32
 end
 
+struct SiteDEMInfo
+    H::Int
+    W::Int
+    s0::Float64
+    l0::Float64
+    pixel_size_m::Float64
+    lat0::Float64
+    lon0::Float64
+    sample_type::DataType
+end
+
 # ─── WKT parsing ─────────────────────────────────────────────────────────
 
 # Different drivers serialise the same parameter under different names.
@@ -132,8 +143,8 @@ rings around peaks. If you see those, try `load_site_dem_f32` instead.
 For the kernel's mipmap pyramid to halve cleanly through 5 levels,
 the TIF dims must be divisible by 16. (nobile_1m.tif: 4992×4096 ✓)
 """
-function load_site_dem(tif_path::AbstractString)
-    src, H, W, s0, l0, pixel_size_m, lat0, lon0 = _read_site_tif(tif_path)
+function load_site_dem(tif_path::AbstractString; window::Union{Nothing,NTuple{4,Int}} = nothing)
+    src, H, W, s0, l0, pixel_size_m, lat0, lon0 = _read_site_tif(tif_path; window)
     out = Array{Int16, 2}(undef, H, W)
     Threads.@threads for i in 1:H
         @inbounds for j in 1:W
@@ -156,8 +167,8 @@ detail.
 
 Costs: ~2× memory (Float32 vs Int16) for the DEM and its mipmaps.
 """
-function load_site_dem_f32(tif_path::AbstractString)
-    src, H, W, s0, l0, pixel_size_m, lat0, lon0 = _read_site_tif(tif_path)
+function load_site_dem_f32(tif_path::AbstractString; window::Union{Nothing,NTuple{4,Int}} = nothing)
+    src, H, W, s0, l0, pixel_size_m, lat0, lon0 = _read_site_tif(tif_path; window)
     out = Array{Float32, 2}(undef, H, W)
     Threads.@threads for i in 1:H
         @inbounds for j in 1:W
@@ -167,13 +178,15 @@ function load_site_dem_f32(tif_path::AbstractString)
     return SiteDEM{Float32}(out, H, W, s0, l0, pixel_size_m, lat0, lon0, 1.0f0)
 end
 
-# Shared TIF reader: returns the Float32 raw matrix + projection params.
-function _read_site_tif(tif_path::AbstractString)
+function read_site_dem_info(tif_path::AbstractString)
     dataset = ArchGDAL.read(tif_path)
+    return _site_dem_info(dataset)
+end
+
+function _site_dem_info(dataset)
     band = ArchGDAL.getband(dataset, 1)
-    raw = ArchGDAL.read(band)                    # (W, H) column-major
-    src = permutedims(raw, (2, 1))               # (H, W) row-major
-    H, W = size(src)
+    W = ArchGDAL.width(band)
+    H = ArchGDAL.height(band)
 
     gt = ArchGDAL.getgeotransform(dataset)
     pix_w = gt[2]; pix_h = -gt[6]
@@ -191,7 +204,37 @@ function _read_site_tif(tif_path::AbstractString)
     lat0_deg, lon0_deg = _parse_stereo_natural_origin(wkt)
     lat0 = deg2rad(lat0_deg); lon0 = deg2rad(lon0_deg)
 
-    return src, H, W, s0, l0, pixel_size_m, lat0, lon0
+    return SiteDEMInfo(H, W, s0, l0, pixel_size_m, lat0, lon0, eltype(band))
+end
+
+# Shared TIF reader: returns the Float32 raw matrix + projection params.
+function _read_site_tif(tif_path::AbstractString;
+                        window::Union{Nothing,NTuple{4,Int}} = nothing)
+    dataset = ArchGDAL.read(tif_path)
+    info = _site_dem_info(dataset)
+    band = ArchGDAL.getband(dataset, 1)
+
+    if window === nothing
+        raw = ArchGDAL.read(band)                    # (W, H) column-major
+        src = permutedims(raw, (2, 1))               # (H, W) row-major
+        return src, info.H, info.W, info.s0, info.l0,
+               info.pixel_size_m, info.lat0, info.lon0
+    end
+
+    origin_r, origin_c, H, W = window
+    origin_r >= 0 || error("site DEM window origin_r must be >= 0")
+    origin_c >= 0 || error("site DEM window origin_c must be >= 0")
+    H > 0 || error("site DEM window H must be > 0")
+    W > 0 || error("site DEM window W must be > 0")
+    origin_r + H <= info.H ||
+        error("site DEM window row extent exceeds DEM height")
+    origin_c + W <= info.W ||
+        error("site DEM window column extent exceeds DEM width")
+
+    raw = ArchGDAL.read(band, origin_c, origin_r, W, H)  # (W, H)
+    src = permutedims(raw, (2, 1))                       # (H, W)
+    return src, H, W, info.s0 - origin_c, info.l0 - origin_r,
+           info.pixel_size_m, info.lat0, info.lon0
 end
 
 """
@@ -248,23 +291,20 @@ function generate_live_shadow_frame_site_gpu(site::SiteDEM{T},
     l0            = Float32(site.l0)
     max_terrain_pix_scale = Float32(1.5 / site.pixel_size_m)
 
-    # `mipmap_base` is the pixel-distance at which the kernel starts
-    # using max-pooled mipmap levels instead of fine-grained level-0
-    # samples. Default `100.0f0` matches the LDEM convention: level 0
-    # covers the first 100 px of the ray. After commit 3a57940 the
-    # mipmap-on path is byte-exact with mipmap-off (verified across 9
-    # site-DEM timestamps), so the optimization is "free" — typically
-    # 1.5–2× speedup, no quality cost.
-    return generate_live_shadow_frame_gpu(
-        site.data, origin_r, origin_c, H, W,
-        sun_local, earth_local, observer_height_m;
-        max_mipmaps = max_mipmaps, min_mipmaps = min_mipmaps,
-        backend = backend, DeviceArray = DeviceArray,
+    stack = TerrainStack(SiteTerrain(site; window = (origin_r, origin_c, H, W)))
+    return render_terrain_stack_gpu(
+        stack, sun_pos_km, earth_pos_km, observer_height_m;
+        site_max_mipmaps = max_mipmaps,
+        site_min_mipmaps = min_mipmaps,
+        backend = backend,
+        DeviceArray = DeviceArray,
         workgroup_size = workgroup_size,
-        s0 = s0, l0 = l0,
-        pixel_size_km = pixel_size_km,
-        pixel_size_m  = pixel_size_m,
-        max_terrain_pix_scale = max_terrain_pix_scale,
-        mipmap_base = mipmap_base,
-        elev_scale_to_m = site.elev_scale_to_m)
+        site_mipmap_base = mipmap_base,
+        site_sun_local = sun_local,
+        site_earth_local = earth_local,
+        site_s0 = s0,
+        site_l0 = l0,
+        site_pixel_size_km = pixel_size_km,
+        site_pixel_size_m = pixel_size_m,
+        site_max_terrain_pix_scale = max_terrain_pix_scale)
 end

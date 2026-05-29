@@ -43,7 +43,7 @@
 # Runs by default from `Pkg.test()`. To skip the expensive correctness
 # sweep, set `HYP_SKIP_CORRECTNESS=1`. Direct invocation:
 #
-#   julia --project scripts/correctness/run_test.jl
+#   julia --project -e 'using Pkg; Pkg.test()'
 
 using Test
 using Hyperion
@@ -237,7 +237,7 @@ else
         if cmp.n_improvements > 0
             @info "IMPROVEMENT DETECTED: $(cmp.n_improvements) per-NAC metric cells " *
                   "are better than the pinned baseline across $(length(cmp.improvements)) NACs. " *
-                  "If this is intentional, run `julia --project scripts/correctness/refresh_baseline.jl` " *
+                  "If this is intentional, run `julia --project tools/fixtures/refresh_correctness_baseline.jl` " *
                   "and commit the updated baseline."
             imps = filter(r -> r.classification == "improvement", cmp.per_nac)
             sort!(imps; by = r -> -abs(r.delta))

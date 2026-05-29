@@ -1,0 +1,25 @@
+name = "viper8_1m_shirley"
+start = "2027-01-22T07:00:00"
+stop = "2027-01-22T07:00:00"
+step_hours = 1
+azel_step_hours = 1
+tile_height = 1024
+tile_width = 1024
+
+[[layers]]
+kind = "site"
+path = "data/inputs/nobile_area_viper_sfs_dem_8_0_native_crop.tif"
+name = "VIPER 8.0 Nobile 1m crop"
+sha256 = "85988a26542fb2ed51322b802b5bd47467e7bd009eb67b8ab127999b8ca24e19"
+
+[[layers]]
+kind = "farfield"
+path = "data/inputs/ldem_80s_20m.img"
+name = "Shirley LDEM 80S 20m"
+sha256 = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
+height = 30400
+width = 30400
+pixel_size_m = 20.0
+data_type = "int16"
+elevation_scale_m = 0.5
+byte_order = "little"

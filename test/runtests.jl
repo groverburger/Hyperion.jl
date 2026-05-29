@@ -25,6 +25,8 @@ else
     ""
 end
 const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
+const HAS_UP_TO_DATE_1M_INPUTS =
+    Hyp._barker_2023_ldem_ok() && Hyp._viper8_nobile_crop_ok()
 
 include("test_backend.jl")
 
@@ -115,14 +117,14 @@ end
 # byte-identical output across Apple CPU / Metal / NVIDIA CUDA. See the
 # included file for the 20-timestamp SHA table + PNG fixture details.
 
-if HAS_LDEM
+if HAS_LDEM || HAS_UP_TO_DATE_1M_INPUTS
     include("bitexact.jl")
 else
-    @warn "LDEM not available — skipping cross-platform bit-exactness test"
+    @warn "Bit-exact inputs not available — skipping cross-platform bit-exactness test"
 end
 
-# ─── 1m site DEM bit-exactness (skipped if site TIF not present) ──────────
-include("site_1m.jl")
+# ─── Terrain-stack site/farfield path ────────────────────────────────────
+include("terrain_stack.jl")
 
 # ─── Tier 0 correctness regression (default; skip via HYP_SKIP_CORRECTNESS=1)
 # Requires a GPU backend (Metal or CUDA) in the active environment;
@@ -143,7 +145,7 @@ include("site_1m.jl")
 #       include(joinpath(PROJECT_ROOT, "test", "correctness.jl"))'
 #
 # Or use the convenience runner:
-#   julia --project scripts/correctness/run_test.jl
+#   julia --project -e 'using Pkg; Pkg.test()'
 if get(ENV, "HYP_SKIP_CORRECTNESS", "0") == "1"
     @info "Tier 0 correctness test skipped (HYP_SKIP_CORRECTNESS=1)"
 else
