@@ -23,6 +23,7 @@ Base.@kwdef struct Options
     step::Period = Hour(1)
     azel_step::Period = Hour(1)
     times::Union{Nothing,Vector{DateTime}} = nothing
+    dataset_description::Bool = false
 end
 
 function usage()
@@ -30,7 +31,7 @@ function usage()
     Usage:
       julia --project scripts/generate_mapset.jl --preset=nobile20m [options]
       julia --project scripts/generate_mapset.jl --preset=viper8-shirley [options]
-      julia --project scripts/generate_mapset.jl --spec=examples/mapsets/viper8_shirley_range.toml [options]
+      julia --project scripts/generate_mapset.jl --spec=data/inputs/mapsets/viper8_shirley_range.toml [options]
 
     Time selection:
       --start=<datetime> --stop=<datetime> [--step-hours=<n>]
@@ -44,6 +45,7 @@ function usage()
       --azel-step-hours=<n>     azimuth/elevation CSV cadence for ranges
       --overwrite
       --dry-run
+      --dataset-description    write other/dataset_description.json
       --list-presets
     """
 end
@@ -111,6 +113,8 @@ function parse_args(args)
             opts = Options(opts; overwrite = true)
         elseif arg == "--dry-run"
             opts = Options(opts; dry_run = true)
+        elseif arg == "--dataset-description"
+            opts = Options(opts; dataset_description = true)
         else
             error("unknown argument: $arg\n\n$(usage())")
         end
@@ -132,10 +136,12 @@ function preset_config(name::AbstractString)
             "name" => "nobile_20m_shirley",
             "layers" => Any[
                 Dict{String,Any}(
-                    "kind" => "polar",
+                    "kind" => "farfield",
                     "path" => "data/inputs/ldem_80s_20m.img",
                     "name" => "Shirley LDEM 80S 20m Nobile window",
                     "window" => Any[8960, 18432, 512, 896],
+                    "data_type" => "int16",
+                    "elevation_scale_m" => 0.5,
                 ),
             ],
         )
@@ -147,12 +153,13 @@ function preset_config(name::AbstractString)
                     "kind" => "site",
                     "path" => "data/inputs/nobile_area_viper_sfs_dem_8_0_native_crop.tif",
                     "name" => "VIPER 8.0 Nobile 1m crop",
-                    "float32" => true,
                 ),
                 Dict{String,Any}(
-                    "kind" => "polar",
+                    "kind" => "farfield",
                     "path" => "data/inputs/ldem_80s_20m.img",
                     "name" => "Shirley LDEM 80S 20m",
+                    "data_type" => "int16",
+                    "elevation_scale_m" => 0.5,
                 ),
             ],
         )
@@ -189,7 +196,7 @@ function tuple4(v)
 end
 
 function layer_from_config(layer)
-    kind = String(layer["kind"])
+    kind = lowercase(String(layer["kind"]))
     path = abs_project_path(String(layer["path"]))
     isfile(path) || error("layer path does not exist: $path")
     if haskey(layer, "sha256")
@@ -202,15 +209,17 @@ function layer_from_config(layer)
     haskey(layer, "window") && (common[:window] = tuple4(layer["window"]))
     if kind == "site"
         haskey(layer, "cutoff") && (common[:cutoff] = Bool(layer["cutoff"]))
-        haskey(layer, "float32") && (common[:float32] = Bool(layer["float32"]))
         return Hyp.SiteDEMLayer(path; common...)
-    elseif kind == "polar"
+    elseif kind == "farfield" || kind == "polar"
         haskey(layer, "height") && (common[:H] = Int(layer["height"]))
         haskey(layer, "width") && (common[:W] = Int(layer["width"]))
         haskey(layer, "pixel_size_m") && (common[:pixel_size_m] = Float64(layer["pixel_size_m"]))
+        haskey(layer, "data_type") && (common[:data_type] = Symbol(lowercase(String(layer["data_type"]))))
+        haskey(layer, "elevation_scale_m") && (common[:elevation_scale_m] = Float64(layer["elevation_scale_m"]))
+        haskey(layer, "byte_order") && (common[:byte_order] = Symbol(lowercase(String(layer["byte_order"]))))
         return Hyp.PolarDEMLayer(path; common...)
     end
-    error("unknown layer kind '$kind'")
+    error("unknown layer kind '$kind'; expected site or farfield")
 end
 
 function configured_times(cfg, opts::Options)
@@ -235,20 +244,29 @@ function configured_range(cfg, opts::Options)
     return start, stop, step, azel_step
 end
 
-function build_spec(cfg, name, layers, start, stop, step, azel_step, output_root)
+function build_spec(cfg, name, layers, start, stop, step, azel_step, output_root;
+                    dataset_description::Bool = false)
     kwargs = Dict{Symbol,Any}(
         :step => step,
         :azel_step => azel_step,
         :output_root => output_root,
+        :dataset_description => dataset_description,
     )
     for (key, sym, cast) in (
             ("observer_height_m", :observer_height_m, Float64),
             ("workgroup_size", :workgroup_size, Int),
             ("tile_height", :tile_height, Int),
-            ("tile_width", :tile_width, Int))
+            ("tile_width", :tile_width, Int),
+            ("dataset_description", :dataset_description, Bool))
         haskey(cfg, key) && (kwargs[sym] = cast(cfg[key]))
     end
+    dataset_description && (kwargs[:dataset_description] = true)
     return Hyp.MapsetSpec(name, layers, start, stop; kwargs...)
+end
+
+function configured_dataset_description(cfg, opts::Options)
+    return opts.dataset_description ||
+        (haskey(cfg, "dataset_description") && Bool(cfg["dataset_description"]))
 end
 
 function print_plan(name, layers, output_root, backend, times, start, stop, step, azel_step)
@@ -275,7 +293,73 @@ function merge_single_frame!(target, tmp_mapset, ts)
        joinpath(target, "dsn", "dsn.$tag.png"); force = true)
 end
 
+function dataset_datetime(ts::DateTime)
+    return Dates.format(ts, dateformat"yyyy-mm-ddTHH:MM:SS") * "Z"
+end
+
+function dataset_period(step::Period)
+    t0 = DateTime(2000, 1, 1)
+    delta_ms = Dates.value((t0 + step) - t0)
+    delta_ms >= 0 || error("explicit timestamp ImageStep must be non-negative")
+    seconds, ms = divrem(delta_ms, 1000)
+    ms == 0 || error("explicit timestamp ImageStep must be whole seconds")
+    hours, rem_seconds = divrem(seconds, 3600)
+    minutes, secs = divrem(rem_seconds, 60)
+    return @sprintf("%02d:%02d:%02d", hours, minutes, secs)
+end
+
+function dataset_json_string(s::AbstractString)
+    escaped = replace(String(s),
+        "\\" => "\\\\",
+        "\"" => "\\\"",
+        "\b" => "\\b",
+        "\f" => "\\f",
+        "\n" => "\\n",
+        "\r" => "\\r",
+        "\t" => "\\t")
+    return "\"" * escaped * "\""
+end
+
+function explicit_time_step(times::Vector{DateTime})
+    sorted = sort(times)
+    length(sorted) > 1 || return Second(0)
+    step = sorted[2] - sorted[1]
+    for i in 3:length(sorted)
+        sorted[i] - sorted[i - 1] == step ||
+            error("dataset_description.json requires a regular ImageStep; explicit timestamps are irregular")
+    end
+    return step
+end
+
+function rewrite_dataset_description(src::AbstractString,
+                                     dst::AbstractString,
+                                     name::AbstractString,
+                                     times::Vector{DateTime})
+    sorted = sort(times)
+    isempty(sorted) && error("cannot write dataset description for empty timestamp list")
+    step = explicit_time_step(sorted)
+    replacements = Dict(
+        "Name" => dataset_json_string(name),
+        "Layers" => string(length(sorted)),
+        "Start" => dataset_json_string(dataset_datetime(first(sorted))),
+        "Stop" => dataset_json_string(dataset_datetime(last(sorted) + step)),
+        "ImageStep" => dataset_json_string(dataset_period(step)),
+    )
+    open(dst, "w") do io
+        for line in eachline(src)
+            m = match(r"^(\s*)\"([^\"]+)\":\s*(.*?)(,?)$", line)
+            if m !== nothing && haskey(replacements, m.captures[2])
+                println(io, m.captures[1], "\"", m.captures[2], "\": ",
+                        replacements[m.captures[2]], m.captures[4])
+            else
+                println(io, line)
+            end
+        end
+    end
+end
+
 function generate_explicit_times(cfg, name, layers, times, opts)
+    write_dataset_description = configured_dataset_description(cfg, opts)
     outdir = joinpath(opts.output_root, name)
     if isdir(outdir) && !opts.overwrite
         error("mapset output already exists: $outdir; pass --overwrite to reuse it")
@@ -293,12 +377,22 @@ function generate_explicit_times(cfg, name, layers, times, opts)
     end
     for ts in sort(times)
         subname = "$(name).__single__.$(Dates.format(ts, dateformat"yyyy-mm-ddTHH-MM-SS"))"
-        spec = build_spec(cfg, subname, layers, ts, ts, Hour(1), Hour(1), tmp_root)
+        spec = build_spec(cfg, subname, layers, ts, ts, Hour(1), Hour(1), tmp_root;
+                          dataset_description = write_dataset_description)
         tmp_mapset = Hyp.generate_mapset(spec; backend = opts.backend, overwrite = true)
         merge_single_frame!(outdir, tmp_mapset, ts)
-        hillshade_src = joinpath(tmp_mapset, "other", "site_hillshade.png")
-        hillshade_dst = joinpath(outdir, "other", "site_hillshade.png")
+        hillshade_src = joinpath(tmp_mapset, "other", "hillshade.tif")
+        hillshade_dst = joinpath(outdir, "other", "hillshade.tif")
         isfile(hillshade_dst) || cp(hillshade_src, hillshade_dst; force = true)
+        slope_src = joinpath(tmp_mapset, "other", "slope.tif")
+        slope_dst = joinpath(outdir, "other", "slope.tif")
+        isfile(slope_dst) || cp(slope_src, slope_dst; force = true)
+        if write_dataset_description
+            description_src = joinpath(tmp_mapset, "other", "dataset_description.json")
+            description_dst = joinpath(outdir, "other", "dataset_description.json")
+            isfile(description_dst) ||
+                rewrite_dataset_description(description_src, description_dst, name, times)
+        end
         lines = readlines(joinpath(tmp_mapset, "other", "azimuths_elevations.csv"))
         open(azel_path, azel_header_written ? "a" : "w") do io
             for (i, line) in enumerate(lines)
@@ -314,6 +408,7 @@ function generate_explicit_times(cfg, name, layers, times, opts)
         println(io, "mapset,time_mode,explicit")
         println(io, "mapset,timestamp_count,$(length(times))")
         println(io, "mapset,output_root,$(abspath(opts.output_root))")
+        println(io, "mapset,dataset_description,$write_dataset_description")
         println(io, "runtime,backend,$(opts.backend)")
         println(io, "tool,script,scripts/generate_mapset.jl")
     end
@@ -328,6 +423,7 @@ function main()
     layers = [layer_from_config(layer) for layer in cfg["layers"]]
     output_root = abspath(opts.output_root)
     times = configured_times(cfg, opts)
+    write_dataset_description = configured_dataset_description(cfg, opts)
     if times !== nothing && isempty(times)
         error("explicit timestamp list is empty")
     end
@@ -336,7 +432,8 @@ function main()
         start, stop, step, azel_step = configured_range(cfg, opts)
         print_plan(name, layers, output_root, opts.backend, nothing, start, stop, step, azel_step)
         opts.dry_run && return nothing
-        spec = build_spec(cfg, name, layers, start, stop, step, azel_step, output_root)
+        spec = build_spec(cfg, name, layers, start, stop, step, azel_step, output_root;
+                          dataset_description = write_dataset_description)
         outdir = Hyp.generate_mapset(spec; backend = opts.backend, overwrite = opts.overwrite)
         println("Wrote mapset: $outdir")
     else

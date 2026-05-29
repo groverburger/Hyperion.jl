@@ -65,6 +65,9 @@ end
 function load_ldem(path::AbstractString;
                    H::Int=30400, W::Int=30400,
                    pixel_size_m::Float64=20.0,
+                   data_type::Symbol=:auto,
+                   elevation_scale_m::Union{Nothing,Float64}=nothing,
+                   byte_order::Symbol=:little,
                    R_m::Float64=MOON_RADIUS_M)
     if lowercase(splitext(path)[2]) in (".tif", ".tiff")
         dataset = ArchGDAL.read(path)
@@ -76,11 +79,23 @@ function load_ldem(path::AbstractString;
         return LDEM(elevation_m, H, W, 1.0f0)
     end
 
-    # Memory-map to avoid loading 1.7 GB eagerly
-    raw = Mmap.mmap(open(path, "r"), Matrix{Int16}, (W, H))  # column-major read
+    byte_order == :little ||
+        error("raw LDEM byte_order must be :little; got $byte_order")
+    raw_data_type = data_type == :auto ? :int16 : data_type
+    T, default_scale = if raw_data_type == :int16
+        Int16, 0.5
+    elseif raw_data_type == :float32
+        Float32, 1.0
+    else
+        error("raw LDEM data_type must be :int16 or :float32; got $data_type")
+    end
+    scale = elevation_scale_m === nothing ? default_scale : elevation_scale_m
+
+    # Memory-map to avoid loading large rasters eagerly.
+    raw = Mmap.mmap(open(path, "r"), Matrix{T}, (W, H))  # column-major read
     elevation = permutedims(raw, (2, 1))  # → (H, W) row-major view
 
-    return LDEM(elevation, H, W, 0.5f0)
+    return LDEM(elevation, H, W, Float32(scale))
 end
 
 # ─── PNG output palettes ──────────────────────────────────────────────────

@@ -36,13 +36,15 @@ Explicit timestamp lists are supported inline or from a text file:
 
 ```bash
 julia --project scripts/generate_mapset.jl \
-  --spec=examples/mapsets/viper8_shirley_range.toml \
+  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
   --times=2027-01-22T07:00:00,2027-02-12T12:00:00
 
 julia --project scripts/generate_mapset.jl \
-  --spec=examples/mapsets/viper8_shirley_range.toml \
+  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
   --times=scripts/test_timestamps.txt
 ```
+
+Pass `--dataset-description` to write `other/dataset_description.json`.
 
 ## TOML Spec
 
@@ -59,16 +61,24 @@ kind = "site"
 path = "data/inputs/nobile_area_viper_sfs_dem_8_0_native_crop.tif"
 name = "VIPER 8.0 Nobile 1m crop"
 sha256 = "85988a26542fb2ed51322b802b5bd47467e7bd009eb67b8ab127999b8ca24e19"
-float32 = true
 
 [[layers]]
-kind = "polar"
+kind = "farfield"
 path = "data/inputs/ldem_80s_20m.img"
 name = "Shirley LDEM 80S 20m"
 sha256 = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
+height = 30400
+width = 30400
+pixel_size_m = 20.0
+data_type = "int16"
+elevation_scale_m = 0.5
+byte_order = "little"
 ```
 
 Layer SHA fields are optional, but supported specs should include them.
+Site GeoTIFF sample type is detected at runtime. Headerless `.img`
+farfields should declare their dimensions, pixel size, sample type, and
+elevation scale because those cannot be inferred from the file.
 
 ## Library API
 
@@ -88,3 +98,6 @@ spec = MapsetSpec(
 
 generate_mapset(spec; backend = :auto)
 ```
+
+Set `dataset_description = true` on `MapsetSpec` to also write
+`other/dataset_description.json`.

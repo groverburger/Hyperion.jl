@@ -71,6 +71,7 @@ struct SiteDEMInfo
     pixel_size_m::Float64
     lat0::Float64
     lon0::Float64
+    sample_type::DataType
 end
 
 # ─── WKT parsing ─────────────────────────────────────────────────────────
@@ -203,7 +204,7 @@ function _site_dem_info(dataset)
     lat0_deg, lon0_deg = _parse_stereo_natural_origin(wkt)
     lat0 = deg2rad(lat0_deg); lon0 = deg2rad(lon0_deg)
 
-    return SiteDEMInfo(H, W, s0, l0, pixel_size_m, lat0, lon0)
+    return SiteDEMInfo(H, W, s0, l0, pixel_size_m, lat0, lon0, eltype(band))
 end
 
 # Shared TIF reader: returns the Float32 raw matrix + projection params.

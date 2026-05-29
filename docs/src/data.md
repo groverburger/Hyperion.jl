@@ -26,11 +26,12 @@ format GeoTIFF, Float32 meters
 ## Site DEM Height Encoding
 
 `load_site_dem` converts source meters to Int16 half-meter counts.
-`load_site_dem_f32` keeps Float32 meters. Mapset site layers default to
-Float32.
+`load_site_dem_f32` keeps Float32 meters. Mapset site layers inspect the
+GeoTIFF band type at runtime and preserve floating-point sources as
+Float32 meters.
 
 ## Hash Policy
 
-- Supported mapset examples include `sha256` for every external layer.
+- Supported mapset specs include `sha256` for every external layer.
 - Fixture-building tools write input SHA manifests.
 - If a workflow uses external data but cannot validate a hash, document why.

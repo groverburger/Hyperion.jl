@@ -25,7 +25,7 @@ Generate a single 20 m Nobile frame:
 
 ```bash
 julia --project scripts/generate_mapset.jl \
-  --spec=examples/mapsets/nobile_20m_shirley.toml \
+  --spec=data/inputs/mapsets/nobile_20m_shirley.toml \
   --backend=auto --overwrite
 ```
 
@@ -33,6 +33,6 @@ Generate a VIPER 8.0 + Shirley mapset:
 
 ```bash
 julia --project scripts/generate_mapset.jl \
-  --spec=examples/mapsets/viper8_shirley_range.toml \
+  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
   --backend=auto
 ```

@@ -39,7 +39,7 @@ Hyperion does not download DEMs during tests or generation. Place inputs under
 | VIPER 8.0 Nobile crop | `data/inputs/nobile_area_viper_sfs_dem_8_0_native_crop.tif` | `85988a26542fb2ed51322b802b5bd47467e7bd009eb67b8ab127999b8ca24e19` |
 | Nobile 1 m fixture | `data/inputs/nobile_1m.tif` | `e8cc7e5b530972d1d84083b335f961f0aa87e64c39697d942f10589930dd69f4` |
 
-Mapset examples include SHA checks so accidental input swaps fail early.
+Mapset specs include SHA checks so accidental input swaps fail early.
 Detailed provenance lives in the docs.
 
 ## Generate Mapsets
@@ -48,7 +48,7 @@ Detailed provenance lives in the docs.
 
 ```bash
 julia --project scripts/generate_mapset.jl \
-  --spec=examples/mapsets/nobile_20m_shirley.toml \
+  --spec=data/inputs/mapsets/nobile_20m_shirley.toml \
   --backend=auto --overwrite
 ```
 
@@ -56,7 +56,7 @@ VIPER 8.0 1 m site DEM with Shirley 20 m farfield:
 
 ```bash
 julia --project scripts/generate_mapset.jl \
-  --spec=examples/mapsets/viper8_shirley_range.toml \
+  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
   --backend=auto
 ```
 
@@ -64,7 +64,7 @@ Explicit timestamps:
 
 ```bash
 julia --project scripts/generate_mapset.jl \
-  --spec=examples/mapsets/viper8_shirley_range.toml \
+  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
   --times=2027-01-22T07:00:00,2027-02-12T12:00:00
 ```
 
@@ -72,7 +72,7 @@ Or use a timestamp file:
 
 ```bash
 julia --project scripts/generate_mapset.jl \
-  --spec=examples/mapsets/viper8_shirley_range.toml \
+  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
   --times=scripts/test_timestamps.txt
 ```
 
@@ -81,10 +81,14 @@ Outputs are written to `data/outputs/<mapset-name>/`:
 ```text
 sun/sun.<timestamp>.png
 dsn/dsn.<timestamp>.png
-other/site_hillshade.png
+other/hillshade.tif
+other/slope.tif
 other/azimuths_elevations.csv
 other/manifest.csv
 ```
+
+Pass `--dataset-description` to also write
+`other/dataset_description.json`.
 
 ## Define New Mapsets
 
@@ -100,12 +104,17 @@ step_hours = 1
 kind = "site"
 path = "data/inputs/my_site.tif"
 sha256 = "<expected hash>"
-float32 = true
 
 [[layers]]
-kind = "polar"
+kind = "farfield"
 path = "data/inputs/ldem_80s_20m.img"
 sha256 = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
+height = 30400
+width = 30400
+pixel_size_m = 20.0
+data_type = "int16"
+elevation_scale_m = 0.5
+byte_order = "little"
 ```
 
 Then run:

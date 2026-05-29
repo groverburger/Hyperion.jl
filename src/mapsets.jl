@@ -1,6 +1,4 @@
 using Dates
-using FileIO
-using Images
 using KernelAbstractions: CPU
 using Printf
 using ProgressMeter
@@ -20,7 +18,6 @@ Base.@kwdef struct SiteDEMLayerSpec <: AbstractMapsetLayerSpec
     name::Union{Nothing,String} = nothing
     window::Union{Nothing,NTuple{4,Int}} = nothing
     cutoff::Bool = false
-    float32::Bool = true
 end
 
 Base.@kwdef struct PolarDEMLayerSpec <: AbstractMapsetLayerSpec
@@ -30,6 +27,9 @@ Base.@kwdef struct PolarDEMLayerSpec <: AbstractMapsetLayerSpec
     H::Int = 30400
     W::Int = 30400
     pixel_size_m::Float64 = 20.0
+    data_type::Symbol = :auto
+    elevation_scale_m::Union{Nothing,Float64} = nothing
+    byte_order::Symbol = :little
 end
 
 Base.@kwdef struct MapsetSpec
@@ -45,6 +45,7 @@ Base.@kwdef struct MapsetSpec
     workgroup_size::Int = 512
     tile_height::Int = 1024
     tile_width::Int = 1024
+    dataset_description::Bool = false
     verbose::Bool = true
 end
 
@@ -81,17 +82,21 @@ Render a reproducible Sun/DSN mapset into
 
   - `sun/sun.<timestamp>.png`
   - `dsn/dsn.<timestamp>.png`
-  - `other/site_hillshade.png`
+  - `other/hillshade.tif`
+  - `other/slope.tif`
   - `other/azimuths_elevations.csv`
   - `other/manifest.csv`
 
 `spec.step` controls Sun/DSN frame cadence. `spec.azel_step` controls
 the azimuth/elevation CSV cadence and defaults to one hour.
+Set `dataset_description = true` on the spec to also write
+`other/dataset_description.json`.
 
 The first layer defines the rendered site/window. It may be a
-`SiteDEMLayer(...)` or a windowed `PolarDEMLayer(...)`. Additional layers
-must currently be `PolarDEMLayer(...)` farfields, matching the renderer's
-site→polar terrain-stack support.
+`SiteDEMLayer(...)` or a windowed `PolarDEMLayer(...)`. In TOML specs,
+polar-stereographic DEMs are declared with `kind = "farfield"`. Additional
+layers must currently be polar-stereographic farfields, matching the
+renderer terrain-stack support.
 
 Examples:
 
@@ -144,6 +149,10 @@ function generate_mapset(spec::MapsetSpec;
     mkpath(sun_dir); mkpath(dsn_dir); mkpath(other_dir)
     legacy_input_products = joinpath(other_dir, "input_products.csv")
     isfile(legacy_input_products) && rm(legacy_input_products)
+    for legacy_hillshade in ("site_hillshade.png", "hillshade.png")
+        legacy_path = joinpath(other_dir, legacy_hillshade)
+        isfile(legacy_path) && rm(legacy_path)
+    end
     backend_obj, DeviceArray = _resolve_mapset_backend(backend)
 
     loaded = _load_mapset_layers(spec.layers)
@@ -155,12 +164,17 @@ function generate_mapset(spec::MapsetSpec;
 
     init_spice(spec.kernels_dir)
 
-    _write_mapset_hillshade(joinpath(other_dir, "site_hillshade.png"), first)
+    _write_mapset_terrain_derivatives(other_dir, first)
     lat, lon, elev = _mapset_center_lat_lon_elev(first)
     write_azel_csv(joinpath(other_dir, "azimuths_elevations.csv"),
                    azel_timestamps, lat, lon; query_elev_m = elev)
     _write_manifest_csv(joinpath(other_dir, "manifest.csv"), spec,
                         backend_obj, DeviceArray)
+    if spec.dataset_description
+        _write_dataset_description_json(
+            joinpath(other_dir, "dataset_description.json"),
+            spec, first, timestamps)
+    end
 
     tile_height, tile_width = _mapset_tile_size(spec, stack, H, W)
     tiled_layered = length(stack.sources) > 1 && tile_height > 0 && tile_width > 0
@@ -381,7 +395,7 @@ function _load_mapset_layers(specs)
             info = read_site_dem_info(spec.path)
             window = _default_window(spec.window, info.H, info.W)
             load_window = spec.cutoff ? window : nothing
-            site = spec.float32 ?
+            site = info.sample_type <: AbstractFloat ?
                 load_site_dem_f32(spec.path; window = load_window) :
                 load_site_dem(spec.path; window = load_window)
             source_window = spec.cutoff ? (0, 0, site.H, site.W) : window
@@ -391,7 +405,10 @@ function _load_mapset_layers(specs)
                 spec, _mapset_layer_name(spec), :site, site, source, max_mm, min_mm))
         elseif spec isa PolarDEMLayerSpec
             ldem = load_ldem(spec.path; H = spec.H, W = spec.W,
-                             pixel_size_m = spec.pixel_size_m)
+                             pixel_size_m = spec.pixel_size_m,
+                             data_type = spec.data_type,
+                             elevation_scale_m = spec.elevation_scale_m,
+                             byte_order = spec.byte_order)
             max_mm, min_mm = build_ldem_mipmaps_minmax(ldem.data)
             is_first = i == 1
             source = PolarStereoTerrain(ldem.data;
@@ -537,13 +554,19 @@ function _write_manifest_csv(path::AbstractString, spec::MapsetSpec, backend, De
             if layer_spec isa SiteDEMLayerSpec
                 println(io, join((_csv_cell(prefix), _csv_cell("kind"), _csv_cell("site_dem")), ","))
                 println(io, join((_csv_cell(prefix), _csv_cell("datatype"),
-                                  _csv_cell(layer_spec.float32 ? "Float32" : "Int16")), ","))
+                                  _csv_cell("auto")), ","))
                 println(io, join((_csv_cell(prefix), _csv_cell("cutoff"), _csv_cell(layer_spec.cutoff)), ","))
             elseif layer_spec isa PolarDEMLayerSpec
-                println(io, join((_csv_cell(prefix), _csv_cell("kind"), _csv_cell("polar_dem")), ","))
+                println(io, join((_csv_cell(prefix), _csv_cell("kind"), _csv_cell("farfield_dem")), ","))
                 println(io, join((_csv_cell(prefix), _csv_cell("height"), _csv_cell(layer_spec.H)), ","))
                 println(io, join((_csv_cell(prefix), _csv_cell("width"), _csv_cell(layer_spec.W)), ","))
                 println(io, join((_csv_cell(prefix), _csv_cell("pixel_size_m"), _csv_cell(layer_spec.pixel_size_m)), ","))
+                println(io, join((_csv_cell(prefix), _csv_cell("data_type"), _csv_cell(layer_spec.data_type)), ","))
+                if layer_spec.elevation_scale_m !== nothing
+                    println(io, join((_csv_cell(prefix), _csv_cell("elevation_scale_m"),
+                                      _csv_cell(layer_spec.elevation_scale_m)), ","))
+                end
+                println(io, join((_csv_cell(prefix), _csv_cell("byte_order"), _csv_cell(layer_spec.byte_order)), ","))
             end
             if layer_spec.window !== nothing
                 println(io, join((_csv_cell(prefix), _csv_cell("window"), _csv_cell(layer_spec.window)), ","))
@@ -566,6 +589,133 @@ function _mapset_manifest_rows(spec::MapsetSpec)
         "tile_height" => string(spec.tile_height),
         "tile_width" => string(spec.tile_width),
     ]
+end
+
+function _write_dataset_description_json(path::AbstractString,
+                                         spec::MapsetSpec,
+                                         first_layer::_LoadedMapsetLayer,
+                                         timestamps::AbstractVector{DateTime})
+    isempty(timestamps) && error("cannot write dataset description for an empty timestamp list")
+    origin_r, origin_c, H, W = _mapset_render_window(first_layer)
+    rows = Pair{String,Any}[
+        "Name" => spec.name,
+        "Line" => origin_r,
+        "Sample" => origin_c,
+        "Width" => W,
+        "Height" => H,
+        "WidthWithStride" => W,
+        "Layers" => length(timestamps),
+        "Start" => _dataset_description_datetime(first(timestamps)),
+        "Stop" => _dataset_description_datetime(last(timestamps) + spec.step),
+        "ImageStep" => _dataset_description_period(spec.step),
+        "MetersPerPixel" => Float64(_mapset_pixel_size_m(first_layer)),
+        "Projection" => _dataset_description_projection(first_layer),
+        "MaskDataIntervals" => nothing,
+    ]
+    open(path, "w") do io
+        println(io, "{")
+        for (i, (key, value)) in enumerate(rows)
+            comma = i == length(rows) ? "" : ","
+            println(io, "  ", _json_string(key), ": ", _json_value(value), comma)
+        end
+        println(io, "}")
+    end
+    return path
+end
+
+function _dataset_description_datetime(dt::DateTime)
+    return Dates.format(dt, dateformat"yyyy-mm-ddTHH:MM:SS") * "Z"
+end
+
+function _dataset_description_period(p::Period)
+    t0 = DateTime(2000, 1, 1)
+    delta_ms = Dates.value((t0 + p) - t0)
+    delta_ms >= 0 || error("dataset description period must be non-negative")
+    seconds, ms = divrem(delta_ms, 1000)
+    ms == 0 || error("dataset description ImageStep must be whole seconds")
+    hours, rem_seconds = divrem(seconds, 3600)
+    minutes, secs = divrem(rem_seconds, 60)
+    return @sprintf("%02d:%02d:%02d", hours, minutes, secs)
+end
+
+function _dataset_description_projection(layer::_LoadedMapsetLayer)
+    if layer.kind === :site
+        dataset = ArchGDAL.read(layer.spec.path)
+        wkt = ArchGDAL.getproj(dataset)
+        isempty(strip(wkt)) && error("site DEM has no projection WKT: $(layer.spec.path)")
+        return wkt
+    end
+    layer.kind === :polar ||
+        error("cannot describe projection for mapset layer kind $(layer.kind)")
+    return _polar_stereographic_wkt(layer)
+end
+
+function _polar_stereographic_wkt(layer::_LoadedMapsetLayer)
+    source = layer.source
+    source isa PolarStereoTerrain ||
+        error("polar mapset layer does not use PolarStereoTerrain")
+    source.s0 == LDEM_S0_F32 ||
+        error("cannot infer polar projection for nonstandard s0=$(source.s0)")
+    source.l0 == LDEM_L0_F32 ||
+        error("cannot infer polar projection for nonstandard l0=$(source.l0)")
+    radius_m = R_KM_F64 * 1000.0
+    return _polar_stereographic_wkt(;
+        radius_m,
+        latitude_of_origin = -90.0,
+        central_meridian = 0.0,
+        scale_factor = 1.0,
+        false_easting = 0.0,
+        false_northing = 0.0)
+end
+
+function _polar_stereographic_wkt(; radius_m::Real,
+                                  latitude_of_origin::Real,
+                                  central_meridian::Real,
+                                  scale_factor::Real,
+                                  false_easting::Real,
+                                  false_northing::Real)
+    return string(
+        "PROJCS[\"unnamed\",",
+        "GEOGCS[\"unnamed ellipse\",",
+        "DATUM[\"unknown\",SPHEROID[\"unnamed\",", _wkt_number(radius_m), ",0]],",
+        "PRIMEM[\"Greenwich\",0],",
+        "UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]]],",
+        "PROJECTION[\"Polar_Stereographic\"],",
+        "PARAMETER[\"latitude_of_origin\",", _wkt_number(latitude_of_origin), "],",
+        "PARAMETER[\"central_meridian\",", _wkt_number(central_meridian), "],",
+        "PARAMETER[\"scale_factor\",", _wkt_number(scale_factor), "],",
+        "PARAMETER[\"false_easting\",", _wkt_number(false_easting), "],",
+        "PARAMETER[\"false_northing\",", _wkt_number(false_northing), "],",
+        "UNIT[\"metre\",1],",
+        "AXIS[\"Easting\",NORTH],",
+        "AXIS[\"Northing\",NORTH]]")
+end
+
+function _wkt_number(x::Real)
+    xf = Float64(x)
+    isfinite(xf) || error("cannot encode non-finite WKT number: $x")
+    if isinteger(xf)
+        return string(round(Int, xf))
+    end
+    return string(xf)
+end
+
+_json_value(::Nothing) = "null"
+_json_value(x::Bool) = x ? "true" : "false"
+_json_value(x::Integer) = string(x)
+_json_value(x::AbstractFloat) = isfinite(x) ? string(x) : error("cannot encode non-finite JSON number: $x")
+_json_value(x::AbstractString) = _json_string(x)
+
+function _json_string(s::AbstractString)
+    escaped = replace(String(s),
+        "\\" => "\\\\",
+        "\"" => "\\\"",
+        "\b" => "\\b",
+        "\f" => "\\f",
+        "\n" => "\\n",
+        "\r" => "\\r",
+        "\t" => "\\t")
+    return "\"" * escaped * "\""
 end
 
 function _runtime_manifest_rows(backend, DeviceArray)
@@ -614,31 +764,60 @@ function _csv_cell(x)
     return s
 end
 
-function _write_mapset_hillshade(path::AbstractString, layer::_LoadedMapsetLayer)
+function _write_mapset_terrain_derivatives(other_dir::AbstractString,
+                                           layer::_LoadedMapsetLayer)
+    mkpath(other_dir)
+    tmp_dir = mktempdir()
+    dem_path = joinpath(tmp_dir, "dem.tif")
+    _write_mapset_dem_tif(dem_path, layer)
+    run(`gdaldem hillshade $dem_path $(joinpath(other_dir, "hillshade.tif"))
+        -of GTiff -compute_edges -co COMPRESS=LZW`)
+    run(`gdaldem slope $dem_path $(joinpath(other_dir, "slope.tif"))
+        -of GTiff -s 1.0 -compute_edges -co COMPRESS=LZW`)
+    return nothing
+end
+
+function _write_mapset_dem_tif(path::AbstractString, layer::_LoadedMapsetLayer)
     elev = _mapset_site_elevation_window(layer)
     H, W = size(elev)
-    out = Array{RGB{N0f8}}(undef, H, W)
-    az = deg2rad(315.0)
-    alt = deg2rad(35.0)
-    pix = Float32(_mapset_pixel_size_m(layer))
-    @inbounds for r in 1:H, c in 1:W
-        r0 = max(1, r - 1); r1 = min(H, r + 1)
-        c0 = max(1, c - 1); c1 = min(W, c + 1)
-        dzdx = (elev[r, c1] - elev[r, c0]) / (Float32(c1 - c0) * pix)
-        dzdy = (elev[r1, c] - elev[r0, c]) / (Float32(r1 - r0) * pix)
-        nx = -dzdx
-        ny = dzdy
-        nz = 1.0f0
-        invn = inv(sqrt(nx * nx + ny * ny + nz * nz))
-        nx *= invn; ny *= invn; nz *= invn
-        lx = Float32(cos(alt) * cos(az))
-        ly = Float32(cos(alt) * sin(az))
-        lz = Float32(sin(alt))
-        shade = clamp(0.5f0 + 0.5f0 * (nx * lx + ny * ly + nz * lz), 0.0f0, 1.0f0)
-        px = N0f8(shade)
-        out[r, c] = RGB{N0f8}(px, px, px)
+    raw = permutedims(elev, (2, 1))
+    ArchGDAL.create(path; driver = ArchGDAL.getdriver("GTiff"),
+                    width = W, height = H, nbands = 1, dtype = Float32,
+                    options = ["COMPRESS=LZW"]) do ds
+        ArchGDAL.setgeotransform!(ds, _mapset_geotransform(layer))
+        ArchGDAL.setproj!(ds, _dataset_description_projection(layer))
+        band = ArchGDAL.getband(ds, 1)
+        ArchGDAL.write!(band, raw)
     end
-    FileIO.save(path, out)
+end
+
+function _mapset_geotransform(layer::_LoadedMapsetLayer)
+    origin_r, origin_c, _, _ = _source_window(layer.source)
+    pixel = Float64(_mapset_pixel_size_m(layer))
+    if layer.kind === :site
+        site = layer.dem
+        return Float64[
+            (Float64(origin_c) - site.s0 - 0.5) * pixel,
+            pixel,
+            0.0,
+            (site.l0 - Float64(origin_r) + 0.5) * pixel,
+            0.0,
+            -pixel,
+        ]
+    end
+    layer.kind === :polar ||
+        error("cannot derive geotransform for mapset layer kind $(layer.kind)")
+    source = layer.source
+    source isa PolarStereoTerrain ||
+        error("polar mapset layer does not use PolarStereoTerrain")
+    return Float64[
+        (Float64(origin_c) - Float64(source.s0) - 0.5) * pixel,
+        pixel,
+        0.0,
+        (Float64(source.l0) - Float64(origin_r) + 0.5) * pixel,
+        0.0,
+        -pixel,
+    ]
 end
 
 function _mapset_site_elevation_window(layer::_LoadedMapsetLayer)

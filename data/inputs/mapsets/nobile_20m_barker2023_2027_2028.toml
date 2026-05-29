@@ -1,0 +1,15 @@
+name = "nobile_20m_barker2023_2027_2028"
+start = "2027-06-01T00:00:00"
+stop = "2028-06-01T00:00:00"
+step_hours = 2
+azel_step_hours = 1
+
+[[layers]]
+kind = "farfield"
+path = "data/inputs/LDEM_80S_20MPP_ADJ.TIF"
+name = "Barker 2023 LDEM 80S 20m Nobile window"
+sha256 = "09b7ca80f9e6a146f970225d18af72fc02787669b3ef51b888e347d2b6845649"
+window = [8960, 18432, 512, 896]
+height = 30400
+width = 30400
+pixel_size_m = 20.0
