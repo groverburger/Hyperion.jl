@@ -43,7 +43,7 @@ function usage()
       --out=<path>              output root, default data/outputs
       --backend=auto|metal|cuda|cpu
       --azel-step-hours=<n>     azimuth/elevation CSV cadence for ranges
-      --overwrite
+      --overwrite               rerender existing frames instead of resuming
       --dry-run
       --dataset-description    write other/dataset_description.json
       --list-presets
@@ -282,15 +282,23 @@ function print_plan(name, layers, output_root, backend, times, start, stop, step
     end
 end
 
-function merge_single_frame!(target, tmp_mapset, ts)
+function merge_single_frame!(target, tmp_mapset, ts; overwrite::Bool = false)
     tag = Dates.format(ts, dateformat"yyyy-mm-ddTHH-MM-SS")
     mkpath(joinpath(target, "sun"))
     mkpath(joinpath(target, "dsn"))
     mkpath(joinpath(target, "other"))
-    cp(joinpath(tmp_mapset, "sun", "sun.$tag.png"),
-       joinpath(target, "sun", "sun.$tag.png"); force = true)
-    cp(joinpath(tmp_mapset, "dsn", "dsn.$tag.png"),
-       joinpath(target, "dsn", "dsn.$tag.png"); force = true)
+    sun_dst = joinpath(target, "sun", "sun.$tag.png")
+    dsn_dst = joinpath(target, "dsn", "dsn.$tag.png")
+    if overwrite || !isfile(sun_dst)
+        cp(joinpath(tmp_mapset, "sun", "sun.$tag.png"), sun_dst; force = true)
+    else
+        @warn "sun image already exists; leaving it unchanged" timestamp=tag path=sun_dst
+    end
+    if overwrite || !isfile(dsn_dst)
+        cp(joinpath(tmp_mapset, "dsn", "dsn.$tag.png"), dsn_dst; force = true)
+    else
+        @warn "dsn image already exists; leaving it unchanged" timestamp=tag path=dsn_dst
+    end
 end
 
 function dataset_datetime(ts::DateTime)
@@ -361,26 +369,36 @@ end
 function generate_explicit_times(cfg, name, layers, times, opts)
     write_dataset_description = configured_dataset_description(cfg, opts)
     outdir = joinpath(opts.output_root, name)
-    if isdir(outdir) && !opts.overwrite
-        error("mapset output already exists: $outdir; pass --overwrite to reuse it")
-    end
-    rm(outdir; recursive = true, force = true)
+    isdir(outdir) && !opts.overwrite &&
+        @warn "mapset output already exists; resuming missing frames" outdir
     mkpath(outdir)
     tmp_root = mktempdir()
     azel_path = joinpath(outdir, "other", "azimuths_elevations.csv")
-    azel_header_written = false
     mkpath(joinpath(outdir, "other"))
+    azel_header_written = !opts.overwrite && isfile(azel_path)
     open(joinpath(outdir, "other", "timestamps.txt"), "w") do io
         for ts in sort(times)
             println(io, Dates.format(ts, dateformat"yyyy-mm-ddTHH:MM:SS"))
         end
     end
     for ts in sort(times)
+        tag = Dates.format(ts, dateformat"yyyy-mm-ddTHH-MM-SS")
+        sun_path = joinpath(outdir, "sun", "sun.$tag.png")
+        dsn_path = joinpath(outdir, "dsn", "dsn.$tag.png")
+        sun_exists = isfile(sun_path)
+        dsn_exists = isfile(dsn_path)
+        if !opts.overwrite && sun_exists && dsn_exists
+            @warn "mapset frame already exists; skipping" timestamp=tag sun=sun_path dsn=dsn_path
+            continue
+        elseif !opts.overwrite && (sun_exists || dsn_exists)
+            @warn "partial mapset frame already exists; rendering missing image(s) only" timestamp=tag sun_exists dsn_exists
+        end
+
         subname = "$(name).__single__.$(Dates.format(ts, dateformat"yyyy-mm-ddTHH-MM-SS"))"
         spec = build_spec(cfg, subname, layers, ts, ts, Hour(1), Hour(1), tmp_root;
                           dataset_description = write_dataset_description)
         tmp_mapset = Hyp.generate_mapset(spec; backend = opts.backend, overwrite = true)
-        merge_single_frame!(outdir, tmp_mapset, ts)
+        merge_single_frame!(outdir, tmp_mapset, ts; overwrite = opts.overwrite)
         hillshade_src = joinpath(tmp_mapset, "other", "hillshade.tif")
         hillshade_dst = joinpath(outdir, "other", "hillshade.tif")
         isfile(hillshade_dst) || cp(hillshade_src, hillshade_dst; force = true)

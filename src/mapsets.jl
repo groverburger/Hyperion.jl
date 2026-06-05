@@ -92,6 +92,9 @@ the azimuth/elevation CSV cadence and defaults to one hour.
 Set `dataset_description = true` on the spec to also write
 `other/dataset_description.json`.
 
+Existing complete frames are skipped by default so interrupted mapset
+generation can be resumed. Pass `overwrite=true` to rerender existing frames.
+
 The first layer defines the rendered site/window. It may be a
 `SiteDEMLayer(...)` or a windowed `PolarDEMLayer(...)`. In TOML specs,
 polar-stereographic DEMs are declared with `kind = "farfield"`. Additional
@@ -143,9 +146,8 @@ function generate_mapset(spec::MapsetSpec;
     sun_dir = joinpath(outdir, "sun")
     dsn_dir = joinpath(outdir, "dsn")
     other_dir = joinpath(outdir, "other")
-    if isdir(outdir) && !overwrite
-        error("mapset output already exists: $outdir; pass overwrite=true to reuse it")
-    end
+    isdir(outdir) && !overwrite &&
+        @warn "mapset output already exists; resuming missing frames" outdir
     mkpath(sun_dir); mkpath(dsn_dir); mkpath(other_dir)
     legacy_input_products = joinpath(other_dir, "input_products.csv")
     isfile(legacy_input_products) && rm(legacy_input_products)
@@ -200,6 +202,22 @@ function generate_mapset(spec::MapsetSpec;
         nothing
 
     for (idx, ts) in pairs(timestamps)
+        tag = _mapset_timestamp_tag(ts)
+        sun_path = joinpath(sun_dir, "sun.$tag.png")
+        dsn_path = joinpath(dsn_dir, "dsn.$tag.png")
+        sun_exists = isfile(sun_path)
+        dsn_exists = isfile(dsn_path)
+        if !overwrite && sun_exists && dsn_exists
+            @warn "mapset frame already exists; skipping" timestamp=tag sun=sun_path dsn=dsn_path
+            next!(progress; showvalues = [
+                (:timestamp, tag),
+                (:status, "skipped"),
+            ])
+            continue
+        elseif !overwrite && (sun_exists || dsn_exists)
+            @warn "partial mapset frame already exists; rendering missing image(s) only" timestamp=tag sun_exists dsn_exists
+        end
+
         frame_t0 = time()
         et = datetime_to_et(ts)
         sun_t = Tuple(get_body_position(NAIF_SUN, et))
@@ -235,9 +253,16 @@ function generate_mapset(spec::MapsetSpec;
                 workgroup_size = spec.workgroup_size,
                 debug_outputs = false)
         end
-        tag = _mapset_timestamp_tag(ts)
-        save_indexed_png(sun, SUN_PALETTE, joinpath(sun_dir, "sun.$tag.png"))
-        save_indexed_png(dsn, DSN_PALETTE, joinpath(dsn_dir, "dsn.$tag.png"))
+        if overwrite || !sun_exists
+            save_indexed_png(sun, SUN_PALETTE, sun_path)
+        else
+            @warn "sun image already exists; leaving it unchanged" timestamp=tag path=sun_path
+        end
+        if overwrite || !dsn_exists
+            save_indexed_png(dsn, DSN_PALETTE, dsn_path)
+        else
+            @warn "dsn image already exists; leaving it unchanged" timestamp=tag path=dsn_path
+        end
         next!(progress; showvalues = [
             (:timestamp, tag),
             (:seconds, round(time() - frame_t0; digits = 1)),
