@@ -1,10 +1,11 @@
-name = "viper8_shirley_sh_region1"
+name = "viper8_shirley_sh_region1_obs05m"
 #start = "2027-09-24T00:00:00"
 #stop = "2027-10-12T23:00:00"
 start = "2027-09-14T00:00:00"
 stop = "2027-10-22T23:00:00"
 step_hours = 2
 azel_step_hours = 1
+observer_height_m = 0.5
 tile_height = 1024
 tile_width = 1024
 

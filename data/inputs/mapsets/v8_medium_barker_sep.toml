@@ -1,0 +1,24 @@
+name = "v8_med_barker_sep"
+#start = "2027-09-24T00:00:00"
+#stop = "2027-10-12T23:00:00"
+start = "2027-09-14T00:00:00"
+stop = "2027-10-22T23:00:00"
+step_hours = 2
+azel_step_hours = 1
+tile_height = 1024
+tile_width = 1024
+
+[[layers]]
+kind = "site"
+path = "data/inputs/viper_sfs_dem_8_0_v71_2027_medium_extent.tif"
+name = "VIPER 8.0 1m medium extent"
+sha256 = "71c6318c84c11777495bb1fe39a2121ba70edc6ad62b500ac27a82a7e225333b"
+
+[[layers]]
+kind = "farfield"
+path = "data/inputs/LDEM_80S_20MPP_ADJ.TIF"
+name = "Barker 2023 LDEM 80S 20m"
+sha256 = "09b7ca80f9e6a146f970225d18af72fc02787669b3ef51b888e347d2b6845649"
+height = 30400
+width = 30400
+pixel_size_m = 20.0
