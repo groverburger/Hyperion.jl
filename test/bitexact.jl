@@ -10,12 +10,10 @@
 # timestamp points you at two reference PNGs you can open and compare).
 #
 # If this test fails, either:
-#   (a) you changed the kernel math intentionally → regenerate baselines
-#       (`julia --project tools/bitexact/bitexact_test.jl` on every backend you
-#        support, diff with tools/bitexact/diff_bitexact_shas.jl, then copy
-#        `data/outputs/bitexact/metal/<ts>/sun.png,dsn.png` to
-#        `test/fixtures/bitexact/<ts>_{sun,dsn}.png`, and refresh the
-#        KNOWN_GOOD table below), or
+#   (a) you changed the kernel math intentionally → regenerate pins and
+#       fixtures with `julia --project tools/fixtures/regenerate_bitexact_pins.jl`
+#       (cross-vendor forensics: run `tools/bitexact/bitexact_test.jl` on every
+#        backend you support and diff with tools/bitexact/diff_bitexact_shas.jl), or
 #   (b) cross-vendor determinism regressed → see
 #       docs/src/reference/cross-vendor-determinism.md for the 14 documented sources
 #       of FP divergence and how to audit.

@@ -132,20 +132,8 @@ include("terrain_stack.jl")
 # `Pkg.test()`, the test sub-environment doesn't include Metal/CUDA
 # unless they're declared in Project.toml's [targets] section, so
 # the test backend loader also checks the user's default Julia environment.
-# To run the correctness test directly:
-#
-#   julia --project=. -e '
-#       using Pkg; Pkg.activate(".")
-#       using Test, Hyperion
-#       const Hyp = Hyperion
-#       import SHA; using Dates
-#       const PROJECT_ROOT = dirname(dirname(pathof(Hyperion)))
-#       const LDEM_PATH = Hyp.require_shirley_ldem!()
-#       const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
-#       include(joinpath(PROJECT_ROOT, "test", "correctness.jl"))'
-#
-# Or use the convenience runner:
-#   julia --project -e 'using Pkg; Pkg.test()'
+# This file runs as part of `Pkg.test()`; skip it with
+# HYP_SKIP_CORRECTNESS=1, or select the backend with HYP_BACKEND.
 if get(ENV, "HYP_SKIP_CORRECTNESS", "0") == "1"
     @info "Tier 0 correctness test skipped (HYP_SKIP_CORRECTNESS=1)"
 else

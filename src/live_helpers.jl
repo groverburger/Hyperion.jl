@@ -8,7 +8,7 @@
 #
 # The CPU ray-cast path (`_live_pixel_opt`, `_cast_ray_hierarchical`, etc.)
 # and the precomputed-horizons pipeline were removed on this branch. See
-# docs/algorithms.md on master for the historical comparison and for the
+# docs/src/reference/algorithms.md for the historical comparison and for the
 # floating-point determinism journey that shaped this code.
 
 using Base.Threads
@@ -48,10 +48,10 @@ const MIPMAP_BASE_THRESH = Float32(100.0)
 
 # ─── Sun disk sampling ───────────────────────────────────────────────────
 #
-# We cast 4 rays across the sun disk and integrate visibility with 16 ticks.
-# The 4 anchors sit at offsets {-1, -1/3, +1/3, +1} × SUN_HALF_ANGLE from
-# the sun center, spanning the full disk in 3 equal intervals.
-# 16 ticks cover the disk with step 3/16 = 0.1875 anchor-widths per tick
+# We cast 8 rays across the sun disk and integrate visibility with 16 ticks.
+# The 8 anchors sit at offsets ±{1/7, 3/7, 5/7, 1} × SUN_HALF_ANGLE from
+# the sun center, spanning the full disk in 7 equal intervals.
+# 16 ticks cover the disk with step 7/16 = 0.4375 anchor-widths per tick
 # (same photon-density as the old 6-ray / bucket-aligned scheme, but now
 # aligned to the sun disk instead of to an external bucket grid).
 
@@ -70,7 +70,7 @@ const HALF_CIRCLE  = _make_half_circle()
 const MAX_PHOTONS  = Float32(2.0 * sum(HALF_CIRCLE))
 const INV_MAX_PHOTONS = Float32(1.0 / (2.0 * sum(HALF_CIRCLE)))
 
-# 4 ray offsets (radians) relative to sun center, equally spaced across
+# 8 ray offsets (radians) relative to sun center, equally spaced across
 # the disk. Rotating the sun-center direction by each gives that ray's
 # azimuth. The (cos, sin) are precomputed at module load via cos_sin_lut
 # so both ARM64 and x86_64 Julia, and both Metal and CUDA kernels, see

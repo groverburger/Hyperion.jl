@@ -1,4 +1,4 @@
-# ─── DEM loading and horizon .bin I/O ──────────────────────────────────────
+# ─── DEM loading and indexed-PNG palette output ────────────────────────────
 
 import ArchGDAL
 import Mmap

@@ -4,7 +4,7 @@ export MapsetSpec, SiteDEMLayer, PolarDEMLayer, generate_mapset
 
 # Live-only build: GPU-first, cross-platform via KernelAbstractions.
 # The precomputed-horizons pipeline and the CPU live path have been removed.
-# See docs/algorithms.md on master for the full historical comparison.
+# See docs/src/reference/algorithms.md for the full historical comparison.
 
 include("constants.jl")
 include("deterministic_math.jl")

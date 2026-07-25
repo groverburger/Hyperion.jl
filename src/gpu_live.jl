@@ -74,8 +74,9 @@ end
 end
 
 # ─── Hierarchical ray cast (GPU) ──────────────────────────────────────────
-# Mipmaps are passed as 5 separate Int16 arrays (KernelAbstractions doesn't
-# take tuples-of-arrays well for Metal). Levels are always 5.
+# Mipmaps are passed as 5 separate arrays (element type generic — Int16 for
+# the 20 m LDEM, Float32 for site DEMs; KernelAbstractions doesn't take
+# tuples-of-arrays well for Metal). Levels are always 5.
 
 # Approximate slope in (num, den_sq) form so the caller can compare via
 # squared cross-multiplication — no in-loop division by a variable. The
@@ -521,7 +522,9 @@ end
     sun_slope_thresh = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(7)]
     dsn_slope_thresh = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(8)]
 
-    # Twilight skip at -10° (see live_helpers.jl TWILIGHT_SKIP_DEG).
+    # Twilight skip at -10°. Matches TWILIGHT_SKIP_DEG in live_helpers.jl;
+    # kept as a literal here (identical Float32 bit pattern) rather than
+    # referencing the host const inside kernel source.
     sun_top_el_deg = sun_el_deg + sun_half_angle_deg
     sun_below = sun_top_el_deg <= -10.0f0
     earth_below = earth_el_deg <= -10.0f0
@@ -539,8 +542,9 @@ end
         min(HARD_CAP, max_terrain_scaled / dsn_slope_thresh) : HARD_CAP
 
     # ── Ray direction helpers ────────────────────────────────────────
-    # Sun: 4 rays at ±SUN_HALF_ANGLE and ±SUN_HALF_ANGLE/3. Each ray is
-    # the sun-center direction rotated by a small, compile-time offset.
+    # Sun: 8 rays at ±{1/7, 3/7, 5/7, 1}×SUN_HALF_ANGLE (see
+    # SUN_RAY_OFFSET_DEG in live_helpers.jl). Each ray is the sun-center
+    # direction rotated by a small, compile-time offset.
     # Rotation: (rc, rs) = R(θ_k) · (sun_rc_base, sun_rs_base).
     # DSN: 1 ray at the exact earth direction (no interpolation).
     d_0 = Float32(-90.0); d_1 = Float32(-90.0)
@@ -658,10 +662,10 @@ end
             elev_scale_to_m, atan_lut, atan_scale)
     end
 
-    # ── Sun fraction integration (16 ticks across sun disk, 4 anchors) ──
+    # ── Sun fraction integration (16 ticks across sun disk, 8 anchors) ──
     # Ticks are centered within their sub-intervals; frac starts at
     # half the step size and advances by SUN_TICK_STEP each tick.
-    # The 16 ticks span 3 anchor-intervals (= full sun disk).
+    # The 16 ticks span the 7 anchor-intervals (= full sun disk).
     sun_frac = 0.0f0
     if !sun_below
         sun_frac = _gpu_sun_fraction_from_rays(
@@ -697,24 +701,8 @@ end
 
 # ─── High-level dispatch ─────────────────────────────────────────────────
 
-"""
-    generate_live_shadow_frame_gpu(ldem, ldem_origin_row, ldem_origin_col, H, W,
-                                   sun_pos, earth_pos, observer_height_m;
-                                   max_mipmaps, min_mipmaps,
-                                   backend, DeviceArray,
-                                   workgroup_size=512)
-            -> (sun_data::Matrix{UInt8}, dsn_data::Matrix{UInt8})
-
-Backend-agnostic GPU driver. Caller supplies a `KernelAbstractions` backend
-and a device-array constructor. Byte-exact across Metal / CUDA / ROCm / CPU.
-
-Required kwargs:
-  `backend`      — e.g. `Metal.MetalBackend()`, `CUDA.CUDABackend()`, `CPU()`
-  `DeviceArray`  — e.g. `Metal.MtlArray`, `CUDA.CuArray`, `Array`
-
-Optional:
-  `workgroup_size`  — total threads per workgroup (default 512, keep ≤1024)
-"""
+# Single-source render core: phase-1 CPU precompute + kernel launch.
+# Called by generate_live_shadow_frame_gpu (via render_terrain_stack_gpu).
 function _render_stack_source_gpu(
                                          ldem::Matrix{T},
                                          ldem_origin_row::Int, ldem_origin_col::Int,
@@ -789,6 +777,26 @@ function _render_stack_source_gpu(
     return Array(d_sun_out), Array(d_dsn_out), Array(d_de_dbg), Array(d_sun_rays_dbg)
 end
 
+"""
+    generate_live_shadow_frame_gpu(ldem, ldem_origin_row, ldem_origin_col, H, W,
+                                   sun_pos, earth_pos, observer_height_m;
+                                   max_mipmaps, min_mipmaps,
+                                   backend, DeviceArray,
+                                   workgroup_size=512)
+        -> (sun_data::Matrix{UInt8}, dsn_data::Matrix{UInt8},
+            de_debug::Matrix{Float32}, sun_rays_debug::Array{Float32,3})
+
+Backend-agnostic GPU driver for a single polar-stereo source. Caller supplies
+a `KernelAbstractions` backend and a device-array constructor. Byte-exact
+across Metal / CUDA / ROCm / CPU.
+
+Required kwargs:
+  `backend`      — e.g. `Metal.MetalBackend()`, `CUDA.CUDABackend()`, `CPU()`
+  `DeviceArray`  — e.g. `Metal.MtlArray`, `CUDA.CuArray`, `Array`
+
+Optional:
+  `workgroup_size`  — total threads per workgroup (default 512, keep ≤1024)
+"""
 function generate_live_shadow_frame_gpu(ldem::Matrix{T},
                                          ldem_origin_row::Int, ldem_origin_col::Int,
                                          H::Int, W::Int,

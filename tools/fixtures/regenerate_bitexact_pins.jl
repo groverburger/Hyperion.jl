@@ -1,4 +1,6 @@
-# Regenerate bit-exact pins after the kernel changes since 0f0b691.
+# Regenerate bit-exact pins after an intentional kernel change. This is
+# the canonical pin/fixture regeneration workflow; use
+# tools/bitexact/bitexact_test.jl for cross-vendor forensic comparison.
 #
 # Re-renders all 20 LDEM timestamps + the full 1m site DEM with Shirley
 # 20m farfield,
