@@ -1,43 +1,78 @@
 # Correctness
 
-Correctness is tested in `test/correctness.jl` against the committed Tier 0
-LROC NAC fixture in `test/fixtures/correctness/`.
+The correctness test compares simulated sunlight with 25 LROC Narrow Angle Camera (NAC) observations.
+Git stores this Tier 0 fixture in `test/fixtures/correctness/`.
+The test uses the Shirley DEM and a Metal or CUDA backend.
+The full external LROC data collection is not necessary for this test.
 
-Run the normal suite:
+## Run the test
 
 ```bash
 julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-The correctness sweep is GPU-backed and may be skipped automatically if Metal
-or CUDA is unavailable. To skip it explicitly:
+The standard suite includes the observation comparison.
+The test does not run if the Shirley DEM or a GPU backend is unavailable.
+`HYP_SKIP_CORRECTNESS=1` disables this comparison.
+Other large regressions remain enabled.
 
-```bash
-HYP_SKIP_CORRECTNESS=1 julia --project -e 'using Pkg; Pkg.test()'
-```
+## Pass conditions
 
-## Fixture Maintenance
+The test calculates an image for each distinct observation time.
+Observations with the same timestamp share that calculation.
+It then compares the images with the stored masks.
 
-These tools are not normal user entry points. They exist so correctness data
-can be regenerated deliberately and with input hashes recorded.
+Each aggregate median metric must be at least as good as its baseline value.
+A worse result for an individual observation does not fail the test if the aggregate medians pass.
+The test still records those individual differences.
 
-Refresh the Tier 0 fixture from an external Tier 1 LROC pipeline output:
+The result directory is `data/outputs/correctness/<run-time>/`.
 
-```bash
-LROC_PIPELINE_DIR=/path/to/lroc-nac-maps/derived \
-  julia --project tools/fixtures/build_tier0_fixture.jl
-```
+| File | Content |
+|---|---|
+| `<product-id>.tif` | Simulated image |
+| `input_shas.csv` | Input DEM hash |
+| `current.csv` | Metrics for each observation |
+| `delta.csv` | Differences from baseline metrics |
+| `summary.csv` | Aggregate differences |
 
-The tool writes `test/fixtures/correctness/input_shas.csv` with hashes for
-the copied source files.
+A matching backend hash proves repeatability for that output.
+It does not prove agreement with lunar observations.
 
-Refresh the pinned baseline after an intentional behavior change:
+## Replace the observation fixture
 
-```bash
-julia --project tools/fixtures/refresh_correctness_baseline.jl
-git diff test/fixtures/correctness/baseline_tier0.csv
-```
+1. Make the full external LROC pipeline output.
+2. Set `LROC_PIPELINE_DIR` to that output directory.
+3. Run the fixture tool:
 
-The refresh tool writes `baseline_tier0_input_shas.csv` beside the baseline.
-Commit baseline changes only with a short explanation of the algorithm or data
-change that justified them.
+   ```bash
+   LROC_PIPELINE_DIR=/path/to/lroc-nac-maps/derived \
+     julia --project tools/fixtures/build_tier0_fixture.jl
+   ```
+
+The tool copies the selected masks and timestamps.
+It also writes `input_shas.csv` in the fixture directory.
+The fixture README at `test/fixtures/correctness/README.md` describes the necessary source files.
+
+## Replace baseline metrics
+
+Use this procedure after an intentional algorithm or input change.
+
+1. Make new metrics:
+
+   ```bash
+   HYP_BACKEND=metal julia --project tools/fixtures/refresh_correctness_baseline.jl
+   ```
+
+2. Examine the baseline changes:
+
+   ```bash
+   git diff test/fixtures/correctness/baseline_tier0.csv
+   ```
+
+3. Record the reason for the change in the commit message.
+
+The tool replaces `baseline_tier0.csv` and writes `baseline_tier0_input_shas.csv`.
+Its default backend is CPU, which can take a long time.
+Explain each baseline change.
+A baseline change is not a general repair for a failed test.

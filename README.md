@@ -1,174 +1,136 @@
 # Hyperion.jl
 
-Live lunar illumination and Earth-visibility map generation.
+Hyperion makes lunar illumination maps from digital elevation models (DEMs) and SPICE ephemerides.
+A mapset contains Sun maps, Earth visibility maps, and metadata for selected times.
+The current package version is 0.1.0.
 
-Hyperion takes lunar DEMs, SPICE ephemerides, and a time selection, then
-renders Sun and DSN visibility maps. The main product is a **mapset**: a
-reproducible directory of timestamped PNG frames plus metadata.
+## Functions
 
-## What It Does
+- Make maps from a south-polar DEM or a site DEM with distant terrain layers.
+- Select a time range or a list of timestamps.
+- Continue a mapset run after an interruption.
+- Export Sun and Earth azimuths and elevations for a specified location.
+- Compare output with stored images and lunar observations.
 
-- Renders 20 m Shirley/LOLA south-polar mapsets.
-- Renders VIPER 8.0 1 m site mapsets with Shirley 20 m farfield continuation.
-- Supports time ranges and explicit timestamp lists.
-- Preserves deterministic, bit-exact GPU behavior across supported backends.
-- Tests correctness against a committed LROC NAC Tier 0 fixture.
+The Sun output gives the visible fraction of the solar disk, with values from 0 to 255.
+The DSN output gives the Earth elevation above the terrain horizon.
+These outputs do not give solar-panel power or a full communication link assessment.
+There is no point light-curve CSV command yet.
 
-## Install
+## Installation
 
-```bash
-julia --project -e 'using Pkg; Pkg.instantiate()'
-```
+Use Julia 1.11.5 for the tested configuration.
+The test backend loader has a known limitation with Julia 1.12 and later.
 
-GPU packages are intentionally not in `Project.toml`. Install the backend you
-use in your global Julia environment:
+1. Install the project dependencies:
 
-```bash
-julia -e 'using Pkg; Pkg.add("Metal")'  # Apple Silicon
-julia -e 'using Pkg; Pkg.add("CUDA")'   # NVIDIA
-```
+   ```bash
+   julia --project -e 'using Pkg; Pkg.instantiate()'
+   ```
 
-## Required Data
+2. Install the GPU package for your hardware in the default Julia environment:
 
-Hyperion does not download DEMs during tests or generation. Place inputs under
-`data/inputs/`.
+   ```bash
+   julia -e 'using Pkg; Pkg.add("Metal")'  # Apple Silicon
+   julia -e 'using Pkg; Pkg.add("CUDA")'   # NVIDIA
+   ```
 
-| Product | Path | SHA-256 |
-|---|---|---|
-| Shirley 20 m LDEM | `data/inputs/ldem_80s_20m.img` | `caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b` |
-| VIPER 8.0 Nobile crop | `data/inputs/nobile_area_viper_sfs_dem_8_0_native_crop.tif` | `85988a26542fb2ed51322b802b5bd47467e7bd009eb67b8ab127999b8ca24e19` |
-| Nobile 1 m fixture | `data/inputs/nobile_1m.tif` | `e8cc7e5b530972d1d84083b335f961f0aa87e64c39697d942f10589930dd69f4` |
+3. For mapsets, install the GDAL command-line tools.
 
-Mapset specs include SHA checks so accidental input swaps fail early.
-Detailed provenance lives in the docs.
+4. Make sure that `gdaldem` is on `PATH`.
 
-## Generate Mapsets
+A GPU package is not necessary for CPU operation.
+The mapset command can use the CPU if the requested GPU backend is unavailable.
+CPU map generation can take a long time.
+Git does not store `Manifest.toml`, so a new installation can select different dependency versions.
 
-20 m Shirley Nobile extent, 896 x 512 pixels:
+## Input data
+
+Git stores the SPICE kernels, test reference images, and mapset specifications.
+Git does not store the terrain files in `data/inputs/`.
+Hyperion does not download terrain files.
+
+| Operation | Necessary terrain files in `data/inputs/` |
+|---|---|
+| Shirley 20 m maps and regressions | `ldem_80s_20m.img` |
+| VIPER 8.0 crop with Shirley terrain | `nobile_area_viper_sfs_dem_8_0_native_crop.tif`, `ldem_80s_20m.img` |
+| Full 1 m regression | `nobile_1m.tif`, `ldem_80s_20m.img` |
+| Other mapsets | The files specified in the selected TOML file |
+
+The [data guide](docs/src/data.md) explains file formats and data checks.
+The [input hash table](docs/src/reference/input-data-hashes.md) gives the expected SHA-256 values.
+
+## Map generation
+
+Run this command from the repository root:
 
 ```bash
 julia --project scripts/generate_mapset.jl \
   --spec=data/inputs/mapsets/nobile_20m_shirley.toml \
-  --backend=auto --overwrite
-```
-
-VIPER 8.0 1 m site DEM with Shirley 20 m farfield:
-
-```bash
-julia --project scripts/generate_mapset.jl \
-  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
   --backend=auto
 ```
 
-Explicit timestamps:
+The example makes one 896 × 512 pixel frame for 2027-01-22T07:00:00.
+Output goes to `data/outputs/nobile_20m_shirley/`.
+Existing full frames remain unchanged.
+
+Use `--dry-run` for a check of the specification and input hashes without map generation.
+Use `--overwrite` to replace existing frames.
+Use `--help` to show the command options.
+
+The [mapset guide](docs/src/mapsets.md) explains layers, timestamps, tiles, and output files.
+
+## Azimuth and elevation CSV
+
+Run this example to export geometry for one location:
 
 ```bash
-julia --project scripts/generate_mapset.jl \
-  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
-  --times=2027-01-22T07:00:00,2027-02-12T12:00:00
+julia --project scripts/generate_azel_csv.jl \
+  --lat -85.47574 --lon 31.45666 \
+  --start 2028-01-01T00:00:00 --stop 2028-01-02T00:00:00 \
+  --step 1h --out /tmp/hyperion_azel.csv
 ```
 
-Or use a timestamp file:
+This example does not define a lunar summer interval.
+The CSV does not include terrain shadows.
+The [CSV guide](docs/src/azel.md) explains the coordinate and time options.
+
+## Tests
+
+Run the small terrain tests without external data:
 
 ```bash
-julia --project scripts/generate_mapset.jl \
-  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
-  --times=scripts/test_timestamps.txt
+HYP_BACKEND=cpu julia --project test/terrain_stack.jl
 ```
 
-Outputs are written to `data/outputs/<mapset-name>/`:
-
-```text
-sun/sun.<timestamp>.png
-dsn/dsn.<timestamp>.png
-other/hillshade.tif
-other/slope.tif
-other/azimuths_elevations.csv
-other/manifest.csv
-```
-
-Pass `--dataset-description` to also write
-`other/dataset_description.json`.
-
-## Define New Mapsets
-
-Create a TOML file with a name, time selection, and layer list:
-
-```toml
-name = "my_site_shirley"
-start = "2027-01-22T07:00:00"
-stop = "2027-01-23T07:00:00"
-step_hours = 1
-
-[[layers]]
-kind = "site"
-path = "data/inputs/my_site.tif"
-sha256 = "<expected hash>"
-
-[[layers]]
-kind = "farfield"
-path = "data/inputs/ldem_80s_20m.img"
-sha256 = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
-height = 30400
-width = 30400
-pixel_size_m = 20.0
-data_type = "int16"
-elevation_scale_m = 0.5
-byte_order = "little"
-```
-
-Then run:
-
-```bash
-julia --project scripts/generate_mapset.jl --spec=path/to/spec.toml
-```
-
-The library API is the same idea: build a `MapsetSpec` from
-`SiteDEMLayer(...)` and `PolarDEMLayer(...)`, then call `generate_mapset`.
-
-## Test
+Run the full suite only when the necessary data and compute resources are available:
 
 ```bash
 julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-The normal test suite covers deterministic math, projection helpers, mipmaps,
-bit-exact pinned frames, and the Tier 0 correctness gate when required data
-and a GPU backend are available.
+The full suite can take a long time.
+Some tests do not run if data or a GPU backend is unavailable.
+`HYP_SKIP_CORRECTNESS=1` disables the observation comparison, but the large frame regressions remain enabled.
 
-Skip the expensive correctness sweep:
-
-```bash
-HYP_SKIP_CORRECTNESS=1 julia --project -e 'using Pkg; Pkg.test()'
-```
-
-## Maintenance Tools
-
-Fixture and audit tooling is in `tools/`.
-
-```bash
-julia --project tools/fixtures/build_tier0_fixture.jl
-julia --project tools/fixtures/refresh_correctness_baseline.jl
-HYP_BACKEND=cuda julia --project tools/bitexact/bitexact_test.jl
-julia --project tools/bitexact/diff_bitexact_shas.jl
-```
-
-These tools record or validate hashes where external data enters the workflow.
+The [test guide](docs/src/testing.md) gives test scope and requirements.
 
 ## Documentation
 
-Documenter.jl docs live under `docs/`:
+- [Workflow commands](docs/src/tooling.md)
+- [Mapset configuration](docs/src/mapsets.md)
+- [Data requirements](docs/src/data.md)
+- [Tests](docs/src/testing.md)
+- [Ray casting](docs/src/raycasting.md)
+- [Documentation terms and style](docs/src/terms.md)
+
+Build the HTML documentation:
 
 ```bash
+julia --project=docs -e 'using Pkg; Pkg.instantiate()'
 julia --project=docs docs/make.jl
 ```
 
-Start with:
-
-- `docs/src/mapsets.md`
-- `docs/src/correctness.md`
-- `docs/src/bitexact.md`
-- `docs/src/data.md`
-- `docs/src/raycasting.md`
-
-Older research notes are retained under `docs/src/reference/`.
+The output directory is `docs/build/`.
+The reference pages include dated investigation results.
+Those results apply to the recorded code and test conditions.

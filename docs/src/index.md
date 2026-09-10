@@ -1,38 +1,33 @@
 # Hyperion.jl
 
-Hyperion renders lunar illumination and Earth-visibility maps from DEMs and
-SPICE ephemerides.
+Hyperion makes lunar illumination maps from terrain data and SPICE ephemerides.
+The primary output is a mapset: a directory of images and metadata for selected times.
 
-The main workflow is **mapset generation**: define terrain layers, choose a
-time range or explicit timestamps, and write reproducible Sun/DSN PNG frames
-with a manifest.
+## Available operations
 
-## Core Workflows
+| Operation | Guide |
+|---|---|
+| Make Sun and Earth visibility maps | [Mapsets](mapsets.md) |
+| Export Sun and Earth geometry for one location | [Azimuth and elevation CSV](azel.md) |
+| Select terrain inputs | [Data](data.md) |
+| Test the software | [Tests](testing.md) |
+| Find a command | [Workflow commands](tooling.md) |
+| Understand the renderer | [Ray casting](raycasting.md) |
 
-- Generate the 20 m Shirley Nobile extent.
-- Generate VIPER 8.0 1 m maps with the Shirley 20 m farfield.
-- Run correctness tests against the Tier 0 LROC NAC fixture.
-- Audit bit-exactness across CPU, Metal, and CUDA.
+The Sun maps show the visible fraction of the solar disk.
+The DSN maps show the Earth elevation above the terrain horizon.
+The CSV command gives geometry without terrain shadow calculations.
+A point light-curve command is not available yet.
 
-## First Commands
+## Installation
 
-```bash
-julia --project -e 'using Pkg; Pkg.instantiate()'
-julia --project -e 'using Pkg; Pkg.test()'
-```
+The [repository README](https://github.com/groverburger/Hyperion.jl) gives the installation procedure.
+The tested Julia version is 1.11.5.
+Local terrain files and the `gdaldem` command are necessary for map generation.
+Those inputs are not necessary for the small synthetic tests.
 
-Generate a single 20 m Nobile frame:
+## Terms and evidence
 
-```bash
-julia --project scripts/generate_mapset.jl \
-  --spec=data/inputs/mapsets/nobile_20m_shirley.toml \
-  --backend=auto --overwrite
-```
-
-Generate a VIPER 8.0 + Shirley mapset:
-
-```bash
-julia --project scripts/generate_mapset.jl \
-  --spec=data/inputs/mapsets/viper8_shirley_range.toml \
-  --backend=auto
-```
+The [terms page](terms.md) defines the technical vocabulary.
+Dated reference pages describe specific investigations and test runs.
+A previous result does not prove that every later code version or backend gives the same result.

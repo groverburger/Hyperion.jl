@@ -1,113 +1,56 @@
-# Terrain-Stack Kernel Direction
+# Terrain stack kernel
 
-This note records the intended shape of the unified terrain-stack renderer.
-It should be read alongside `docs/src/reference/algorithms.md` and
-`docs/src/reference/cross-vendor-determinism.md`; all kernel changes must preserve the
-same bit-exactness rules: explicit `fma` for reconstructible multiply-add
-or multiply-subtract dataflow, no `log2` for mipmap level selection, no
-new hot-loop transcendental calls, and test coverage against the pinned
-20 m byte fixtures.
+A terrain stack joins a detailed inner DEM to lower-resolution distant terrain.
+The current kernel supports one inner layer and at most two outer polar layers.
+The public mapset API uses `SiteDEMLayer` and `PolarDEMLayer` descriptors.
+A mapset with multiple layers must start with a site DEM.
 
-## Current State
+## Layer types
 
-The one-source 20 m renderer, the site -> polar farfield renderer, and the
-geometry-grid -> polar farfield renderer now share the hot ray-marching core:
+| Layer | Geometry | Typical use |
+|---|---|---|
+| Site DEM | Supported stereographic projection from a GeoTIFF | Detailed local terrain |
+| Polar DEM | South-polar stereographic grid | Local or distant lunar terrain |
+| `GeometryGrid` | Explicit coordinate and basis arrays | Low-level synthetic tests and experiments |
 
-- level-0 bilinear terrain sampling and slope accumulation,
-- hierarchical mipmap skipping for polar-stereographic farfield layers,
-- sun-disk integration,
-- UInt8 output encoding.
+`GeometryGrid` is a low-level interface.
+The mapset command does not provide a general file loader for arbitrary coordinate systems.
+A GeoTIFF input does not imply support for every GDAL projection.
 
-The one-source polar case still has a separate outer GPU kernel because its
-per-pixel setup starts and ends in one polar grid. The layered stack kernel
-handles the mixed inner/farfield cases:
+## Ray traversal
 
-- a single polar-stereographic layer starts and ends in one grid;
-- a site layer starts in a local stereographic grid, exits that raster, then
-  hands the ray to one or two polar-stereographic farfield grids;
-- a geometry-grid layer starts in caller-supplied local coordinates, exits
-  that raster, then hands the ray to one or two polar-stereographic farfield
-  grids.
+The inner layer supplies the output pixel elevation and local coordinate basis.
+Each ray traverses the inner terrain before it enters an outer layer.
+The layer transition uses the physical exit point and converts the distance to the next layer's pixel units.
+This conversion prevents gaps or duplicate distances at different pixel scales.
 
-## Handoff Rules
+The projection reference sphere defines the grid coordinates.
+Elevated terrain defines the physical ray geometry.
+These quantities have different roles and must remain separate in coordinate calculations.
 
-Layer handoff has two separate pieces of geometry:
+All layers use the shared ray-cast helpers.
+The selected kernel supplies the number and types of terrain layers.
+Max-elevation mipmaps bound terrain between detailed samples.
+The current traversal has no min-elevation shortcut.
 
-- **Ray geometry uses the true elevated query position.** This is the
-  position used for slope tests against terrain samples.
-- **Map reprojection uses the datum position.** Row/column coordinates in
-  the next layer are planimetric and must not shift with terrain elevation.
-  The datum point is the surface point at lunar radius along the query
-  normal. Projecting the elevated terrain point caused multi-cell farfield
-  offsets at Nobile elevations.
-- **Inner arbitrary grids use local ray coordinates.** The geometry-grid
-  path does not subtract two MOON_ME positions at lunar-radius magnitude in
-  the device hot loop. Each cell supplies small local datum coordinates for
-  slope tests and separate MOON_ME datum coordinates for handoff projection.
-  This preserves the same precision rule as the stereographic path.
+## Windows, tiles, and terrain extent
 
-When a ray exits a layer, the next layer starts at the same physical
-distance along the ray:
+A render window selects output pixels.
+It does not limit the terrain available to rays when the full inner DEM is loaded.
+A 1 × 1 output window can therefore use the same terrain as a full image.
 
-```
-next_start_pixels = max(1, exit_distance_pixels * from_pixel_size_m / to_pixel_size_m)
-```
+Tiles divide output work and device buffers.
+They keep the loaded inner terrain extent for ray traversal.
+This behavior prevents tile edges from removing nearby shadow sources.
 
-Each segment is bounded by both a dynamic terrain-height limit and the
-distance to leave that layer's raster. There is no fixed hard cap in the
-stacked path.
+A site layer with `cutoff=true` loads only the requested DEM window.
+This option changes the available terrain and can change the output.
+`SiteDEMLayer` defaults to `cutoff=false`.
+The radius command defaults to a cutoff; use `--no-cutoff` to keep the full site DEM.
 
-## Projection Model
+## Checks
 
-The current implementation supports three innermost/farfield forms:
-
-- **Local stereographic site grid.** Used by `SiteDEM`; this is a
-  stereographic grid centered on `(lat0, lon0)` and represented in a local
-  frame before entering the kernel.
-- **Geometry-grid inner layer.** Used by `GeometryGridTerrain`; the GPU
-  bilinear-samples precomputed local datum coordinates and up vectors instead
-  of evaluating a map projection. CPU precompute uses the supplied local
-  frame to compute Sun/DSN ray directions and uses separate MOON_ME datum
-  rasters to project the handoff point.
-- **South polar stereographic grid.** Used by global or cropped LDEM
-  farfield layers.
-
-The GPU cannot call GDAL/PROJ. Arbitrary innermost DEM projections are
-therefore represented by precomputed geometry rasters, not by device-side
-projection callbacks. Polar-stereographic outer layers keep the analytic
-formula because it is compact, deterministic, and already byte-pinned.
-
-## Target Layer Combinations
-
-The unified renderer should handle these as specializations of one layer
-model:
-
-- `20 m polar` only,
-- `1 m local stereographic -> 20 m polar`,
-- `1 m local/custom -> 5 m polar -> 20 m polar`,
-- `1 m custom geometry grid -> 20 m polar`,
-- `1 m custom geometry grid -> 5 m polar -> 20 m polar`,
-- more polar farfield layers, as long as the kernel launch specializes on
-  the layer count and concrete buffer layout.
-
-The implementation should grow in small, pinned steps:
-
-1. Keep the one-source 20 m byte fixtures unchanged.
-2. Move shared device math into small helpers that Metal/CUDA inline cleanly.
-3. Add identity tests where an LDEM crop is used as the inner layer and the
-   same LDEM is used as farfield.
-4. Introduce a fixed layout for layer metadata and projection kind. The
-   current two-layer stack already passes dimensions, projection kind,
-   pixel size, elevation scale, and mipmap base through fixed-capacity
-   layer metadata buffers sized for three layers.
-5. Move handoff transforms into edge metadata. The current site -> polar
-   handoff already passes the 3x3 source-local-to-MOON_ME datum transform
-   through fixed-capacity edge metadata buffers sized for two handoff edges.
-6. Support three-layer local-stereo -> polar -> polar stacks. The current
-   GPU stack path supports a high-resolution local stereographic source
-   followed by two polar-stereographic farfield sources, including differing
-   pixel sizes such as `1 m -> 5 m -> 20 m`.
-7. Support geometry-grid inner layers. The current GPU stack path supports
-   geometry-grid -> polar and geometry-grid -> polar -> polar stacks. Tests
-   cover geometry-grid handoff, flat-field equivalence, farfield blocking,
-   and three-layer continuation.
+`test/terrain_stack.jl` contains small synthetic layer and window tests.
+The same file can run with a CPU or GPU backend.
+The larger bit-exact tests compare output with stored images and hashes.
+Refer to [tests](../testing.md) for commands and data requirements.
