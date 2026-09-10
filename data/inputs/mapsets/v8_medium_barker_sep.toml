@@ -1,8 +1,10 @@
-name = "v8_med_barker_sep"
+name = "v8_medium_barker"
 #start = "2027-09-24T00:00:00"
 #stop = "2027-10-12T23:00:00"
+#start = "2027-09-14T00:00:00"
+#stop = "2027-10-22T23:00:00"
 start = "2027-09-14T00:00:00"
-stop = "2027-10-22T23:00:00"
+stop = "2027-09-14T02:00:00"
 step_hours = 2
 azel_step_hours = 1
 tile_height = 1024

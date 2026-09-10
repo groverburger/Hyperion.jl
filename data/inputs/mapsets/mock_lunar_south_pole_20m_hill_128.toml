@@ -1,0 +1,14 @@
+name = "mock_lunar_south_pole_20m_hill_128"
+start = "2027-01-22T07:00:00"
+stop = "2027-02-22T07:00:00"
+step_hours = 2
+azel_step_hours = 1
+
+[[layers]]
+kind = "farfield"
+path = "data/inputs/mock_lunar_south_pole_20m_hill_128.tif"
+name = "Mock lunar south-pole 20m 128x128 hill DEM"
+sha256 = "e7f6b1a551167f7c0b6c070e0a6be736c37d79c4786d48ddcb420d9d5bb12116"
+height = 128
+width = 128
+pixel_size_m = 20.0
