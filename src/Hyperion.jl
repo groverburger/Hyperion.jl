@@ -2,20 +2,20 @@ module Hyperion
 
 export MapsetSpec, SiteDEMLayer, PolarDEMLayer, generate_mapset
 
-# Live-only build: GPU-first, cross-platform via KernelAbstractions.
-# The precomputed-horizons pipeline and the CPU live path have been removed.
-# See docs/src/reference/algorithms.md for the full historical comparison.
+# Shared live ray-casting kernels support CPU and GPU backends.
+# The current mapset workflow does not use precomputed horizon tables.
+# See docs/src/reference/algorithms.md for the historical comparison.
 
 include("constants.jl")
 include("deterministic_math.jl")
 include("io.jl")
-include("live_helpers.jl")     # CPU helpers used to fill GPU buffers
-include("gpu_live.jl")          # the one and only GPU kernel + driver
-include("site_dem.jl")          # 1m site DEM: load, resample, run kernel
-include("terrain_stack.jl")     # site-aligned terrain-stack render model
-include("test_data.jl")         # local Shirley LDEM validation + derived fixtures
-include("correctness.jl")       # NAC ground-truth correctness data discovery
-include("mapsets.jl")           # reproducible mapset generation entrypoint
+include("live_helpers.jl")      # Host geometry and device-buffer preparation
+include("gpu_live.jl")          # Shared kernels and frame driver
+include("site_dem.jl")          # Site DEM loaders and projection geometry
+include("terrain_stack.jl")     # Layered terrain renderer
+include("test_data.jl")         # External terrain input validation
+include("correctness.jl")       # Bundled NAC observation comparison
+include("mapsets.jl")           # Mapset generation API
 
 function __init__()
     if !verify_lut_integrity()

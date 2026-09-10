@@ -36,13 +36,13 @@ function _parse_args(args)
 end
 
 function _selected_pids(limit)
-    pids = sort(C.list_nacs(:tier0))
+    pids = sort(C.list_nacs())
     limit === nothing && return pids
     return pids[1:min(limit, length(pids))]
 end
 
 function _group_by_timestamp(pids)
-    timestamps = C.nac_timestamps(:tier0)
+    timestamps = C.nac_timestamps()
     ts_to_pids = Dict{DateTime, Vector{String}}()
     for pid in pids
         haskey(timestamps, pid) || error("$pid has no Tier 0 timestamp")

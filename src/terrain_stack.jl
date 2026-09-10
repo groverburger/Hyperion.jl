@@ -226,15 +226,7 @@ function render_terrain_stack_gpu(
         backend,
         DeviceArray,
         workgroup_size::Int = 512,
-        debug_outputs::Bool = true,
-        site_mipmap_base::Float32 = MIPMAP_BASE_THRESH,
-        site_sun_local = nothing,
-        site_earth_local = nothing,
-        site_s0 = nothing,
-        site_l0 = nothing,
-        site_pixel_size_km = nothing,
-        site_pixel_size_m = nothing,
-        site_max_terrain_pix_scale = nothing)
+        debug_outputs::Bool = true)
 
     sources = stack.sources
     isempty(sources) && error("TerrainStack must contain at least one source")
@@ -272,18 +264,8 @@ function render_terrain_stack_gpu(
         site_min_mipmaps === nothing &&
             error("site_min_mipmaps is required")
         site = site_source.site
-        sun_local = site_sun_local === nothing ?
-            _moonme_to_local(sun_pos_km, site.lat0, site.lon0) : site_sun_local
-        earth_local = site_earth_local === nothing ?
-            _moonme_to_local(earth_pos_km, site.lat0, site.lon0) : site_earth_local
-        s0 = site_s0 === nothing ? Float32(site.s0) : site_s0
-        l0 = site_l0 === nothing ? Float32(site.l0) : site_l0
-        pixel_size_km = site_pixel_size_km === nothing ?
-            Float32(site.pixel_size_m / 1000.0) : site_pixel_size_km
-        pixel_size_m = site_pixel_size_m === nothing ?
-            Float32(site.pixel_size_m) : site_pixel_size_m
-        max_terrain_pix_scale = site_max_terrain_pix_scale === nothing ?
-            Float32(1.5 / site.pixel_size_m) : site_max_terrain_pix_scale
+        sun_local = _moonme_to_local(sun_pos_km, site.lat0, site.lon0)
+        earth_local = _moonme_to_local(earth_pos_km, site.lat0, site.lon0)
 
         return _render_stack_source_gpu(
             site.data, origin_r, origin_c, H, W,
@@ -293,12 +275,12 @@ function render_terrain_stack_gpu(
             backend = backend,
             DeviceArray = DeviceArray,
             workgroup_size = workgroup_size,
-            s0 = s0,
-            l0 = l0,
-            pixel_size_km = pixel_size_km,
-            pixel_size_m = pixel_size_m,
-            max_terrain_pix_scale = max_terrain_pix_scale,
-            mipmap_base = site_mipmap_base,
+            s0 = Float32(site.s0),
+            l0 = Float32(site.l0),
+            pixel_size_km = Float32(site.pixel_size_m / 1000.0),
+            pixel_size_m = Float32(site.pixel_size_m),
+            max_terrain_pix_scale = Float32(1.5 / site.pixel_size_m),
+            mipmap_base = MIPMAP_BASE_THRESH,
             elev_scale_to_m = site.elev_scale_to_m)
     end
 
@@ -309,15 +291,6 @@ function render_terrain_stack_gpu(
         for farfield in farfields
             farfield.window === nothing ||
                 error("farfield polar-stereographic terrain source must not define a render window")
-        end
-        if backend === nothing
-            first_source isa SiteTerrain ||
-                error("CPU terrain-stack reference currently supports SiteTerrain inner layers")
-            length(farfields) == 1 ||
-                error("CPU terrain-stack reference currently supports one farfield layer")
-            return _generate_site_polar_stack_cpu(
-                first_source::SiteTerrain, farfields[1],
-                sun_pos_km, earth_pos_km, observer_height_m)
         end
         return _generate_layered_polar_stack_gpu(
             first_source, farfields,
@@ -606,74 +579,6 @@ end
     return raw * elev_scale_to_m
 end
 
-function _cast_stack_segment(dem, query_col::Float32, query_row::Float32,
-                             q_elev_m::Float32,
-                             qx::Float32, qy::Float32, qz::Float32,
-                             qz_pos::Float32,
-                             M31::Float32, M32::Float32, M33::Float32,
-                             ray_cos::Float32, ray_sin::Float32,
-                             observer_km::Float32,
-                             threshold::Float32, max_d_pixels::Float32,
-                             s0::Float32, l0::Float32,
-                             pixel_size_km::Float32,
-                             pixel_size_m::Float32,
-                             elev_scale_to_m::Float32,
-                             max_num::Float32, max_den_sq::Float32,
-                             start_d_pixels::Float32)
-    threshold_sq = threshold * threshold
-    base_step = Float32(0.70710698)
-    d = max(start_d_pixels, 1.0f0)
-    H, W = size(dem)
-    hit = false
-    exit_d = d
-    while d <= max_d_pixels
-        cx = fma(ray_cos, d, query_col)
-        cy = fma(ray_sin, d, query_row)
-        col_i = unsafe_trunc(Int32, cx)
-        row_i = unsafe_trunc(Int32, cy)
-        if col_i < 0 || col_i >= W || row_i < 0 || row_i >= H
-            exit_d = d
-            break
-        end
-        elev = _sample_bilinear_m(dem, cy, cx, elev_scale_to_m)
-        if elev !== nothing
-            e_km = (cx - s0) * pixel_size_km
-            n_km = (l0 - cy) * pixel_size_km
-            rho2 = fma(n_km, n_km, e_km * e_km)
-            R_total = fma(elev::Float32, 0.001f0, R_km_F32())
-            dn = fma(rho2, INV_4R_KM2_F32, 1.0f0)
-            inv_dn = 1.0f0 / dn
-            two_u2 = rho2 * (Float32(2.0) * INV_4R_KM2_F32)
-            scale = R_total * inv_dn
-            common = scale * INV_R_KM_F32
-            dx = fma(common, n_km, -qx)
-            dy = fma(common, e_km, -qy)
-            sample_minus_qz = fma(scale, two_u2, -qz_pos)
-            dz = fma(q_elev_m - elev::Float32, 0.001f0, sample_minus_qz)
-            lz_geom = fma(M33, dz, fma(M32, dy, M31 * dx))
-            lz = lz_geom - observer_km
-            d_sq = fma(dz, dz, fma(dy, dy, dx * dx))
-            alen_sq = fma(-lz_geom, lz_geom, d_sq)
-            if alen_sq > 0.0f0 && _gpu_gt_slope_sq(lz, alen_sq, max_num, max_den_sq)
-                max_num = lz
-                max_den_sq = alen_sq
-                if _gpu_ge_threshold_sq(lz, alen_sq, threshold, threshold_sq)
-                    hit = true
-                    exit_d = d
-                    break
-                end
-            end
-        end
-        d += base_step
-        exit_d = d
-    end
-    return max_num, max_den_sq, exit_d, hit
-end
-
-@inline function _finish_slope_deg(num::Float32, den_sq::Float32)
-    return atan2_lut(num, sqrt(den_sq)) * F32_RAD2DEG
-end
-
 function _precompute_site_polar_stack(site_source::SiteTerrain,
                                       farfield::PolarStereoTerrain,
                                       sun_pos_km::NTuple{3, Float64},
@@ -720,14 +625,12 @@ function _precompute_site_polar_stack!(packed::Array{Float32,3},
             qx, qy, qz, M31, M32, M33, qn, qe, rho2 =
                 _query_setup_components(Float32(sc), Float32(sr), q_elev_m,
                                         site_s0, site_l0, site_pix_km)
-            qz_pos = _query_z_pos(rho2, q_elev_m)
             ldem_col, ldem_row =
                 _stack_handoff_colrow(site, farfield, M31, M32, M33)
             lqx, lqy, lqz, lM31, lM32, lM33, lqn, lqe, lrho2 =
                 _query_setup_components(ldem_col, ldem_row, q_elev_m,
                                         farfield.s0, farfield.l0,
                                         farfield.pixel_size_km)
-            lqz_pos = _query_z_pos(lrho2, q_elev_m)
 
             ldem_sun_rc, ldem_sun_rs, _ =
                 _body_grid_azel(sun_moon, lqx, lqy, lqz,
@@ -1754,186 +1657,4 @@ function _generate_layered_polar_stack_gpu(
     de_dbg = debug_outputs ? Array(d_de_dbg) : Matrix{Float32}(undef, 0, 0)
     sun_rays_dbg = debug_outputs ? Array(d_sun_rays_dbg) : Array{Float32,3}(undef, 0, 0, 0)
     return Array(d_sun_out), Array(d_dsn_out), de_dbg, sun_rays_dbg
-end
-
-function _generate_site_polar_stack_cpu(
-        site_source::SiteTerrain,
-        farfield::PolarStereoTerrain,
-        sun_pos_km::NTuple{3, Float64},
-        earth_pos_km::NTuple{3, Float64},
-        observer_height_m::Float64)
-
-    site = site_source.site
-    origin_r, origin_c, H, W = _source_window(site_source)
-    observer_km = Float32(observer_height_m / 1000.0)
-    sun_site = _moonme_to_local(sun_pos_km, site.lat0, site.lon0)
-    earth_site = _moonme_to_local(earth_pos_km, site.lat0, site.lon0)
-    sun_moon = Float32.(sun_pos_km)
-    earth_moon = Float32.(earth_pos_km)
-
-    sun_out = Matrix{UInt8}(undef, H, W)
-    dsn_out = Matrix{UInt8}(undef, H, W)
-    de_dbg = Matrix{Float32}(undef, H, W)
-    rays_dbg = Array{Float32, 3}(undef, H, W, N_SUN_RAYS)
-
-    site_pix_km = Float32(site.pixel_size_m / 1000.0)
-    site_pix_m = Float32(site.pixel_size_m)
-    site_s0 = Float32(site.s0)
-    site_l0 = Float32(site.l0)
-
-    Threads.@threads for c in 1:W
-        @inbounds for r in 1:H
-            sc = origin_c + c - 1
-            sr = origin_r + r - 1
-            q_elev_m = Float32(site.data[sr + 1, sc + 1]) * site.elev_scale_to_m
-            qx, qy, qz, M31, M32, M33, qn, qe, rho2 =
-                _query_setup_components(Float32(sc), Float32(sr), q_elev_m,
-                                        site_s0, site_l0, site_pix_km)
-            ldem_col, ldem_row =
-                _stack_handoff_colrow(site, farfield, M31, M32, M33)
-            lqx, lqy, lqz, lM31, lM32, lM33, lqn, lqe, lrho2 =
-                _query_setup_components(ldem_col, ldem_row, q_elev_m,
-                                        farfield.s0, farfield.l0,
-                                        farfield.pixel_size_km)
-
-            sun_rc, sun_rs, sun_el_deg =
-                _body_grid_azel(Float32.(sun_site), qx, qy, qz,
-                                M31, M32, M33, qn, qe, rho2, observer_km)
-            earth_rc, earth_rs, earth_el_deg =
-                _body_grid_azel(Float32.(earth_site), qx, qy, qz,
-                                M31, M32, M33, qn, qe, rho2, observer_km)
-            lsun_rc, lsun_rs, _ =
-                _body_grid_azel(sun_moon, lqx, lqy, lqz,
-                                lM31, lM32, lM33, lqn, lqe, lrho2, observer_km)
-            learth_rc, learth_rs, _ =
-                _body_grid_azel(earth_moon, lqx, lqy, lqz,
-                                lM31, lM32, lM33, lqn, lqe, lrho2, observer_km)
-
-            θs = (sun_el_deg + SUN_HALF_ANGLE_DEG) * Float32(π / 180.0)
-            cs_s, sn_s = cos_sin_lut(θs)
-            sun_thresh = sn_s / cs_s
-            θe = earth_el_deg * Float32(π / 180.0)
-            cs_e, sn_e = cos_sin_lut(θe)
-            dsn_thresh = sn_e / cs_e
-
-            sun_max_site = _stack_dynamic_max_pixels(
-                sun_thresh, MAX_TERRAIN_M_F32, site_pix_m)
-            dsn_max_site = _stack_dynamic_max_pixels(
-                dsn_thresh, MAX_TERRAIN_M_F32, site_pix_m)
-            sun_max_ldem = _stack_dynamic_max_pixels(
-                sun_thresh, MAX_TERRAIN_M_F32, farfield.pixel_size_m)
-            dsn_max_ldem = _stack_dynamic_max_pixels(
-                dsn_thresh, MAX_TERRAIN_M_F32, farfield.pixel_size_m)
-
-            sun_below = (sun_el_deg + SUN_HALF_ANGLE_DEG) <= TWILIGHT_SKIP_DEG
-            earth_below = earth_el_deg <= TWILIGHT_SKIP_DEG
-
-            ds = ntuple(_ -> Float32(-90.0), N_SUN_RAYS)
-            if !sun_below
-                dvals = Vector{Float32}(undef, N_SUN_RAYS)
-                for k in 1:N_SUN_RAYS
-                    c_k = SUN_RAY_OFFSET_COS[k]
-                    s_k = SUN_RAY_OFFSET_SIN[k]
-                    rc = fma(-sun_rs, s_k, sun_rc * c_k)
-                    rs = fma( sun_rc, s_k, sun_rs * c_k)
-                    lrc = fma(-lsun_rs, s_k, lsun_rc * c_k)
-                    lrs = fma( lsun_rc, s_k, lsun_rs * c_k)
-                    site_max_d = min(
-                        sun_max_site,
-                        _stack_ray_exit_distance_pixels(
-                            Float32(sc), Float32(sr), rc, rs, site.H, site.W))
-                    n, d2, exit_d, hit = _cast_stack_segment(
-                        site.data, Float32(sc), Float32(sr), q_elev_m,
-                        qx, qy, qz, qz_pos, M31, M32, M33,
-                        rc, rs, observer_km, sun_thresh, site_max_d,
-                        site_s0, site_l0, site_pix_km, site_pix_m,
-                        site.elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
-                    if !hit
-                        start_ldem = _stack_next_layer_start_d(
-                            exit_d, site_pix_m, farfield.pixel_size_m)
-                        max_ldem = min(
-                            sun_max_ldem,
-                            _stack_ray_exit_distance_pixels(
-                                ldem_col, ldem_row, lrc, lrs,
-                                size(farfield.data, 1), size(farfield.data, 2)))
-                        n, d2, _, _ = _cast_stack_segment(
-                            farfield.data, ldem_col, ldem_row, q_elev_m,
-                            lqx, lqy, lqz, lqz_pos, lM31, lM32, lM33,
-                            lrc, lrs, observer_km, sun_thresh, max_ldem,
-                            farfield.s0, farfield.l0, farfield.pixel_size_km,
-                            farfield.pixel_size_m, farfield.elev_scale_to_m,
-                            n, d2, start_ldem)
-                    end
-                    dvals[k] = _finish_slope_deg(n, d2)
-                end
-                ds = Tuple(dvals)
-            end
-
-            de = Float32(-90.0)
-            if !earth_below
-                site_max_d = min(
-                    dsn_max_site,
-                    _stack_ray_exit_distance_pixels(
-                        Float32(sc), Float32(sr),
-                        earth_rc, earth_rs, site.H, site.W))
-                n, d2, exit_d, hit = _cast_stack_segment(
-                    site.data, Float32(sc), Float32(sr), q_elev_m,
-                    qx, qy, qz, qz_pos, M31, M32, M33,
-                    earth_rc, earth_rs, observer_km, dsn_thresh, site_max_d,
-                    site_s0, site_l0, site_pix_km, site_pix_m,
-                    site.elev_scale_to_m, -1.0f0, 0.0f0, 1.0f0)
-                if !hit
-                    start_ldem = _stack_next_layer_start_d(
-                        exit_d, site_pix_m, farfield.pixel_size_m)
-                    max_ldem = min(
-                        dsn_max_ldem,
-                        _stack_ray_exit_distance_pixels(
-                            ldem_col, ldem_row, learth_rc, learth_rs,
-                            size(farfield.data, 1), size(farfield.data, 2)))
-                    n, d2, _, _ = _cast_stack_segment(
-                        farfield.data, ldem_col, ldem_row, q_elev_m,
-                        lqx, lqy, lqz, lqz_pos, lM31, lM32, lM33,
-                        learth_rc, learth_rs, observer_km, dsn_thresh, max_ldem,
-                        farfield.s0, farfield.l0, farfield.pixel_size_km,
-                        farfield.pixel_size_m, farfield.elev_scale_to_m,
-                        n, d2, start_ldem)
-                end
-                de = _finish_slope_deg(n, d2)
-            end
-
-            sun_frac = 0.0f0
-            if !sun_below
-                frac = SUN_TICK_FRAC_INITIAL
-                pos = 1
-                left_el = ds[1]
-                right_el = ds[2]
-                bucket_delta = right_el - left_el
-                px = 0.0f0
-                for i in 1:16
-                    scv = HALF_CIRCLE[i]
-                    horizon_el = fma(frac, bucket_delta, left_el)
-                    delta = (sun_el_deg + scv) - horizon_el
-                    px += clamp(delta, 0.0f0, 2.0f0 * scv)
-                    frac += SUN_TICK_STEP
-                    if frac >= 1.0f0
-                        pos += 1
-                        left_el = right_el
-                        right_el = ds[min(pos + 1, N_SUN_RAYS)]
-                        bucket_delta = right_el - left_el
-                        frac -= 1.0f0
-                    end
-                end
-                sun_frac = px * INV_MAX_PHOTONS
-            end
-
-            over_hz_deg = earth_below ? Float32(-90.0) : (earth_el_deg - de)
-            sun_out[r, c] = UInt8(clamp(unsafe_trunc(Int32, 255.0f0 * sun_frac), 0, 255))
-            dsn_out[r, c] = UInt8(clamp(unsafe_trunc(Int32, floor(over_hz_deg * 10.0f0)), 0, 250))
-            de_dbg[r, c] = de
-            for k in 1:N_SUN_RAYS
-                rays_dbg[r, c, k] = ds[k]
-            end
-        end
-    end
-    return sun_out, dsn_out, de_dbg, rays_dbg
 end

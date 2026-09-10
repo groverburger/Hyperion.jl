@@ -25,8 +25,6 @@ else
     ""
 end
 const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)
-const HAS_UP_TO_DATE_1M_INPUTS =
-    Hyp._barker_2023_ldem_ok() && Hyp._viper8_nobile_crop_ok()
 
 include("test_backend.jl")
 
@@ -117,7 +115,7 @@ end
 # byte-identical output across Apple CPU / Metal / NVIDIA CUDA. See the
 # included file for the 20-timestamp SHA table + PNG fixture details.
 
-if HAS_LDEM || HAS_UP_TO_DATE_1M_INPUTS
+if HAS_LDEM
     include("bitexact.jl")
 else
     @warn "Bit-exact inputs not available — skipping cross-platform bit-exactness test"

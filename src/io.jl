@@ -6,41 +6,6 @@ import FileIO
 using Images: RGB, N0f8
 
 """
-Affine transform from a GeoTIFF — matches rasterio's (a, b, c, d, e, f).
-(c, f) is the upper-left corner; (a, e) are pixel sizes (e is negative).
-"""
-struct AffineTransform
-    a::Float64  # pixel width (easting per column)
-    b::Float64  # rotation (usually 0)
-    c::Float64  # upper-left easting
-    d::Float64  # rotation (usually 0)
-    e::Float64  # pixel height (negative: northing decreases per row)
-    f::Float64  # upper-left northing
-end
-
-"""
-    load_dem(path) -> (elevation, transform, H, W)
-
-Load a GeoTIFF DEM. Returns:
-- elevation: Matrix{Float64} of shape (H, W), meters above reference sphere
-- transform: AffineTransform
-- H, W: integer dimensions
-"""
-function load_dem(path::AbstractString)
-    dataset = ArchGDAL.read(path)
-    band = ArchGDAL.getband(dataset, 1)
-    # ArchGDAL returns (W, H) column-major; we want (H, W) row-major
-    raw = ArchGDAL.read(band)
-    elevation = Float64.(permutedims(raw, (2, 1)))
-    H, W = size(elevation)
-
-    gt = ArchGDAL.getgeotransform(dataset)
-    transform = AffineTransform(gt[2], gt[3], gt[1], gt[5], gt[6], gt[4])
-
-    return elevation, transform, H, W
-end
-
-"""
     LDEM
 
 Raw int16 south-polar DEM (LDEM format). Header-less binary file with
@@ -53,22 +18,11 @@ struct LDEM{T<:Real}
     elev_scale_to_m::Float32
 end
 
-"""
-    ldem_elevation_m(ldem, row, col) -> Float64
-
-Elevation in metres at 0-indexed (row, col). Matches 0.5 * int16 value.
-"""
-@inline function ldem_elevation_m(ldem::LDEM, row::Int, col::Int)
-    return Float64(ldem.elev_scale_to_m) * Float64(ldem.data[row + 1, col + 1])  # 1-indexed
-end
-
 function load_ldem(path::AbstractString;
                    H::Int=30400, W::Int=30400,
-                   pixel_size_m::Float64=20.0,
                    data_type::Symbol=:auto,
                    elevation_scale_m::Union{Nothing,Float64}=nothing,
-                   byte_order::Symbol=:little,
-                   R_m::Float64=MOON_RADIUS_M)
+                   byte_order::Symbol=:little)
     if lowercase(splitext(path)[2]) in (".tif", ".tiff")
         dataset = ArchGDAL.read(path)
         band = ArchGDAL.getband(dataset, 1)

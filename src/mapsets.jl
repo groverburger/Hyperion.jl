@@ -430,7 +430,6 @@ function _load_mapset_layers(specs)
                 spec, _mapset_layer_name(spec), :site, site, source, max_mm, min_mm))
         elseif spec isa PolarDEMLayerSpec
             ldem = load_ldem(spec.path; H = spec.H, W = spec.W,
-                             pixel_size_m = spec.pixel_size_m,
                              data_type = spec.data_type,
                              elevation_scale_m = spec.elevation_scale_m,
                              byte_order = spec.byte_order)
@@ -451,21 +450,6 @@ function _load_mapset_layers(specs)
         end
     end
     return loaded
-end
-
-function _cutoff_site_dem(site::SiteDEM{T}, window::NTuple{4,Int}) where {T<:Real}
-    origin_r, origin_c, H, W = window
-    data = copy(site.data[origin_r + 1:origin_r + H, origin_c + 1:origin_c + W])
-    return SiteDEM{T}(
-        data,
-        H,
-        W,
-        site.s0 - origin_c,
-        site.l0 - origin_r,
-        site.pixel_size_m,
-        site.lat0,
-        site.lon0,
-        site.elev_scale_to_m)
 end
 
 function _site_mapset_mipmaps(site::SiteDEM, layered::Bool)

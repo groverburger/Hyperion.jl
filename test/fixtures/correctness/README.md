@@ -1,77 +1,62 @@
 # Tier 0 correctness fixtures
 
-This directory holds the **Tier 0 NAC subset** — a curated slice of
-the LROC NAC ground-truth dataset used to validate Hyperion sun-map
-output against real lunar imagery. It is checked into git so any
-clone of the repo can run a meaningful correctness check without
-external downloads.
+This directory contains reference masks for 25 Lunar Reconnaissance Orbiter Camera (LROC) Narrow Angle Camera (NAC) observations.
+Git stores these files.
+The external Shirley DEM and a supported GPU backend are also necessary for a correctness run.
+The bundled masks alone are not sufficient to run that test.
 
-## Contents
+## Files
 
-| Path | Purpose |
+| Path | Contents |
 |---|---|
-| `shadow_20m/<id>.tif` | Binary lit/shadow mask per NAC (UInt8: 0=shadow, 255=lit, 128=NoData) |
-| `sun_frac_20m/<id>.tif` | Continuous sun-fraction mask per NAC (Float32 [0, 1], NaN NoData) |
-| `timestamps.csv` | NAC capture times (sub-second precision, UTC) |
-| `selection.csv` | Per-NAC rationale + key metrics (showcase/regression/parity/etc.) |
+| `shadow_20m/<id>.tif` | UInt8 masks: 0 shadow, 255 illuminated, 128 NoData |
+| `sun_frac_20m/<id>.tif` | Float32 solar fractions from 0 to 1; NaN means NoData |
+| `timestamps.csv` | Observation times in UTC |
+| `selection.csv` | Selection reasons and comparison metrics |
+| `baseline_tier0.csv` | Stored correctness metrics |
 
-Total content: ~780 KB (52 files).
+The fixture contains 50 mask images and four supporting files, including this README.
+`Hyperion.Correctness` uses only this bundled Tier 0 fixture.
 
-## Tiers
+## Selection
 
-Hyperion's correctness data is structured in three tiers:
+The external LROC pipeline selected observations across these categories:
 
-1. **Tier 0 (this directory)**: 25 NACs, ~1 MB, bundled in git. The
-   default fixture every clone has. Used by the in-repo correctness
-   regression test (`test/correctness.jl`).
-2. **Tier 1 (external, ~22 MB)**: Full 599-NAC ground truth. Point
-   `HYP_CORRECTNESS_TIER1_DIR` at a directory containing
-   `shadow_20m/`, `sun_frac_20m/`, and `timestamps.csv` to enable
-   the statistically-robust full-dataset evaluation. There is no
-   default search path — the env var must be set explicitly.
-3. **Tier 2 (external, ~30 GB)**: Raw LROC NAC `*.map.tif`
-   orthoproducts. Used to re-derive Tier 1 from scratch via the
-   pipeline scripts in the lroc-nac-maps repository (see
-   `generate_shadow_masks.py` therein).
+| Category | Count |
+|---|---|
+| Lower balanced error rate than Mapbuilder | 5 |
+| Improvements with exact observation times | 3 |
+| Higher balanced error rate than Mapbuilder | 3 |
+| Sun below the horizon | 2 |
+| Sun above 5° elevation | 3 |
+| Close agreement between kernels | 3 |
+| High baseline error | 2 |
+| Low baseline error | 2 |
+| Large directional differences | 2 |
 
-Both tiers 1 and 2 are produced from the same upstream data — Tier 1
-is just `generate_shadow_masks.py` applied to Tier 2.
+Refer to `selection.csv` for observation identifiers and metric values.
+The categories describe the selection process; they do not guarantee future results.
 
-## NAC selection rationale
+## External source data
 
-The 25 NACs were selected by `select_smoke_subset.jl` (in the LROC
-pipeline) to span:
+The fixture was copied from a derived dataset with 599 observations.
+The upstream pipeline also uses raw LROC products of approximately 30 GB.
+These external products are necessary to rebuild the masks, but not to use the committed masks.
 
-| Category | Count | Purpose |
-|---|---|---|
-| Hyperion big wins (Δ_BER ≤ −0.005 vs Mapbuilder) | 5 | Showcase the kernel-precision benefit |
-| Hyperion-exact wins (with time alignment) | 3 | Showcase the structural exact-time benefit |
-| Hyperion regressions (Δ_BER ≥ +0.003) | 3 | Catch both directions of metric drift |
-| Below-horizon sun | 2 | Test the negative-altitude code path |
-| Higher sun (>5°) | 3 | Cover the local-shading-dominated regime |
-| Tight kernel parity (\|Δ\| < 0.0001) | 3 | Confirm baseline behaviour is preserved |
-| Hard scenes (Mapbuilder BER > 0.20) | 2 | Test under near-terminator extreme cases |
-| Easy scenes (Mapbuilder BER < 0.02) | 2 | Confirm well-behaved baselines |
-| Kernel-divergence top-12 set | 2 | The headline directional-improvement case |
+The copy tool is `tools/fixtures/build_tier0_fixture.jl`.
+Its `LROC_PIPELINE_DIR` variable must identify the derived pipeline output directory.
+That directory must contain `smoke_subset_ids.txt`, `smoke_subset.csv`, `timestamps.csv`, `shadow_20m/`, and `sun_frac_20m/`.
 
-See `selection.csv` for per-NAC details, including pre-computed BER
-deltas vs Mapbuilder, sun elevation, and the rationale string.
+## Fixture changes
 
-## Provenance
+1. Rebuild the derived masks if the upstream method changes.
+2. Run the upstream observation-selection tool.
+3. Run `tools/fixtures/build_tier0_fixture.jl` with the correct source directory.
+4. Make new the affected Hyperion maps.
+5. Run `tools/fixtures/refresh_correctness_baseline.jl` with the selected backend.
+6. Examine the mask and metric changes.
+7. Explain the method change in the commit description.
 
-Generated by `Hyperion.jl/tools/fixtures/build_tier0_fixture.jl`
-from the full 599-NAC dataset (point the script's `LROC_PIPELINE_DIR`
-env var at it). The selection process is deterministic given the
-full dataset, so this fixture can be regenerated bit-exactly.
-
-## Updating the fixture
-
-If correctness pipeline parameters change (Canny thresholds,
-multi-Otsu class count, etc.) the masks here become stale. To
-update:
-
-1. Regenerate the full Tier 1 dataset by running the LROC pipeline
-   scripts.
-2. Re-run `select_smoke_subset.jl` and `build_tier0_fixture.jl`.
-3. Re-pin the per-NAC test expectations in `test/correctness.jl`.
-4. Note the methodology change in the commit message.
+The regression checks aggregate median metrics.
+An individual observation can become worse while the aggregate check still passes.
+Refer to `docs/src/correctness.md` for the full procedure and output files.

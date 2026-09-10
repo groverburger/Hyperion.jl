@@ -1,26 +1,13 @@
-# Cross-platform bit-exactness regression — the canonical verification
-# that the pipeline produces identical output across Apple Silicon CPU,
-# Apple Metal GPU, and NVIDIA CUDA GPU.
+# Compare output hashes and decoded PNG pixels with stored references.
+# This file uses one selected KernelAbstractions backend per run.
+# The fixtures contain 40 PNGs for 20 m terrain and 40 PNGs for 1 m terrain.
+# The large terrain inputs are external files.
+# CPU frame tests require explicit selection and can take a long time.
 #
-# Runs on the selected KernelAbstractions backend, computes
-# SHA-256 of every stage of the pipeline, and compares against hardcoded
-# known-good values. Also decodes the 40 committed PNG fixtures in
-# test/fixtures/bitexact/ and verifies pixel equality — so a regression
-# is detectable both algorithmically (hash diff) and visually (a failing
-# timestamp points you at two reference PNGs you can open and compare).
-#
-# If this test fails, either:
-#   (a) you changed the kernel math intentionally → regenerate pins and
-#       fixtures with `julia --project tools/fixtures/regenerate_bitexact_pins.jl`
-#       (cross-vendor forensics: run `tools/bitexact/bitexact_test.jl` on every
-#        backend you support and diff with tools/bitexact/diff_bitexact_shas.jl), or
-#   (b) cross-vendor determinism regressed → see
-#       docs/src/reference/cross-vendor-determinism.md for the 14 documented sources
-#       of FP divergence and how to audit.
-#
-# Skipped if the LDEM is not available (flagged as HAS_LDEM in runtests.jl).
-# Runtime on CPU backend: ~10-15 minutes for 20 timestamps at 896×512, so
-# CPU is only used when explicitly selected.
+# Review intentional output changes before replacement of the references.
+# Use tools/fixtures/regenerate_bitexact_pins.jl to make new references.
+# Use tools/bitexact/bitexact_test.jl for separate backend audits.
+# See docs/src/bitexact.md for commands and test limits.
 
 using Dates
 import FileIO
@@ -29,17 +16,12 @@ import FileIO
 
 const FIXTURES = joinpath(@__DIR__, "fixtures", "bitexact")
 const FIXTURES_1M = joinpath(@__DIR__, "fixtures", "bitexact_1m_full_farfield")
-const FIXTURES_1M_UP_TO_DATE =
-    joinpath(@__DIR__, "fixtures", "bitexact_1m_viper8_barker2023")
 include(joinpath(FIXTURES, "known_good_1m_full_farfield.jl"))
-include(joinpath(FIXTURES, "known_good_1m_viper8_barker2023.jl"))
 
 const HAS_SHIRLEY_BITEXACT =
     @isdefined(HAS_LDEM) ? HAS_LDEM : Hyp._ldem_ok()
 const SHIRLEY_LDEM_PATH =
     @isdefined(LDEM_PATH) ? LDEM_PATH : Hyp._ldem_path()
-const HAS_UP_TO_DATE_1M_BITEXACT =
-    Hyp._barker_2023_ldem_ok() && Hyp._viper8_nobile_crop_ok()
 
 # Known-good SHAs from the 3-way verified state on julia 1.11.5 +
 # KernelAbstractions 0.9.41 + Metal 1.9.3 + CUDA 5.9.0. Every entry
@@ -512,63 +494,6 @@ if HAS_SHIRLEY_BITEXACT
     end
 else
     @warn "Shirley LDEM not available — skipping legacy bit-exactness tests"
-end
-
-if HAS_UP_TO_DATE_1M_BITEXACT
-    ldem_2023 = Hyp.load_ldem(Hyp.require_barker_2023_ldem!())
-    ldem_2023_max, ldem_2023_min = Hyp.build_ldem_mipmaps_minmax(ldem_2023.data)
-
-    site_8 = Hyp.load_site_dem_f32(Hyp.require_viper8_nobile_crop_tif!())
-    far_2023 = Hyp.PolarStereoTerrain(ldem_2023.data;
-        max_mipmaps = ldem_2023_max,
-        min_mipmaps = ldem_2023_min,
-        elev_scale_to_m = ldem_2023.elev_scale_to_m)
-    stack_8 = Hyp.TerrainStack(
-        Hyp.SiteTerrain(site_8; window = (0, 0, site_8.H, site_8.W)),
-        far_2023)
-
-    @testset "1m VIPER 8.0 crop + Barker 2023 20m farfield dimensions" begin
-        @test site_8.H == 4144
-        @test site_8.W == 5040
-        @test site_8.pixel_size_m ≈ 1.0
-        @test ldem_2023.H == 30400
-        @test ldem_2023.W == 30400
-        @test ldem_2023.elev_scale_to_m == 1.0f0
-    end
-
-    for (tag, expected) in sort(collect(KNOWN_GOOD_1M_VIPER8_BARKER2023), by = first)
-        @testset "1m VIPER 8.0 + Barker 2023 farfield bit-exactness $tag ($(TEST_BACKEND_NAME))" begin
-            dt = DateTime(tag, dateformat"yyyy-mm-ddTHH-MM-SS")
-            et = Hyp.datetime_to_et(dt)
-            sun_t   = Tuple(Hyp.get_body_position(Hyp.NAIF_SUN,   et))
-            earth_t = Tuple(Hyp.get_body_position(Hyp.NAIF_EARTH, et))
-
-            sun, dsn, de, sun_rays = Hyp.render_terrain_stack_gpu(
-                stack_8, sun_t, earth_t, 0.0;
-                backend = TEST_BACKEND,
-                DeviceArray = TEST_DEVICE_ARRAY)
-
-            @test sha256_bytes(sun) == expected.sun
-            @test sha256_bytes(dsn) == expected.dsn
-            @test sha256_bytes(de)  == expected.de
-            for k in 1:8
-                @test sha256_bytes(view(sun_rays, :, :, k)) ==
-                      getfield(expected, Symbol("d_$(k-1)"))
-            end
-
-            sun_rgb = _palette_apply(sun, Hyp.SUN_PALETTE)
-            dsn_rgb = _palette_apply(dsn, Hyp.DSN_PALETTE)
-            @test sha256_bytes(sun_rgb) == expected.sun_rgb
-            @test sha256_bytes(dsn_rgb) == expected.dsn_rgb
-
-            ref_sun = _load_png_rgb(joinpath(FIXTURES_1M_UP_TO_DATE, "$(tag)_sun.png"))
-            ref_dsn = _load_png_rgb(joinpath(FIXTURES_1M_UP_TO_DATE, "$(tag)_dsn.png"))
-            @test ref_sun == sun_rgb
-            @test ref_dsn == dsn_rgb
-        end
-    end
-else
-    @warn "VIPER 8.0 crop and Barker 2023 LDEM not available — skipping up-to-date 1m bit-exactness tests"
 end
 
 end

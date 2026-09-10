@@ -12,7 +12,6 @@ const DEFAULT_OUTPUT_ROOT = joinpath(PROJECT_ROOT, "data", "outputs")
 
 Base.@kwdef struct Options
     spec_path::Union{Nothing,String} = nothing
-    preset::Union{Nothing,String} = nothing
     name::Union{Nothing,String} = nothing
     output_root::String = DEFAULT_OUTPUT_ROOT
     backend::Symbol = :auto
@@ -29,8 +28,7 @@ end
 function usage()
     return """
     Usage:
-      julia --project scripts/generate_mapset.jl --preset=nobile20m [options]
-      julia --project scripts/generate_mapset.jl --preset=viper8-shirley [options]
+      julia --project scripts/generate_mapset.jl --spec=data/inputs/mapsets/nobile_20m_shirley.toml [options]
       julia --project scripts/generate_mapset.jl --spec=data/inputs/mapsets/viper8_shirley_range.toml [options]
 
     Time selection:
@@ -46,7 +44,6 @@ function usage()
       --overwrite               rerender existing frames instead of resuming
       --dry-run
       --dataset-description    write other/dataset_description.json
-      --list-presets
     """
 end
 
@@ -85,14 +82,8 @@ function parse_args(args)
         if arg in ("--help", "-h")
             println(usage())
             exit(0)
-        elseif arg == "--list-presets"
-            println("nobile20m")
-            println("viper8-shirley")
-            exit(0)
         elseif startswith(arg, "--spec=")
             opts = Options(opts; spec_path = split(arg, "=", limit = 2)[2])
-        elseif startswith(arg, "--preset=")
-            opts = Options(opts; preset = split(arg, "=", limit = 2)[2])
         elseif startswith(arg, "--name=")
             opts = Options(opts; name = split(arg, "=", limit = 2)[2])
         elseif startswith(arg, "--out=")
@@ -130,51 +121,9 @@ function Options(base::Options; kwargs...)
     return Options(; (key => fields[key] for key in fieldnames(Options))...)
 end
 
-function preset_config(name::AbstractString)
-    if name == "nobile20m"
-        return Dict{String,Any}(
-            "name" => "nobile_20m_shirley",
-            "layers" => Any[
-                Dict{String,Any}(
-                    "kind" => "farfield",
-                    "path" => "data/inputs/ldem_80s_20m.img",
-                    "name" => "Shirley LDEM 80S 20m Nobile window",
-                    "window" => Any[8960, 18432, 512, 896],
-                    "data_type" => "int16",
-                    "elevation_scale_m" => 0.5,
-                ),
-            ],
-        )
-    elseif name == "viper8-shirley"
-        return Dict{String,Any}(
-            "name" => "viper8_1m_shirley",
-            "layers" => Any[
-                Dict{String,Any}(
-                    "kind" => "site",
-                    "path" => "data/inputs/nobile_area_viper_sfs_dem_8_0_native_crop.tif",
-                    "name" => "VIPER 8.0 Nobile 1m crop",
-                ),
-                Dict{String,Any}(
-                    "kind" => "farfield",
-                    "path" => "data/inputs/ldem_80s_20m.img",
-                    "name" => "Shirley LDEM 80S 20m",
-                    "data_type" => "int16",
-                    "elevation_scale_m" => 0.5,
-                ),
-            ],
-        )
-    end
-    error("unknown preset '$name'; use --list-presets")
-end
-
 function load_config(opts::Options)
-    cfg = if opts.spec_path !== nothing
-        TOML.parsefile(opts.spec_path)
-    elseif opts.preset !== nothing
-        preset_config(opts.preset)
-    else
-        error("provide --spec or --preset\n\n$(usage())")
-    end
+    opts.spec_path === nothing && error("provide --spec\n\n$(usage())")
+    cfg = TOML.parsefile(opts.spec_path)
     opts.name === nothing || (cfg["name"] = opts.name)
     return cfg
 end

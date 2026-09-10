@@ -140,7 +140,7 @@ else
     run_dir = joinpath(PROJECT_ROOT, "data", "outputs", "correctness", run_id)
     mkpath(run_dir)
 
-    @info "Tier 0 correctness rendering" backend=backend_name n_nacs=length(C.list_nacs(:tier0)) run_dir=run_dir
+    @info "Tier 0 correctness rendering" backend=backend_name n_nacs=length(C.list_nacs()) run_dir=run_dir
 
     input_sha_csv = joinpath(run_dir, "input_shas.csv")
     open(input_sha_csv, "w") do io
@@ -153,8 +153,8 @@ else
     max_mm, min_mm = Hyperion.build_ldem_mipmaps_minmax(ldem.data)
     Hyperion.init_spice(joinpath(PROJECT_ROOT, "kernels"))
 
-    pids = C.list_nacs(:tier0)
-    timestamps = C.nac_timestamps(:tier0)
+    pids = C.list_nacs()
+    timestamps = C.nac_timestamps()
     ts_to_pids = Dict{DateTime, Vector{String}}()
     for pid in pids
         haskey(timestamps, pid) || error("$pid has no timestamp in Tier 0")
@@ -185,7 +185,7 @@ else
             for pid in group
                 sim_path = joinpath(run_dir, "$(pid).tif")
                 @test isfile(sim_path)
-                gts = C.nac_paths(:tier0, pid)
+                gts = C.nac_paths(pid)
                 m = C.score_one(sim_path, gts.shadow_20m, gts.sun_frac_20m)
                 @test m.n_valid > 0
                 push!(rows, (nac_id = pid, m...))

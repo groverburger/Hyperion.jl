@@ -6,10 +6,8 @@ const MOON_RADIUS_M  = 1737400.0
 # LDEM 80s (20m) pixel grid anchor. 30400×30400 pixels, center at (15199.5, 15199.5).
 const LDEM_S0       = 15199.5        # column corresponding to 0° easting
 const LDEM_L0       = 15199.5        # row corresponding to 0° northing
-const LDEM_SCALE_KM = 20.0 / 1000.0  # km per pixel
 
 const F32_PI     = Float32(3.141592653589)
-const F32_TWO_PI = Float32(2.0) * F32_PI
 const F32_RAD2DEG = Float32(180.0) / F32_PI  # derived from hardcoded F32_PI, not Julia's π
 
 # Sun angular radius (deg). Used by the live shadow kernel.

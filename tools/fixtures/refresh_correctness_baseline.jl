@@ -1,18 +1,8 @@
 #!/usr/bin/env julia
-# Re-render Hyperion at the Tier 0 NAC capture times, score against
-# the bundled ground truth, and overwrite
-# `test/fixtures/correctness/baseline_tier0.csv` with the new
-# per-NAC metrics.
-#
-# Use this when you've intentionally changed kernel behaviour and
-# want to update the pinned correctness baseline. The output CSV
-# should be reviewed (`git diff test/fixtures/correctness/baseline_tier0.csv`)
-# and committed alongside the kernel change with a justifying message.
-#
-# Default backend is CPU for cross-machine reproducibility. Pass
-# `HYP_BACKEND=metal` (or `cuda`) to use a GPU; metal is ~5× faster
-# on Apple Silicon. The committed baseline must be CPU-rendered to
-# stay reproducible across machines without a GPU.
+# Render the Tier 0 observation times and replace baseline_tier0.csv.
+# Use this tool after an intentional algorithm or input change.
+# Review the metric differences and explain them in the commit description.
+# The default backend is CPU. HYP_BACKEND=metal or cuda selects a GPU.
 #
 # Run:
 #   julia --project tools/fixtures/refresh_correctness_baseline.jl
@@ -56,7 +46,7 @@ Hyperion.init_spice(joinpath(dirname(pathof(Hyperion)), "..", "kernels"))
 sim_dir = mktempdir()
 @info "rendering + scoring 25 NACs" sim_dir
 t0 = time()
-rows = Hyperion.Correctness.score_tier(:tier0;
+rows = Hyperion.Correctness.score_tier(;
     sim_dir       = sim_dir,
     backend       = BACKEND,
     DeviceArray   = DEVICE_ARR,

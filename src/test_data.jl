@@ -1,47 +1,17 @@
-# ─── Local test-data checks ───────────────────────────────────────────────
-#
-# The LDEM (1.85 GB raster, see README.md → Farfield LDEM versions)
-# and its derived Nobile GTiff aren't in git. These helpers validate the
-# local Shirley DEM and derive small local artifacts from it. They never
-# download data.
-#
-# `_LDEM_SHA` below is pinned to the "Shirley" legacy artefact
-# (caaf017f…), the file Mark Shirley shipped with the upstream C#
-# Mapbuilder pipeline. The canonical PDS Geosciences Node @ WUSTL now
-# serves a different version of the same nominal product with a
-# different SHA. Do not auto-fetch from WUSTL: tests are pinned to
-# Shirley. Migration plan: repin against either current WUSTL or 2023
-# Barker, regenerate the bit-exact pins, drop the Shirley dependency.
-#
-# `require_shirley_ldem!` is the minimum needed for `test/runtests.jl`
-# and `scripts/bitexact_test.jl`. `require_nobile_1m_tif!` verifies the
-# high-resolution Nobile site DEM used by the 1 m stack tests and baseline
-# generation. `require_test_data!` additionally derives `data/inputs/nobile_20m.tif`
-# for diagnostic scripts that want a pre-cropped Nobile window.
+# Validate external terrain inputs against their expected SHA-256 values.
+# The files reside in data/inputs/ and are not stored in Git.
+# This module does not download or derive terrain files.
+# See docs/src/reference/input-data-hashes.md for the supported products.
 
 const _LDEM_SHA   = "caaf017f6bd49cc96f8de1e2620de38931ec4733a5cf1bbfa2aa778d625b523b"
 const _NOBILE_1M_SHA = "e8cc7e5b530972d1d84083b335f961f0aa87e64c39697d942f10589930dd69f4"
 const _BARKER_2023_LDEM_SHA = "09b7ca80f9e6a146f970225d18af72fc02787669b3ef51b888e347d2b6845649"
 const _VIPER8_NOBILE_CROP_SHA = "85988a26542fb2ed51322b802b5bd47467e7bd009eb67b8ab127999b8ca24e19"
-const _LDEM_DIM   = 30400                     # LDEM is 30400×30400 Int16
 const _LDEM_SIZE_GB = 1.85
-
-# Nobile test window in LDEM pixel coordinates. These values are verified
-# byte-exact against the original nobile_20m.tif from the upstream reference
-# pipeline (see scripts/fetch_test_data.jl history for the provenance).
-const _NOBILE_ROW   = 8960
-const _NOBILE_COL   = 18432
-const _NOBILE_H     = 512
-const _NOBILE_W     = 896
-const _NOBILE_UL_E  = 64650.0
-const _NOBILE_UL_N  = 124790.0
-const _NOBILE_PIXEL = 20.0
-const _NOBILE_PROJ4 = "+proj=stere +lat_0=-90 +lon_0=0 +k=1 +x_0=0 +y_0=0 +R=1737400 +units=m +no_defs"
 
 _data_dir()    = joinpath(dirname(@__DIR__), "data", "inputs")
 _ldem_path()   = joinpath(_data_dir(), "ldem_80s_20m.img")
 _barker_2023_ldem_path() = joinpath(_data_dir(), "LDEM_80S_20MPP_ADJ.TIF")
-_nobile_path() = joinpath(_data_dir(), "nobile_20m.tif")
 _nobile_1m_path() = joinpath(_data_dir(), "nobile_1m.tif")
 _viper8_nobile_crop_path() =
     joinpath(_data_dir(), "nobile_area_viper_sfs_dem_8_0_native_crop.tif")
@@ -245,49 +215,4 @@ function require_viper8_nobile_crop_tif!()
         See docs/input-data-hashes.md.
         """)
     end
-end
-
-function _nobile_matches(expected::Matrix{Float32})
-    isfile(_nobile_path()) || return false
-    ds = ArchGDAL.read(_nobile_path())
-    band = ArchGDAL.getband(ds, 1)
-    actual = ArchGDAL.read(band)
-    size(actual) == size(expected) && actual == expected
-end
-
-"""
-    require_test_data!() -> (ldem_path, nobile_path)
-
-Like `require_shirley_ldem!()` but additionally derives the Nobile-window GTiff
-(`data/inputs/nobile_20m.tif`, 512×896 Float32) used by diagnostic
-scripts (`azimuth_range.jl`, `select_test_timestamps.jl`).
-
-Idempotent — skips the derive step if the GTiff already matches the
-bytes extracted from the LDEM window.
-"""
-function require_test_data!()
-    require_shirley_ldem!()
-
-    # Read the Nobile window directly from the mmapped LDEM.
-    raw = Mmap.mmap(open(_ldem_path(), "r"), Matrix{Int16}, (_LDEM_DIM, _LDEM_DIM))
-    col_range = (_NOBILE_COL + 1):(_NOBILE_COL + _NOBILE_W)
-    row_range = (_NOBILE_ROW + 1):(_NOBILE_ROW + _NOBILE_H)
-    expected = Float32.(raw[col_range, row_range]) .* 0.5f0
-
-    if _nobile_matches(expected)
-        return (_ldem_path(), _nobile_path())
-    end
-
-    @info "Deriving Nobile GTiff from LDEM" path=_nobile_path()
-    ArchGDAL.create(_nobile_path();
-                    driver = ArchGDAL.getdriver("GTiff"),
-                    width  = _NOBILE_W, height = _NOBILE_H,
-                    nbands = 1, dtype = Float32) do dst
-        ArchGDAL.setgeotransform!(dst, [_NOBILE_UL_E, _NOBILE_PIXEL, 0.0,
-                                        _NOBILE_UL_N, 0.0, -_NOBILE_PIXEL])
-        ArchGDAL.setproj!(dst, _NOBILE_PROJ4)
-        band = ArchGDAL.getband(dst, 1)
-        ArchGDAL.write!(band, expected)
-    end
-    return (_ldem_path(), _nobile_path())
 end

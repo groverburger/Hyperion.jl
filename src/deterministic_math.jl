@@ -190,22 +190,3 @@ Deterministic (cos θ, sin θ) via quadrant reduction + 1D LUT + linear interp.
         return (c_local, -s_local)
     end
 end
-
-# ─── Array versions ───────────────────────────────────────────────────────
-
-function atan2_lut_array(y::AbstractArray{Float32}, x::AbstractArray{Float32})
-    out = similar(y, Float32)
-    @inbounds for i in eachindex(y, x)
-        out[i] = atan2_lut(y[i], x[i])
-    end
-    return out
-end
-
-function cos_sin_lut_array(theta::AbstractArray{Float32})
-    c = similar(theta, Float32)
-    s = similar(theta, Float32)
-    @inbounds for i in eachindex(theta)
-        c[i], s[i] = cos_sin_lut(theta[i])
-    end
-    return c, s
-end

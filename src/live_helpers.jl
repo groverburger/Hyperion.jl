@@ -17,10 +17,8 @@ using Dates
 
 # ─── Constants ────────────────────────────────────────────────────────────
 
-const R_M_F64      = Float64(MOON_RADIUS_M)
 const R_KM_F64     = Float64(MOON_RADIUS_KM)
 const R_KM_F32     = Float32(MOON_RADIUS_KM)
-const R_M_F32      = Float32(MOON_RADIUS_M)
 # Reciprocals of R precomputed on CPU so the GPU per-ray-step stereographic
 # projection uses multiplies instead of variable-denominator divisions (the
 # div's default rounding can diverge between Metal's IEEE-rn and CUDA's
@@ -28,7 +26,6 @@ const R_M_F32      = Float32(MOON_RADIUS_M)
 const INV_2R_M_F32   = Float32(1.0 / (2.0 * MOON_RADIUS_M))
 const INV_R_KM_F32   = Float32(1.0 / MOON_RADIUS_KM)
 const INV_4R_KM2_F32 = Float32(1.0 / (4.0 * MOON_RADIUS_KM * MOON_RADIUS_KM))
-const LDEM_PIX_M   = 20.0
 const LDEM_S0_F32  = Float32(LDEM_S0)
 const LDEM_L0_F32  = Float32(LDEM_L0)
 
@@ -67,7 +64,6 @@ function _make_half_circle()
     return Float32.(hc) .* SUN_HALF_ANGLE_DEG
 end
 const HALF_CIRCLE  = _make_half_circle()
-const MAX_PHOTONS  = Float32(2.0 * sum(HALF_CIRCLE))
 const INV_MAX_PHOTONS = Float32(1.0 / (2.0 * sum(HALF_CIRCLE)))
 
 # 8 ray offsets (radians) relative to sun center, equally spaced across
@@ -162,8 +158,8 @@ the projection origin (s0, l0) in pixel coords and the pixel size.
     (X, Y, Z)
 end
 
-# LDEM convenience wrapper — keeps the original 3-arg signature usable
-# from tests/scripts that don't care about parameterization.
+# LDEM convenience wrapper. Test-only: kept for the Float32 projection
+# round-trip check in test/runtests.jl.
 @inline _stereo_to_moonme_f32(cx::Float32, cy::Float32, elev_m::Float32) =
     _stereo_to_moonme_f32(cx, cy, elev_m, LDEM_S0_F32, LDEM_L0_F32, 0.02f0)
 

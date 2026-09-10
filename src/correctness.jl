@@ -1,37 +1,8 @@
-# ─── Correctness data discovery ──────────────────────────────────────────
-#
-# Hyperion's correctness data is structured in three tiers:
-#
-#   Tier 0   25-NAC smoke subset bundled in git at
-#            `test/fixtures/correctness/`. Always present; used by the
-#            in-repo correctness regression test.
-#
-#   Tier 1   Full 599-NAC ground truth (~22 MB). Stored externally
-#            and located by the `HYP_CORRECTNESS_TIER1_DIR` env var.
-#            Optional. Provides statistical robustness for the
-#            correctness eval. The directory must contain
-#            `shadow_20m/`, `sun_frac_20m/`, and `timestamps.csv`.
-#
-#            There is intentionally NO default path. The location of
-#            external data is platform- and host-specific; falling
-#            back to a hard-coded path would either silently miss the
-#            data on systems with a different layout, or accidentally
-#            pick up a stale directory on the developer's machine.
-#
-#   Tier 2   Raw LROC NAC orthoproducts (~30 GB). Required only if
-#            you want to re-derive Tier 1 from scratch (verification
-#            audits, methodology changes). Located by
-#            `HYP_LROC_NAC_DIR`. Not consumed by this module — only
-#            by the LROC pipeline scripts.
-#
-# Both Tier 1 and Tier 2 are external (not bundled with the repo) by
-# design: Tier 1 is regenerable from Tier 2, Tier 2 is too big to ship
-# with code, and committing them to git would inflate every clone
-# regardless of whether the user intends to run correctness checks.
-#
-# This module deliberately does NOT auto-fetch from URLs; the data
-# layout and acquisition is the user's responsibility. We only locate
-# what's already on disk.
+# Compare renderer output with the 25 bundled NAC observations.
+# The reference masks are in test/fixtures/correctness/.
+# The external LROC pipeline data is necessary only to rebuild the masks.
+# The copy tool uses LROC_PIPELINE_DIR to find derived pipeline output.
+# This module does not download data.
 
 module Correctness
 
@@ -58,86 +29,32 @@ contains `shadow_20m/`, `sun_frac_20m/`, `timestamps.csv`,
 """
 tier0_dir() = _TIER0_DIR
 
-# ─── Tier 1: external full-dataset path ──────────────────────────────────
-
-const _TIER1_ENV_VAR = "HYP_CORRECTNESS_TIER1_DIR"
-
-"""
-    tier1_dir() -> Union{String, Nothing}
-
-Path to the Tier 1 correctness data (full 599-NAC ground truth) if
-locally accessible, else `nothing`. The path is read **only** from
-`ENV["HYP_CORRECTNESS_TIER1_DIR"]`; there is no default fallback,
-because external data layout is platform- and host-specific.
-
-A path is considered Tier-1-valid only if both `shadow_20m/` and
-`sun_frac_20m/` subdirectories exist under it.
-"""
-function tier1_dir()
-    raw = get(ENV, _TIER1_ENV_VAR, "")
-    isempty(raw) && return nothing
-    candidate = abspath(raw)
-    isdir(candidate) || return nothing
-    isdir(joinpath(candidate, "shadow_20m"))   || return nothing
-    isdir(joinpath(candidate, "sun_frac_20m")) || return nothing
-    return candidate
-end
-
-"""
-    has_tier1() -> Bool
-
-True iff Tier 1 correctness data is locally accessible at the path
-returned by `tier1_dir()`.
-"""
-has_tier1() = tier1_dir() !== nothing
-
-
 # ─── NAC enumeration ─────────────────────────────────────────────────────
 
 """
-    list_nacs(tier::Symbol = :tier0) -> Vector{String}
+    list_nacs() -> Vector{String}
 
-Return the sorted product IDs available in the given tier. `tier` is
-`:tier0` for the bundled smoke subset or `:tier1` for the full
-external dataset.
-
-Throws if `tier == :tier1` and Tier 1 isn't present on disk.
+Return the sorted product IDs available in the bundled Tier 0 fixture.
 """
-function list_nacs(tier::Symbol = :tier0)
-    dir = _resolve_tier(tier)
-    shadow_dir = joinpath(dir, "shadow_20m")
+function list_nacs()
+    shadow_dir = joinpath(tier0_dir(), "shadow_20m")
     keep(f) = endswith(f, ".tif") && !startswith(f, "._")
     return sort([replace(f, ".tif" => "") for f in readdir(shadow_dir) if keep(f)])
-end
-
-function _resolve_tier(tier::Symbol)
-    if tier === :tier0
-        return tier0_dir()
-    elseif tier === :tier1
-        d = tier1_dir()
-        d === nothing &&
-            error("Tier 1 correctness data not found. Set the " *
-                  "$(_TIER1_ENV_VAR) env var to a directory containing " *
-                  "shadow_20m/ and sun_frac_20m/.")
-        return d
-    else
-        error("unknown tier $(tier); expected :tier0 or :tier1")
-    end
 end
 
 
 # ─── Per-NAC path resolution ─────────────────────────────────────────────
 
 """
-    nac_paths(tier::Symbol, pid::AbstractString)
+    nac_paths(pid::AbstractString)
         -> NamedTuple{(:shadow_20m, :sun_frac_20m), NTuple{2, String}}
 
 Return the file paths to the binary shadow mask and continuous
-sun-fraction mask for the given NAC product ID in the given tier.
-Throws if either file is missing.
+sun-fraction mask for the given NAC product ID. Throws if either file
+is missing.
 """
-function nac_paths(tier::Symbol, pid::AbstractString)
-    dir = _resolve_tier(tier)
+function nac_paths(pid::AbstractString)
+    dir = tier0_dir()
     sh = joinpath(dir, "shadow_20m",   "$(pid).tif")
     sf = joinpath(dir, "sun_frac_20m", "$(pid).tif")
     isfile(sh) || error("$(pid): shadow_20m mask missing at $sh")
@@ -149,13 +66,13 @@ end
 # ─── Timestamp lookup ────────────────────────────────────────────────────
 
 """
-    nac_timestamps(tier::Symbol = :tier0) -> Dict{String, DateTime}
+    nac_timestamps() -> Dict{String, DateTime}
 
-Return a mapping `product_id => DateTime` parsed from the tier's
+Return a mapping `product_id => DateTime` parsed from the Tier 0
 `timestamps.csv`. Sub-second precision is preserved.
 """
-function nac_timestamps(tier::Symbol = :tier0)
-    dir = _resolve_tier(tier)
+function nac_timestamps()
+    dir = tier0_dir()
     path = joinpath(dir, "timestamps.csv")
     isfile(path) || error("timestamps.csv missing at $path")
     out = Dict{String, _Dates.DateTime}()
@@ -176,31 +93,6 @@ function nac_timestamps(tier::Symbol = :tier0)
         end
     end
     return out
-end
-
-# ─── Status reporting ────────────────────────────────────────────────────
-
-"""
-    status() -> Nothing
-
-Print a human-readable summary of which correctness data tiers are
-locally available.
-"""
-function status()
-    println("Hyperion correctness data status")
-    println("─────────────────────────────────")
-    n0 = length(list_nacs(:tier0))
-    println("  Tier 0 (bundled, 25-NAC subset): $(n0) NACs at $(tier0_dir())")
-
-    t1 = tier1_dir()
-    if t1 === nothing
-        println("  Tier 1 (full dataset):           NOT PRESENT")
-        println("    Set ENV[\"$(_TIER1_ENV_VAR)\"] to a directory containing shadow_20m/ + sun_frac_20m/.")
-    else
-        n1 = length(list_nacs(:tier1))
-        println("  Tier 1 (full dataset):           $(n1) NACs at $t1")
-    end
-    return nothing
 end
 
 # ─── Comparison engine ───────────────────────────────────────────────────
@@ -434,12 +326,12 @@ function score_one(sim_path::AbstractString,
 end
 
 
-# ─── Render + score over a tier ──────────────────────────────────────
+# ─── Render + score over the Tier 0 fixture ───────────────────────────
 """
-    score_tier(tier=:tier0; sim_dir, backend, DeviceArray, ldem,
+    score_tier(; sim_dir, backend, DeviceArray, ldem,
                max_mipmaps, min_mipmaps) -> Vector{NamedTuple}
 
-For each NAC in the tier, render Hyperion at the LNSI 896×896 window
+For each NAC in the Tier 0 fixture, render Hyperion at the LNSI 896×896 window
 at the NAC's exact capture time, save the render to `sim_dir`, score
 against the ground-truth masks, and return the per-NAC metric rows.
 
@@ -457,21 +349,21 @@ Caller responsibilities:
   - LDEM + mipmaps + SPICE kernels are loaded (`Hyperion.load_ldem`,
     `Hyperion.build_ldem_mipmaps_minmax`, `Hyperion.init_spice`).
 """
-function score_tier(tier::Symbol = :tier0;
+function score_tier(;
                     sim_dir::AbstractString,
                     backend, DeviceArray,
                     ldem,
                     max_mipmaps,
                     min_mipmaps)
     isdir(sim_dir) || mkpath(sim_dir)
-    pids = list_nacs(tier)
-    timestamps = nac_timestamps(tier)
+    pids = list_nacs()
+    timestamps = nac_timestamps()
     Hyp = parentmodule(@__MODULE__)
 
     # Group NACs by exact timestamp so LE/RE pairs reuse one render.
     ts_to_pids = Dict{_Dates.DateTime, Vector{String}}()
     for pid in pids
-        haskey(timestamps, pid) || error("$pid has no timestamp in $tier")
+        haskey(timestamps, pid) || error("$pid has no timestamp in timestamps.csv")
         push!(get!(ts_to_pids, timestamps[pid], String[]), pid)
     end
 
@@ -496,7 +388,7 @@ function score_tier(tier::Symbol = :tier0;
     rows = NamedTuple[]
     for pid in pids
         sim_path = joinpath(sim_dir, "$(pid).tif")
-        gts = nac_paths(tier, pid)
+        gts = nac_paths(pid)
         m = score_one(sim_path, gts.shadow_20m, gts.sun_frac_20m)
         push!(rows, (nac_id = pid, m...))
     end
@@ -613,10 +505,6 @@ const _METRIC_DIRECTIONS = (
     mae             = :lower_is_better,
     p99_abs_err     = :lower_is_better,
 )
-
-"Numeric metric names (excluding `bias` and the `n_*` counts) along
-with their improvement direction."
-metric_directions() = _METRIC_DIRECTIONS
 
 # Threshold for treating a delta as "actual change" rather than
 # Float64 round-off in the metric computation. Hyperion is bit-exact
