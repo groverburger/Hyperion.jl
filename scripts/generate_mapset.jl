@@ -15,6 +15,8 @@ Base.@kwdef struct Options
     name::Union{Nothing,String} = nothing
     output_root::String = DEFAULT_OUTPUT_ROOT
     backend::Symbol = :auto
+    gpus::Int = 1
+    worker::Union{Nothing,Tuple{Int,Int}} = nothing
     overwrite::Bool = false
     dry_run::Bool = false
     start_time::Union{Nothing,DateTime} = nothing
@@ -40,6 +42,7 @@ function usage()
       --name=<name>             output mapset name
       --out=<path>              output root, default data/outputs
       --backend=auto|metal|cuda|cpu
+      --gpus=<n>                use up to n visible NVIDIA GPUs on this node (default 1)
       --azel-step-hours=<n>     azimuth/elevation CSV cadence for ranges
       --overwrite               rerender existing frames instead of resuming
       --dry-run
@@ -90,6 +93,12 @@ function parse_args(args)
             opts = Options(opts; output_root = split(arg, "=", limit = 2)[2])
         elseif startswith(arg, "--backend=")
             opts = Options(opts; backend = parse_backend(split(arg, "=", limit = 2)[2]))
+        elseif startswith(arg, "--gpus=")
+            opts = Options(opts; gpus = parse(Int, split(arg, "=", limit = 2)[2]))
+        elseif startswith(arg, "--_worker=")
+            parts = parse.(Int, split(split(arg, "=", limit = 2)[2], '/'))
+            length(parts) == 2 || error("invalid internal worker argument")
+            opts = Options(opts; worker = (parts[1], parts[2]))
         elseif startswith(arg, "--start=")
             opts = Options(opts; start_time = parse_datetime(split(arg, "=", limit = 2)[2]))
         elseif startswith(arg, "--stop=")
@@ -109,6 +118,14 @@ function parse_args(args)
         else
             error("unknown argument: $arg\n\n$(usage())")
         end
+    end
+    opts.gpus > 0 || error("--gpus must be positive")
+    opts.gpus > 1 && !(opts.backend in (:auto, :cuda)) &&
+        error("--gpus greater than 1 requires --backend=cuda or auto")
+    if opts.worker !== nothing
+        i, n = opts.worker
+        1 <= i <= n || error("invalid internal worker index or count")
+        opts.gpus == 1 || error("a worker cannot launch other workers")
     end
     return opts
 end
@@ -231,183 +248,103 @@ function print_plan(name, layers, output_root, backend, times, start, stop, step
     end
 end
 
-function merge_single_frame!(target, tmp_mapset, ts; overwrite::Bool = false)
-    tag = Dates.format(ts, dateformat"yyyy-mm-ddTHH-MM-SS")
-    mkpath(joinpath(target, "sun"))
-    mkpath(joinpath(target, "dsn"))
-    mkpath(joinpath(target, "other"))
-    sun_dst = joinpath(target, "sun", "sun.$tag.png")
-    dsn_dst = joinpath(target, "dsn", "dsn.$tag.png")
-    if overwrite || !isfile(sun_dst)
-        cp(joinpath(tmp_mapset, "sun", "sun.$tag.png"), sun_dst; force = true)
-    else
-        @warn "sun image already exists; leaving it unchanged" timestamp=tag path=sun_dst
-    end
-    if overwrite || !isfile(dsn_dst)
-        cp(joinpath(tmp_mapset, "dsn", "dsn.$tag.png"), dsn_dst; force = true)
-    else
-        @warn "dsn image already exists; leaving it unchanged" timestamp=tag path=dsn_dst
+# CUDA numbers devices within the job's existing CUDA_VISIBLE_DEVICES list.
+# Keep that list unchanged so PBS device IDs and UUIDs retain their meaning.
+function cuda_backend_for_worker(index::Union{Nothing,Int}, count::Int)
+    resolved = Hyp._try_mapset_backend(:cuda)
+    resolved === nothing && error("multi-GPU mapsets require a functional CUDA backend")
+    return Base.invokelatest() do
+        cuda = getfield(Main, :CUDA)
+        available = length(cuda.devices())
+        available >= count || error("requested $count GPUs, but CUDA can see only $available")
+        if index !== nothing
+            cuda.device!(index - 1)
+            println("Worker $index/$count uses CUDA device $(index - 1): $(cuda.name(cuda.device()))")
+        end
+        resolved[1]
     end
 end
 
-function dataset_datetime(ts::DateTime)
-    return Dates.format(ts, dateformat"yyyy-mm-ddTHH:MM:SS") * "Z"
-end
-
-function dataset_period(step::Period)
-    t0 = DateTime(2000, 1, 1)
-    delta_ms = Dates.value((t0 + step) - t0)
-    delta_ms >= 0 || error("explicit timestamp ImageStep must be non-negative")
-    seconds, ms = divrem(delta_ms, 1000)
-    ms == 0 || error("explicit timestamp ImageStep must be whole seconds")
-    hours, rem_seconds = divrem(seconds, 3600)
-    minutes, secs = divrem(rem_seconds, 60)
-    return @sprintf("%02d:%02d:%02d", hours, minutes, secs)
-end
-
-function dataset_json_string(s::AbstractString)
-    escaped = replace(String(s),
-        "\\" => "\\\\",
-        "\"" => "\\\"",
-        "\b" => "\\b",
-        "\f" => "\\f",
-        "\n" => "\\n",
-        "\r" => "\\r",
-        "\t" => "\\t")
-    return "\"" * escaped * "\""
-end
-
-function explicit_time_step(times::Vector{DateTime})
-    sorted = sort(times)
-    length(sorted) > 1 || return Second(0)
-    step = sorted[2] - sorted[1]
-    for i in 3:length(sorted)
-        sorted[i] - sorted[i - 1] == step ||
-            error("dataset_description.json requires a regular ImageStep; explicit timestamps are irregular")
+function worker_commands(args, count::Int)
+    forwarded = filter(args) do arg
+        !any(startswith(arg, prefix) for prefix in ("--gpus=", "--_worker=", "--backend="))
     end
-    return step
+    threads = max(1, Threads.nthreads() ÷ count)
+    return [
+        `$(Base.julia_cmd()) --project=$PROJECT_ROOT --threads=$threads $(@__FILE__) $forwarded --backend=cuda --_worker=$i/$count`
+        for i in 1:count
+    ]
 end
 
-function rewrite_dataset_description(src::AbstractString,
-                                     dst::AbstractString,
-                                     name::AbstractString,
-                                     times::Vector{DateTime})
-    sorted = sort(times)
-    isempty(sorted) && error("cannot write dataset description for empty timestamp list")
-    step = explicit_time_step(sorted)
-    replacements = Dict(
-        "Name" => dataset_json_string(name),
-        "Layers" => string(length(sorted)),
-        "Start" => dataset_json_string(dataset_datetime(first(sorted))),
-        "Stop" => dataset_json_string(dataset_datetime(last(sorted) + step)),
-        "ImageStep" => dataset_json_string(dataset_period(step)),
-    )
-    open(dst, "w") do io
-        for line in eachline(src)
-            m = match(r"^(\s*)\"([^\"]+)\":\s*(.*?)(,?)$", line)
-            if m !== nothing && haskey(replacements, m.captures[2])
-                println(io, m.captures[1], "\"", m.captures[2], "\": ",
-                        replacements[m.captures[2]], m.captures[4])
-            else
-                println(io, line)
+function run_mapset_workers(commands, logdir)
+    mkpath(logdir)
+    processes = Base.Process[]
+    try
+        for (i, command) in enumerate(commands)
+            logpath = joinpath(logdir, "gpu_$i.log")
+            println("Starting worker $i; log: $logpath")
+            process = open(logpath, "w") do io
+                run(pipeline(command; stdout = io, stderr = io); wait = false)
             end
+            push!(processes, process)
         end
+        # Check every process. A failed worker must make the parent command fail.
+        foreach(wait, processes)
+        failed = findall(p -> !success(p), processes)
+        isempty(failed) || error("mapset workers failed: $(join(failed, ", ")); see $logdir")
+    finally
+        # Stop children if process startup or waiting throws an exception.
+        for process in processes
+            process_running(process) && kill(process)
+        end
+        foreach(wait, processes)
     end
+    return nothing
 end
 
-function generate_explicit_times(cfg, name, layers, times, opts)
-    write_dataset_description = configured_dataset_description(cfg, opts)
-    outdir = joinpath(opts.output_root, name)
-    isdir(outdir) && !opts.overwrite &&
-        @warn "mapset output already exists; resuming missing frames" outdir
-    mkpath(outdir)
-    tmp_root = mktempdir()
-    azel_path = joinpath(outdir, "other", "azimuths_elevations.csv")
-    mkpath(joinpath(outdir, "other"))
-    azel_header_written = !opts.overwrite && isfile(azel_path)
-    open(joinpath(outdir, "other", "timestamps.txt"), "w") do io
-        for ts in sort(times)
-            println(io, Dates.format(ts, dateformat"yyyy-mm-ddTHH:MM:SS"))
-        end
-    end
-    for ts in sort(times)
-        tag = Dates.format(ts, dateformat"yyyy-mm-ddTHH-MM-SS")
-        sun_path = joinpath(outdir, "sun", "sun.$tag.png")
-        dsn_path = joinpath(outdir, "dsn", "dsn.$tag.png")
-        sun_exists = isfile(sun_path)
-        dsn_exists = isfile(dsn_path)
-        if !opts.overwrite && sun_exists && dsn_exists
-            @warn "mapset frame already exists; skipping" timestamp=tag sun=sun_path dsn=dsn_path
-            continue
-        elseif !opts.overwrite && (sun_exists || dsn_exists)
-            @warn "partial mapset frame already exists; rendering missing image(s) only" timestamp=tag sun_exists dsn_exists
-        end
-
-        subname = "$(name).__single__.$(Dates.format(ts, dateformat"yyyy-mm-ddTHH-MM-SS"))"
-        spec = build_spec(cfg, subname, layers, ts, ts, Hour(1), Hour(1), tmp_root;
-                          dataset_description = write_dataset_description)
-        tmp_mapset = Hyp.generate_mapset(spec; backend = opts.backend, overwrite = true)
-        merge_single_frame!(outdir, tmp_mapset, ts; overwrite = opts.overwrite)
-        hillshade_src = joinpath(tmp_mapset, "other", "hillshade.tif")
-        hillshade_dst = joinpath(outdir, "other", "hillshade.tif")
-        isfile(hillshade_dst) || cp(hillshade_src, hillshade_dst; force = true)
-        slope_src = joinpath(tmp_mapset, "other", "slope.tif")
-        slope_dst = joinpath(outdir, "other", "slope.tif")
-        isfile(slope_dst) || cp(slope_src, slope_dst; force = true)
-        if write_dataset_description
-            description_src = joinpath(tmp_mapset, "other", "dataset_description.json")
-            description_dst = joinpath(outdir, "other", "dataset_description.json")
-            isfile(description_dst) ||
-                rewrite_dataset_description(description_src, description_dst, name, times)
-        end
-        lines = readlines(joinpath(tmp_mapset, "other", "azimuths_elevations.csv"))
-        open(azel_path, azel_header_written ? "a" : "w") do io
-            for (i, line) in enumerate(lines)
-                i == 1 && azel_header_written && continue
-                println(io, line)
-            end
-        end
-        azel_header_written = true
-    end
-    open(joinpath(outdir, "other", "manifest.csv"), "w") do io
-        println(io, "section,key,value")
-        println(io, "mapset,name,$name")
-        println(io, "mapset,time_mode,explicit")
-        println(io, "mapset,timestamp_count,$(length(times))")
-        println(io, "mapset,output_root,$(abspath(opts.output_root))")
-        println(io, "mapset,dataset_description,$write_dataset_description")
-        println(io, "runtime,backend,$(opts.backend)")
-        println(io, "tool,script,scripts/generate_mapset.jl")
-    end
-    println("Wrote mapset: $outdir")
-    return outdir
-end
-
-function main()
-    opts = parse_args(ARGS)
+function main(args = ARGS)
+    opts = parse_args(args)
     cfg = load_config(opts)
     name = String(get(cfg, "name", "hyperion_mapset"))
     layers = [layer_from_config(layer) for layer in cfg["layers"]]
     output_root = abspath(opts.output_root)
     times = configured_times(cfg, opts)
     write_dataset_description = configured_dataset_description(cfg, opts)
-    if times !== nothing && isempty(times)
-        error("explicit timestamp list is empty")
-    end
-
     if times === nothing
         start, stop, step, azel_step = configured_range(cfg, opts)
-        print_plan(name, layers, output_root, opts.backend, nothing, start, stop, step, azel_step)
-        opts.dry_run && return nothing
+        Hyp._mapset_period_positive(step) || error("step must be positive")
+        Hyp._mapset_period_positive(azel_step) || error("az/el step must be positive")
+        timestamps = Hyp._mapset_timestamps(start, stop, step)
+    else
+        isempty(times) && error("explicit timestamp list is empty")
+        times = sort(unique(times))
+        timestamps = times
+        start, stop = first(times), last(times)
+        step = azel_step = Hour(1)
+        write_dataset_description && Hyp._mapset_explicit_step(times)
+    end
+    print_plan(name, layers, output_root, opts.backend, times, start, stop, step, azel_step)
+    count = min(opts.gpus, length(timestamps))
+    opts.gpus > 1 && println("GPU workers: $count (requested $(opts.gpus)); timestamps assigned in turn")
+    opts.dry_run && return nothing
+
+    if opts.gpus > 1
+        cuda_backend_for_worker(nothing, opts.gpus)
+        outdir = joinpath(output_root, name)
+        run_mapset_workers(worker_commands(args, count), joinpath(outdir, "logs"))
+    else
+        index, workers = something(opts.worker, (1, 1))
+        backend = opts.worker === nothing ? opts.backend : cuda_backend_for_worker(index, workers)
         spec = build_spec(cfg, name, layers, start, stop, step, azel_step, output_root;
                           dataset_description = write_dataset_description)
-        outdir = Hyp.generate_mapset(spec; backend = opts.backend, overwrite = opts.overwrite)
-        println("Wrote mapset: $outdir")
-    else
-        print_plan(name, layers, output_root, opts.backend, times, nothing, nothing, nothing, nothing)
-        opts.dry_run && return nothing
-        generate_explicit_times(cfg, name, layers, times, opts)
+        # GPU module bindings can be newer than this call's world on Julia 1.12.
+        outdir = Base.invokelatest(Hyp._generate_mapset, spec; backend,
+            overwrite = opts.overwrite, times, worker_index = index, worker_count = workers)
     end
+    println("Wrote mapset: $outdir")
+    return outdir
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

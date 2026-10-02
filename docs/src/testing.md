@@ -19,6 +19,26 @@ External DEMs and SPICE kernels are not necessary for these tests.
 
 Select Metal or CUDA with `HYP_BACKEND=metal` or `HYP_BACKEND=cuda`.
 
+## Small mapset worker tests
+
+```bash
+julia --project test/mapset_workers.jl
+```
+
+These tests compare one-process and two-process output on synthetic terrain.
+They also check worker failures, missing-image continuation, explicit timestamps, and shared metadata.
+They use the CPU and the stored SPICE kernels.
+The render checks require `gdaldem` on `PATH`; they do not run if it is unavailable.
+External terrain files are not necessary.
+
+On a node with at least two visible NVIDIA GPUs, also test the GPU launcher:
+
+```bash
+HYP_MAPSET_TEST_GPUS=2 julia --project test/mapset_workers.jl
+```
+
+The additional check compares the GPU images with the CPU images.
+
 ## Standard suite
 
 Run the suite from the repository root:
@@ -31,6 +51,7 @@ julia --project -e 'using Pkg; Pkg.test()'
 |---|---|
 | Lookup tables and projection geometry | No external data |
 | Synthetic terrain stacks | No external data |
+| Mapset workers | Stored SPICE kernels and `gdaldem`; optional NVIDIA GPUs |
 | Mipmap pyramid | SHA-verified Shirley DEM |
 | 20 m output regression; 20 timestamps | Shirley DEM and a render backend |
 | Full 1 m output regression; 20 timestamps | Shirley DEM, `nobile_1m.tif`, and a render backend |

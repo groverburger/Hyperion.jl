@@ -27,8 +27,52 @@ An output tile boundary does not end the terrain raster.
 For map generation, `gdaldem` must be on `PATH` to make slope and hillshade files.
 The command accepts `auto`, `metal`, `cuda`, and `cpu` backends.
 An unavailable GPU backend can cause a CPU fallback.
+Multi-GPU operation stops with an error if CUDA or the requested GPUs are unavailable.
 You must supply `--spec` to the current command.
 The previous preset options are no longer available.
+
+## Use multiple GPUs
+
+Add `--gpus=<count>` to divide timestamps across NVIDIA GPUs on one node:
+
+```bash
+julia --project scripts/generate_mapset.jl \
+  --spec=data/inputs/mapsets/v8_medium_barker_sep.toml \
+  --start=2028-01-01T00:00:00 --stop=2028-12-31T23:00:00 \
+  --backend=cuda --gpus=6
+```
+
+The node must provide six visible GPUs for this example.
+The command uses the first six devices in the existing `CUDA_VISIBLE_DEVICES` selection.
+It does not request hardware from PBS.
+Without `--gpus`, the command uses one backend as before.
+`--dry-run` checks the specification but does not check GPU availability.
+
+Each GPU has one Julia process and a separate terrain copy in CPU and GPU memory.
+Allow sufficient CPU memory for all processes.
+The command assigns timestamps to each process in turn.
+It starts fewer processes if there are fewer timestamps than requested GPUs.
+
+One process writes the shared metadata for the full time selection.
+All processes write images into one mapset directory.
+No manual merge is necessary.
+
+The command divides the parent's Julia thread count between the processes, with at least one thread per process.
+Set `JULIA_NUM_THREADS` before launch if more CPU threads are available.
+Logs are in `<mapset>/logs/gpu_<number>.log`; each new run replaces these logs.
+The command returns an error if a process fails.
+Run the same command again to continue from the completed image pairs.
+
+For the four-GPU PBS allocation, replace the quarter loop with one command:
+
+```bash
+export JULIA_NUM_THREADS=64
+julia --project=. scripts/generate_mapset.jl \
+  --spec=/path/to/full_year.toml --backend=cuda --gpus=4
+```
+
+Use one specification with the full time range.
+Keep the existing PBS resource request, working directory, and environment setup.
 
 ## Time selection
 
@@ -135,6 +179,8 @@ After an input or configuration change, use a new output name or `--overwrite`.
 
 `--dataset-description` adds `other/dataset_description.json`.
 An explicit timestamp list must have regular intervals for that file.
+The command sorts explicit timestamps and removes duplicates.
+It loads terrain once per process for either time-selection mode.
 
 ## Supplied specifications
 

@@ -19,6 +19,7 @@ The mapset command no longer accepts preset options.
 |---|---|
 | `julia --project -e 'using Pkg; Pkg.test()'` | Run the standard suite |
 | `HYP_BACKEND=cpu julia --project test/terrain_stack.jl` | Run small synthetic terrain tests |
+| `julia --project test/mapset_workers.jl` | Check mapset processes and output on small synthetic terrain |
 | `tools/bitexact/bitexact_test.jl` | Produce hashes and raw buffers for one backend |
 | `tools/bitexact/diff_bitexact_shas.jl` | Compare stored backend hashes |
 | `tools/bitexact/diff_bitexact_pixels.jl` | Compare stored image buffers |

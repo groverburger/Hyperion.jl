@@ -76,6 +76,8 @@ Existing full frames remain unchanged.
 
 Use `--dry-run` for a check of the specification and input hashes without map generation.
 Use `--overwrite` to replace existing frames.
+Use `--backend=cuda --gpus=6` to divide timestamps across six visible NVIDIA GPUs on one node.
+The command writes one mapset and requires no manual merge.
 Use `--help` to show the command options.
 
 The [mapset guide](docs/src/mapsets.md) explains layers, timestamps, tiles, and output files.

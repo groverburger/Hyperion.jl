@@ -134,6 +134,17 @@ spec = MapsetSpec(
 function generate_mapset(spec::MapsetSpec;
                          backend = :auto,
                          overwrite::Bool = false)
+    return _generate_mapset(spec; backend, overwrite)
+end
+
+# Workers use disjoint timestamps. Only worker 1 writes shared products.
+function _generate_mapset(spec::MapsetSpec;
+                          backend = :auto,
+                          overwrite::Bool = false,
+                          times = nothing,
+                          worker_index::Int = 1,
+                          worker_count::Int = 1)
+    1 <= worker_index <= worker_count || error("invalid mapset worker index or count")
     isempty(spec.layers) && error("MapsetSpec requires at least one DEM layer")
     spec.stop_time < spec.start_time &&
         error("stop_time must be >= start_time")
@@ -141,19 +152,28 @@ function generate_mapset(spec::MapsetSpec;
         error("step must be a positive Dates.Period")
     _mapset_period_positive(spec.azel_step) ||
         error("azel_step must be a positive Dates.Period")
+    timestamps = times === nothing ?
+        _mapset_timestamps(spec.start_time, spec.stop_time, spec.step) : sort(unique(times))
+    isempty(timestamps) && error("timestamp list is empty")
+    description_step = spec.step
+    if times !== nothing && spec.dataset_description
+        description_step = _mapset_explicit_step(timestamps)
+    end
+    azel_timestamps = times === nothing ?
+        _mapset_timestamps(spec.start_time, spec.stop_time, spec.azel_step) : timestamps
 
     outdir = joinpath(spec.output_root, spec.name)
     sun_dir = joinpath(outdir, "sun")
     dsn_dir = joinpath(outdir, "dsn")
     other_dir = joinpath(outdir, "other")
-    isdir(outdir) && !overwrite &&
+    worker_index == 1 && isdir(outdir) && !overwrite &&
         @warn "mapset output already exists; resuming missing frames" outdir
     mkpath(sun_dir); mkpath(dsn_dir); mkpath(other_dir)
     legacy_input_products = joinpath(other_dir, "input_products.csv")
-    isfile(legacy_input_products) && rm(legacy_input_products)
+    worker_index == 1 && isfile(legacy_input_products) && rm(legacy_input_products)
     for legacy_hillshade in ("site_hillshade.png", "hillshade.png")
         legacy_path = joinpath(other_dir, legacy_hillshade)
-        isfile(legacy_path) && rm(legacy_path)
+        worker_index == 1 && isfile(legacy_path) && rm(legacy_path)
     end
     backend_obj, DeviceArray = _resolve_mapset_backend(backend)
 
@@ -161,22 +181,30 @@ function generate_mapset(spec::MapsetSpec;
     stack, site_max, site_min = _mapset_stack(loaded)
     first = loaded[1]
     origin_r, origin_c, H, W = _mapset_render_window(first)
-    timestamps = _mapset_timestamps(spec.start_time, spec.stop_time, spec.step)
-    azel_timestamps = _mapset_timestamps(spec.start_time, spec.stop_time, spec.azel_step)
-
     init_spice(spec.kernels_dir)
 
-    _write_mapset_terrain_derivatives(other_dir, first)
-    lat, lon, elev = _mapset_center_lat_lon_elev(first)
-    write_azel_csv(joinpath(other_dir, "azimuths_elevations.csv"),
-                   azel_timestamps, lat, lon; query_elev_m = elev)
-    _write_manifest_csv(joinpath(other_dir, "manifest.csv"), spec,
-                        backend_obj, DeviceArray)
-    if spec.dataset_description
-        _write_dataset_description_json(
-            joinpath(other_dir, "dataset_description.json"),
-            spec, first, timestamps)
+    if worker_index == 1
+        _write_mapset_terrain_derivatives(other_dir, first)
+        lat, lon, elev = _mapset_center_lat_lon_elev(first)
+        write_azel_csv(joinpath(other_dir, "azimuths_elevations.csv"),
+                       azel_timestamps, lat, lon; query_elev_m = elev)
+        _write_manifest_csv(joinpath(other_dir, "manifest.csv"), spec,
+                            backend_obj, DeviceArray; times, worker_count)
+        if times !== nothing
+            open(joinpath(other_dir, "timestamps.txt"), "w") do io
+                for ts in timestamps
+                    println(io, Dates.format(ts, dateformat"yyyy-mm-ddTHH:MM:SS"))
+                end
+            end
+        end
+        if spec.dataset_description
+            _write_dataset_description_json(
+                joinpath(other_dir, "dataset_description.json"),
+                spec, first, timestamps; step = description_step)
+        end
     end
+    timestamps = timestamps[worker_index:worker_count:end]
+    isempty(timestamps) && return outdir
 
     tile_height, tile_width = _mapset_tile_size(spec, stack, H, W)
     tiled_layered = length(stack.sources) > 1 && tile_height > 0 && tile_width > 0
@@ -270,6 +298,14 @@ function generate_mapset(spec::MapsetSpec;
     end
 
     return outdir
+end
+
+function _mapset_explicit_step(times)
+    length(times) == 1 && return Second(0)
+    step = times[2] - times[1]
+    all(times[i] - times[i - 1] == step for i in 3:length(times)) ||
+        error("dataset_description.json requires regular explicit timestamps")
+    return step
 end
 
 function _mapset_tile_size(spec::MapsetSpec, stack::TerrainStack, H::Int, W::Int)
@@ -544,12 +580,19 @@ function _recognized_input_name(hash::AbstractString)
     return get(known, lowercase(hash), nothing)
 end
 
-function _write_manifest_csv(path::AbstractString, spec::MapsetSpec, backend, DeviceArray)
+function _write_manifest_csv(path::AbstractString, spec::MapsetSpec, backend, DeviceArray;
+                             times = nothing, worker_count::Int = 1)
     open(path, "w") do io
         println(io, "section,key,value")
         for (key, value) in _mapset_manifest_rows(spec)
+            times !== nothing && key in ("frame_step", "azel_step") && continue
             println(io, join((_csv_cell("mapset"), _csv_cell(key), _csv_cell(value)), ","))
         end
+        if times !== nothing
+            println(io, "mapset,time_mode,explicit")
+            println(io, "mapset,timestamp_count,$(length(unique(times)))")
+        end
+        worker_count > 1 && println(io, "runtime,gpu_workers,$worker_count")
         for (key, value) in _runtime_manifest_rows(backend, DeviceArray)
             println(io, join((_csv_cell("runtime"), _csv_cell(key), _csv_cell(value)), ","))
         end
@@ -608,7 +651,8 @@ end
 function _write_dataset_description_json(path::AbstractString,
                                          spec::MapsetSpec,
                                          first_layer::_LoadedMapsetLayer,
-                                         timestamps::AbstractVector{DateTime})
+                                         timestamps::AbstractVector{DateTime};
+                                         step::Period = spec.step)
     isempty(timestamps) && error("cannot write dataset description for an empty timestamp list")
     origin_r, origin_c, H, W = _mapset_render_window(first_layer)
     rows = Pair{String,Any}[
@@ -620,8 +664,8 @@ function _write_dataset_description_json(path::AbstractString,
         "WidthWithStride" => W,
         "Layers" => length(timestamps),
         "Start" => _dataset_description_datetime(first(timestamps)),
-        "Stop" => _dataset_description_datetime(last(timestamps) + spec.step),
-        "ImageStep" => _dataset_description_period(spec.step),
+        "Stop" => _dataset_description_datetime(last(timestamps) + step),
+        "ImageStep" => _dataset_description_period(step),
         "MetersPerPixel" => Float64(_mapset_pixel_size_m(first_layer)),
         "Projection" => _dataset_description_projection(first_layer),
         "MaskDataIntervals" => nothing,
