@@ -357,9 +357,12 @@ function _try_mapset_backend(backend::Symbol)
         return _mapset_with_default_env() do
             try
                 Base.eval(Main, :(using Metal))
-                metal = getfield(Main, :Metal)
-                return (Base.invokelatest(getfield(metal, :MetalBackend)),
-                        _DeviceArrayConstructor(getfield(metal, :MtlArray), "MtlArray"))
+                # Julia 1.12 also applies world age to new global bindings.
+                return Base.invokelatest() do
+                    metal = getfield(Main, :Metal)
+                    (getfield(metal, :MetalBackend)(),
+                     _DeviceArrayConstructor(getfield(metal, :MtlArray), "MtlArray"))
+                end
             catch e
                 @debug "Metal mapset backend unavailable" exception=e
                 return nothing
@@ -369,10 +372,12 @@ function _try_mapset_backend(backend::Symbol)
         return _mapset_with_default_env() do
             try
                 Base.eval(Main, :(using CUDA))
-                cuda = getfield(Main, :CUDA)
-                Base.invokelatest(getfield(cuda, :functional)) || return nothing
-                return (Base.invokelatest(getfield(cuda, :CUDABackend)),
-                        _DeviceArrayConstructor(getfield(cuda, :CuArray), "CuArray"))
+                return Base.invokelatest() do
+                    cuda = getfield(Main, :CUDA)
+                    getfield(cuda, :functional)() || return nothing
+                    (getfield(cuda, :CUDABackend)(),
+                     _DeviceArrayConstructor(getfield(cuda, :CuArray), "CuArray"))
+                end
             catch e
                 @debug "CUDA mapset backend unavailable" exception=e
                 return nothing

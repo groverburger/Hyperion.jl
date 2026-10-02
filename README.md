@@ -19,8 +19,8 @@ There is no point light-curve CSV command yet.
 
 ## Installation
 
-Use Julia 1.11.5 for the tested configuration.
-The test backend loader has a known limitation with Julia 1.12 and later.
+Julia 1.11.5 and 1.12.7 passed the targeted output comparisons.
+GPU packages must be available in the environment for the selected Julia version.
 
 1. Install the project dependencies:
 

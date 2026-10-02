@@ -1,8 +1,5 @@
 using KernelAbstractions
 
-# TODO: This test-time automatic backend detection logic does not work with
-# Julia 1.12 and newer versions. Need to fix eventually.
-
 const TEST_BACKEND_ENV = lowercase(get(ENV, "HYP_BACKEND", "auto"))
 
 function _try_with_default_env(f)
@@ -20,7 +17,9 @@ function _try_metal_backend()
     _try_with_default_env() do
         try
             @eval using Metal
-            ("metal", Base.invokelatest(Metal.MetalBackend), Metal.MtlArray)
+            Base.invokelatest() do
+                ("metal", Metal.MetalBackend(), Metal.MtlArray)
+            end
         catch e
             @debug "Metal test backend not loadable" exception=e
             nothing
@@ -32,10 +31,8 @@ function _try_cuda_backend()
     _try_with_default_env() do
         try
             @eval using CUDA
-            if Base.invokelatest(CUDA.functional)
-                ("cuda", Base.invokelatest(CUDA.CUDABackend), CUDA.CuArray)
-            else
-                nothing
+            Base.invokelatest() do
+                CUDA.functional() ? ("cuda", CUDA.CUDABackend(), CUDA.CuArray) : nothing
             end
         catch e
             @debug "CUDA test backend not loadable" exception=e

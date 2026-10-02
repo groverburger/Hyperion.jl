@@ -45,8 +45,8 @@ Large frame regressions do not run if no backend is available.
 The Tier 0 observation test does not permit CPU operation.
 The synthetic terrain tests can use the CPU without those overrides.
 
-The tested environment uses Julia 1.11.5.
-The backend loader has a known limitation with Julia 1.12 and later.
+The targeted checks passed on Julia 1.11.5 and 1.12.7.
+The backend loader handles the global-binding rules in Julia 1.12.
 
 ## Disable the observation comparison
 

@@ -22,7 +22,7 @@ A point light-curve command is not available yet.
 ## Installation
 
 The [repository README](https://github.com/groverburger/Hyperion.jl) gives the installation procedure.
-The tested Julia version is 1.11.5.
+Julia 1.11.5 and 1.12.7 passed the targeted output comparisons.
 Local terrain files and the `gdaldem` command are necessary for map generation.
 Those inputs are not necessary for the small synthetic tests.
 
