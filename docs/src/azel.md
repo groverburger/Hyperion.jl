@@ -59,7 +59,5 @@ Without `--out`, the command writes the CSV to standard output.
 ## Point illumination studies
 
 A solar elevation curve does not include terrain shadows.
-The renderer can calculate solar disk visibility at a selected DEM pixel.
-But, the current commands do not export that result as a point light-curve CSV.
-A dedicated point workflow must include coordinate conversion, terrain selection, a time loop, and a CSV writer.
-The shadow calculation must keep the surrounding terrain.
+Use the [light-curve command](light-curves.md) to export terrain-shadowed solar visibility at a selected DEM pixel.
+That command keeps the surrounding terrain and writes the map's solar fraction to a CSV.

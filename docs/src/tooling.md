@@ -1,10 +1,11 @@
 # Workflow commands
 
 Run commands from the repository root.
-The three scripts below have `--help` options.
+The four scripts below have `--help` options.
 
 | Entry script | Function |
 |---|---|
+| `scripts/generate_light_curve.jl` | Export terrain-shadowed solar visibility for one location |
 | `scripts/generate_mapset.jl` | Make a mapset from a TOML specification |
 | `scripts/generate_azel_csv.jl` | Export Sun and Earth geometry for one location |
 | `scripts/generate_viper8_1m_radius_shirley_mapset.jl` | Make a VIPER window mapset with Shirley terrain |

@@ -123,6 +123,7 @@ end
 
 # ─── Terrain-stack site/farfield path ────────────────────────────────────
 include("terrain_stack.jl")
+include("light_curve.jl")
 include("mapset_workers.jl")
 
 # ─── Tier 0 correctness regression (default; skip via HYP_SKIP_CORRECTNESS=1)

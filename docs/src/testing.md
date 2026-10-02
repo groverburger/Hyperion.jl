@@ -101,3 +101,13 @@ They are separate from the standard suite.
 
 The [2026-09-10 comparison](reference/working-tree-validation-2026-09-10.md) records targeted checks of the current cleanup.
 Its 30-render comparison was a separate local script, not a new standard test.
+
+## Light-curve tests
+
+```bash
+julia --project test/light_curve.jl
+```
+
+These small CPU tests create their own DEMs and use the bundled SPICE kernels.
+They compare coordinate selection, cached renderer output, CSV values, and metadata.
+The standard suite includes this file.

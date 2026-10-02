@@ -15,7 +15,7 @@ The current package version is 0.1.0.
 The Sun output gives the visible fraction of the solar disk, with values from 0 to 255.
 The DSN output gives the Earth elevation above the terrain horizon.
 These outputs do not give solar-panel power or a full communication link assessment.
-There is no point light-curve CSV command yet.
+The [light-curve command](docs/src/light-curves.md) exports these solar fractions over time for one selected location.
 
 ## Installation
 
@@ -81,6 +81,21 @@ The command writes one mapset and requires no manual merge.
 Use `--help` to show the command options.
 
 The [mapset guide](docs/src/mapsets.md) explains layers, timestamps, tiles, and output files.
+
+## Light curves
+
+```bash
+julia --project scripts/generate_light_curve.jl \
+  --spec=data/inputs/mapsets/nobile_20m_shirley.toml \
+  --row=9216 --col=18880 \
+  --start=2028-01-01T00:00:00 --stop=2028-04-01T00:00:00 \
+  --step=1h --out=data/outputs/site_2028.csv
+```
+
+Use `--lat` and `--lon`, or projected `--x` and `--y`, instead of pixel indices.
+The command keeps the full terrain and exports solar visibility, with input and location metadata.
+These example dates do not define a lunar summer season.
+Refer to the [light-curve guide](docs/src/light-curves.md) for coordinates, terrain selection, and output fields.
 
 ## Azimuth and elevation CSV
 

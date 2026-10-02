@@ -17,7 +17,7 @@ The primary output is a mapset: a directory of images and metadata for selected 
 The Sun maps show the visible fraction of the solar disk.
 The DSN maps show the Earth elevation above the terrain horizon.
 The CSV command gives geometry without terrain shadow calculations.
-A point light-curve command is not available yet.
+The [light-curve command](light-curves.md) exports terrain-shadowed solar visibility over time.
 
 ## Installation
 
