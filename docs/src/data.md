@@ -48,6 +48,10 @@ The file format alone does not establish a correct grid match.
 3. Compare each file hash with the expected value.
 4. Run the mapset command with `--dry-run`.
 
+The tests and `require_*` functions do not use these filenames.
+They find each product in `data/inputs/` by SHA-256 and log the matched path.
+They check only files of the expected size and ignore subdirectories.
+
 On macOS or Linux:
 
 ```bash

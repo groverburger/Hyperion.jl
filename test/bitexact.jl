@@ -441,8 +441,8 @@ if HAS_SHIRLEY_BITEXACT
         end
     end
 
-    if !isfile(Hyp._nobile_1m_path())
-        @warn "Nobile 1m site DEM not found; skipping full 1m + Shirley farfield bit-exactness test." path=Hyp._nobile_1m_path()
+    if !Hyp._nobile_1m_ok()
+        @warn "No file matches the Nobile 1m site DEM SHA-256; skipping full 1m + Shirley farfield bit-exactness test." sha256=Hyp._NOBILE_1M_SHA
     else
         site_path = Hyp.require_nobile_1m_tif!()
         site = Hyp.load_site_dem_f32(site_path)

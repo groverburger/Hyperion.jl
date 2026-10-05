@@ -28,6 +28,7 @@ Get-FileHash data\inputs\ldem_80s_20m.img -Algorithm SHA256
 
 The full `viper_sfs_dem_8_0.tif` used by the radius command has no hash in this table.
 A matching filename alone does not prove that two terrain files are identical.
+The tests find the Shirley, Nobile 1 m, Barker 2023, and VIPER 8.0 crop files by these hashes, under any name.
 
 If an input changes, examine the affected mapset hashes, test images, and correctness baselines.
 Make new references only after you establish why the output changed.

@@ -9,19 +9,14 @@ using Dates
 const PROJECT_ROOT = dirname(@__DIR__)
 
 # The bit-exact pins are computed against the legacy Shirley LDEM SHA.
-# `Pkg.test()` must not fetch the WUSTL live DEM because that artifact is
-# not the baseline and currently SHA-mismatches the pins. If the Shirley
-# file is absent, LDEM-dependent tests are skipped.
+# The file is found in data/inputs/ by SHA-256, under any name. Other LDEMs
+# (WUSTL, Barker) do not match the pins. If no file matches, LDEM-dependent
+# tests are skipped.
 const LDEM_PATH = if Hyp._ldem_ok()
     Hyp._ldem_path()
 else
-    if isfile(Hyp._ldem_path())
-        @warn "Local LDEM exists but is not the Shirley baseline SHA; " *
-              "skipping LDEM-dependent tests." path=Hyp._ldem_path()
-    else
-        @warn "Shirley LDEM not found; skipping LDEM-dependent tests. " *
-              "Place the SHA-pinned file at $(Hyp._ldem_path())."
-    end
+    @warn "No file in $(Hyp._data_dir()) matches the Shirley LDEM SHA-256; " *
+          "skipping LDEM-dependent tests." sha256=Hyp._LDEM_SHA
     ""
 end
 const HAS_LDEM = !isempty(LDEM_PATH) && isfile(LDEM_PATH)

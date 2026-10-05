@@ -5,6 +5,10 @@ The large terrain inputs are external files.
 A successful test command does not mean that every test ran.
 The test output identifies unavailable data and backends.
 
+The tests find the external DEMs in `data/inputs/` by SHA-256, not by filename.
+An info message gives the path of each matched file.
+If no file matches, the dependent tests do not run.
+
 ## Small terrain tests
 
 Run the synthetic terrain tests on the CPU:

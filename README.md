@@ -49,6 +49,8 @@ Git does not store `Manifest.toml`, so a new installation can select different d
 Git stores the SPICE kernels, test reference images, and mapset specifications.
 Git does not store the terrain files in `data/inputs/`.
 Hyperion does not download terrain files.
+The tests find their terrain files by SHA-256, so those files can have any name in `data/inputs/`.
+Mapset specifications use the paths in the TOML file.
 
 | Operation | Necessary terrain files in `data/inputs/` |
 |---|---|
