@@ -13,3 +13,6 @@ data/outputs/
 
 # Local-only working copy of data/, untracked by design.
 _data/
+
+# Dear ImGui window layout written by the desktop GUI
+imgui.ini

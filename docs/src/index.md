@@ -12,6 +12,7 @@ The primary output is a mapset: a directory of images and metadata for selected 
 | Select terrain inputs | [Data](data.md) |
 | Test the software | [Tests](testing.md) |
 | Find a command | [Workflow commands](tooling.md) |
+| Run commands and view results in a window | [Desktop GUI](gui.md) |
 | Understand the renderer | [Ray casting](raycasting.md) |
 
 The Sun maps show the visible fraction of the solar disk.

@@ -10,6 +10,7 @@ makedocs(;
     format = Documenter.HTML(; prettyurls = get(ENV, "CI", "false") == "true"),
     pages = [
         "Home" => "index.md",
+        "Desktop GUI" => "gui.md",
         "Light curves" => "light-curves.md",
         "Mapsets" => "mapsets.md",
         "Azimuth and elevation CSV" => "azel.md",

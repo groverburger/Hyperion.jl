@@ -114,6 +114,17 @@ This example does not define a lunar summer interval.
 The CSV does not include terrain shadows.
 The [CSV guide](docs/src/azel.md) explains the coordinate and time options.
 
+## Desktop GUI
+
+```bash
+julia --project=gui -e 'using Pkg; Pkg.instantiate()'   # first time only
+julia --project=gui gui/hyperion_gui.jl
+```
+
+The GUI runs the mapset, preview, light-curve, azimuth and elevation, and probe commands in low-priority background processes.
+It also browses mapsets, shows Earth-contact maps and per-pixel statistics, checks input files, and runs tests.
+Refer to the [GUI guide](docs/src/gui.md).
+
 ## Tests
 
 Run the small terrain tests without external data:
