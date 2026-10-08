@@ -17,7 +17,7 @@ function radio_row!(label, idx::Base.RefValue{Int32}, options)
     CImGui.SameLine(150)
     for (i, o) in enumerate(options)
         i > 1 && CImGui.SameLine()
-        CImGui.RadioButton(o, idx[] == i - 1) && (idx[] = i - 1)
+        CImGui.RadioButton("$o##$label", idx[] == i - 1) && (idx[] = i - 1)
     end
     return idx[]
 end
@@ -120,12 +120,13 @@ end
 
 function mapset_panel!(app, st)
     s, F = st.spec, st.fields
-    spec_editor!(st)
-    CImGui.SeparatorText("Run settings")
+    spec_form!(app, st)
+    CImGui.SeparatorText("Run")
     name = isempty(str(F, :ms_name)) ? spec_name(s) : str(F, :ms_name)
     field!(F, "Output name", :ms_name; hint = spec_name(s))
     field!(F, "Output root", :ms_out; default = "data/outputs")
-    mode = radio_row!("Times", iref(F, :ms_time_mode), ("from spec", "range", "list"))
+    mode = radio_row!("Times for this run", iref(F, :ms_time_mode), ("as in spec", "range", "list"))
+    help("Override the spec's times for this run only. The spec file is not changed.")
     if mode == 1
         cfg = something(s.cfg, Dict{String,Any}())
         isempty(str(F, :ms_start)) && set!(tf(F, :ms_start), string(get(cfg, "start", "")))

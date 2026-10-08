@@ -42,8 +42,42 @@ The defaults are a quarter of the CPU threads and priority 15, so other programs
 | Tests | Run selected test files, or the full suite |
 
 The Mapset, Preview, Light curve, and Probe tabs use the specification selected at the top of the tab.
+
+## Edit a specification
+
+The Mapset tab shows the selected specification as a form.
+It has the mapset name, the times, optional settings, and one section for each terrain layer.
+A layer section has the kind, file, display name, SHA-256 value, window, and the far-field grid options.
+The arrow next to the file field lists the files in `data/inputs/`.
+**Hash file** calculates the SHA-256 value of a file, and **Use this file's hash** copies it into the form.
+
+The form marks values that it cannot read and the layer combinations that Hyperion does not accept.
+Runs are not possible until you correct them.
 Unsaved edits apply to runs through a scratch copy.
-**Save** and **Save as** write the specification to `data/inputs/mapsets/`.
+**Save** writes the form to the TOML file, and **Save as** writes it to a new file in `data/inputs/mapsets/`.
+**New** makes an empty specification.
+Saving does not keep comments from the original file.
+**TOML that Save writes** shows the file contents before you save.
+
+## DEMs and windows
+
+**Show DEMs and windows** displays one panel for each terrain layer in the View.
+Each panel shows a shaded overview of the DEM, with these outlines:
+
+| Outline | Meaning |
+|---|---|
+| Output area (cyan) | The calculated area: the first layer's window, or the full first layer |
+| Window (orange) | A layer's own window |
+| Other layers' extents (magenta) | The full extent of each other layer, converted to this grid |
+
+The outlines use the same latitude and longitude conversion as the light-curve command.
+A site extent on the polar grid is therefore rotated.
+The pointer readout gives the pixel, the latitude and longitude, the approximate elevation, and the matching pixel in each other layer.
+**Output area** zooms to the calculated area.
+With **Drag on layer 1 to set the output window**, a drag on the first panel replaces the first layer's window in the form.
+
+A background process makes each overview once and keeps it in the scratch directory.
+A large DEM also gets a more detailed overview around the output area.
 
 ## View
 
@@ -88,5 +122,5 @@ The statistics need palette DSN files.
 
 ## Scratch files
 
-The GUI writes previews, edited specifications, time series, statistics, and the hash cache to `data/outputs/.hyperion_gui/`.
+The GUI writes previews, edited specifications, DEM overviews, time series, statistics, and the hash cache to `data/outputs/.hyperion_gui/`.
 Git ignores that directory.

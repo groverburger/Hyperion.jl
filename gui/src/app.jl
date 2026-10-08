@@ -13,8 +13,12 @@ mutable struct State
     message::String
     select_tab::String        # tab to bring to the front on the next frame
 end
-State() = State(Settings(), SpecState(), View(), InputsState(), Browser(), Fields(),
-                Dict{String,Vector{String}}(), "", 0, "", "")
+function State()
+    st = State(Settings(), SpecState(), View(), InputsState(), Browser(), Fields(),
+               Dict{String,Vector{String}}(), "", 0, "", "")
+    st.view.layers = LayersView()
+    return st
+end
 
 const TOOLS = [
     ("Mapset", mapset_panel!),

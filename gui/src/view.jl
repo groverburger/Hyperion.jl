@@ -59,9 +59,10 @@ mutable struct View
     underlay::Union{Nothing,MapImage}     # hillshade drawn beneath the map
     show_underlay::Base.RefValue{Bool}
     opacity::Base.RefValue{Float32}       # map opacity over the underlay
+    layers::Any                           # LayersView for mode :layers
 end
 View() = View(:none, "", MapImage[], Ref(Int32(0)), Ref(true), 1.0, (0.0, 0.0),
-              nothing, nothing, nothing, nothing, nothing, Ref(true), Ref(0.75f0))
+              nothing, nothing, nothing, nothing, nothing, Ref(true), Ref(0.75f0), nothing)
 
 free!(im::MapImage) = (im.texture == 0 || Mirage.destroy_texture!(im.texture); im.texture = 0)
 
@@ -88,9 +89,8 @@ describe_dsn(v) = v == 0 ? "DSN 0: Earth centre at or below the terrain horizon"
     @sprintf("DSN %d: Earth centre %.1f° above the terrain horizon", v, v / 10)
 describer(kind) = kind == :sun ? describe_sun : kind == :dsn ? describe_dsn : v -> "value $v"
 
-function texture_from(rgba::Matrix{RGBA{N0f8}})
-    return Mirage.load_texture(rgba)
-end
+# No OpenGL context exists in headless use (scripts and checks).
+texture_from(rgba::Matrix{RGBA{N0f8}}) = HEADLESS[] ? UInt32(0) : Mirage.load_texture(rgba)
 
 """
     load_map_image(path; origin = (0, 0)) -> MapImage
@@ -401,8 +401,11 @@ function view_window!(app, st)
             draw_images!(app, st)
         elseif v.mode == :plot && v.plot !== nothing
             draw_plot!(app, st)
+        elseif v.mode == :layers
+            CImGui.TextUnformatted(v.title)
+            draw_layers!(app, st)
         else
-            note("Results appear here: preview frames, the latest frames of a mapset, " *
+            note("Results appear here: DEMs and windows of a spec, preview frames, mapset frames, " *
                  "light curves, and az/el plots. Hover a map for pixel values; click to pick a pixel " *
                  "for the light-curve and probe tools.")
         end

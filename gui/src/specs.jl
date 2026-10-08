@@ -1,22 +1,25 @@
-# Mapset specifications: list, edit, validate, and summarise TOML files in
-# data/inputs/mapsets/. Runs use the saved file, or a scratch copy when the
-# editor has unsaved changes.
+# Mapset specifications: list the TOML files in data/inputs/mapsets/, edit
+# them through a form, and write them back. Runs use the saved file, or a
+# scratch copy when the form has unsaved changes.
 
 const SPEC_DIR = joinpath(REPO, "data", "inputs", "mapsets")
-const EDITOR_CAPACITY = 1 << 20
 
 mutable struct SpecState
     files::Vector{String}
     index::Base.RefValue{Int32}
     path::String
-    editor::TextField
     saved::String                    # file contents on disk
+    saved_cfg::Any                   # parsed file contents, for the unsaved-edits check
+    has_comments::Bool               # saving drops comments
     cfg::Union{Nothing,Dict{String,Any}}
-    error::String
+    error::String                    # TOML error in the file
     summary::Union{Nothing,NamedTuple}
+    generation::Int                  # bumped when the form must reread cfg
+    field_errors::Dict{String,String}
+    edits::Int                       # bumped on every form change
 end
-SpecState() = SpecState(String[], Ref(Int32(0)), "", TextField(""; capacity = EDITOR_CAPACITY),
-                        "", nothing, "", nothing)
+SpecState() = SpecState(String[], Ref(Int32(0)), "", "", nothing, false, nothing, "", nothing, 0,
+                        Dict{String,String}(), 0)
 
 function list_specs()
     isdir(SPEC_DIR) || return String[]
@@ -38,16 +41,11 @@ end
 function open_spec!(s::SpecState, path::AbstractString)
     s.path = String(path)
     s.saved = read(path, String)
-    set!(s.editor, s.saved)
-    reparse!(s)
-end
-
-dirty(s::SpecState) = value(s.editor) != s.saved
-spec_name(s::SpecState) = s.cfg === nothing ? splitext(basename(s.path))[1] :
-    String(get(s.cfg, "name", splitext(basename(s.path))[1]))
-
-function reparse!(s::SpecState)
-    parsed = TOML.tryparse(value(s.editor))
+    s.has_comments = any(l -> startswith(lstrip(l), "#"), eachline(IOBuffer(s.saved)))
+    parsed = TOML.tryparse(s.saved)
+    s.saved_cfg = parsed isa TOML.ParserError ? nothing : deepcopy(parsed)
+    empty!(s.field_errors)
+    s.generation += 1
     if parsed isa TOML.ParserError
         s.cfg = nothing
         s.summary = nothing
@@ -55,9 +53,20 @@ function reparse!(s::SpecState)
     else
         s.cfg = parsed
         s.error = ""
-        s.summary = summarize(parsed)
+        changed!(s)
     end
 end
+
+# Call after every change to `s.cfg`.
+function changed!(s::SpecState)
+    s.summary = summarize(s.cfg)
+    s.edits += 1
+end
+
+# Unsaved when the form differs from the file's parsed contents.
+dirty(s::SpecState) = s.cfg !== nothing && s.cfg != s.saved_cfg
+spec_name(s::SpecState) = s.cfg === nothing ? splitext(basename(s.path))[1] :
+    String(get(s.cfg, "name", splitext(basename(s.path))[1]))
 
 function first_window(cfg)
     layers = get(cfg, "layers", Any[])
@@ -96,12 +105,69 @@ function summarize(cfg)
     return (; name = String(get(cfg, "name", "")), layers, frames, timing)
 end
 
-# Path to pass to the commands: the saved file, or a scratch copy of the editor.
+# ─── TOML output ──────────────────────────────────────────────────────────
+
+const TOP_KEYS = ["name", "start", "stop", "step_hours", "azel_step_hours", "times",
+                  "observer_height_m", "tile_height", "tile_width", "workgroup_size",
+                  "dataset_description"]
+const LAYER_KEYS = ["kind", "path", "name", "sha256", "window", "cutoff", "height", "width",
+                    "pixel_size_m", "data_type", "elevation_scale_m", "byte_order"]
+
+toml_string(s) = "\"" * replace(String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => "\\n", "\t" => "\\t") * "\""
+
+function toml_value(v)
+    v isa AbstractString && return toml_string(v)
+    v isa Bool && return v ? "true" : "false"
+    v isa Integer && return string(v)
+    v isa AbstractFloat && return isinteger(v) ? @sprintf("%.1f", v) : repr(Float64(v))
+    v isa Dates.TimeType && return toml_string(string(v))
+    v isa AbstractVector && return "[" * join(toml_value.(v), ", ") * "]"
+    return strip(sprint(io -> TOML.print(io, Dict("x" => v)))[5:end])
+end
+
+ordered_keys(d, preferred) = vcat([k for k in preferred if haskey(d, k)],
+                                  sort([k for k in keys(d) if !(k in preferred)]))
+
+"""
+    render_toml(cfg) -> String
+
+Write a specification with a fixed key order: run settings first, then one
+`[[layers]]` table per layer. Comments in the original file are not kept.
+"""
+function render_toml(cfg)
+    io = IOBuffer()
+    for k in ordered_keys(cfg, TOP_KEYS)
+        k == "layers" && continue
+        v = cfg[k]
+        if v isa AbstractDict
+            continue
+        elseif k == "times" && v isa AbstractVector
+            println(io, "times = [")
+            foreach(t -> println(io, "  ", toml_value(t), ","), v)
+            println(io, "]")
+        else
+            println(io, k, " = ", toml_value(v))
+        end
+    end
+    for k in sort([k for (k, v) in cfg if v isa AbstractDict])
+        println(io)
+        TOML.print(io, Dict(k => cfg[k]))
+    end
+    for layer in get(cfg, "layers", Any[])
+        println(io, "\n[[layers]]")
+        for k in ordered_keys(layer, LAYER_KEYS)
+            println(io, k, " = ", toml_value(layer[k]))
+        end
+    end
+    return String(take!(io))
+end
+
+# Path to pass to the commands: the saved file, or a scratch copy of the form.
 function effective_spec_path(s::SpecState)
     dirty(s) || return s.path
     mkpath(GUI_DIR)
     path = joinpath(GUI_DIR, "edited_" * basename(s.path))
-    write(path, value(s.editor))
+    write(path, render_toml(s.cfg))
     return path
 end
 
@@ -111,7 +177,7 @@ function write_spec_variant(s::SpecState, filename; edit!)
     edit!(cfg)
     mkpath(GUI_DIR)
     path = joinpath(GUI_DIR, filename)
-    open(io -> TOML.print(io, cfg), path, "w")
+    write(path, render_toml(cfg))
     return path
 end
 
@@ -132,8 +198,10 @@ function latest_frames(dir)
     return filter(!isnothing, [pick("sun"), pick("dsn")])
 end
 
+# ─── Spec selector ────────────────────────────────────────────────────────
+
 """
-Spec selector and editor shown at the top of the Tools window.
+Spec selector shown at the top of the spec-based tabs.
 """
 function spec_selector!(st)
     s = st.spec
@@ -165,84 +233,12 @@ function spec_selector!(st)
         CImGui.EndPopup()
     end
     if !isempty(s.error)
-        colored(BAD, "TOML error: " * first(split(s.error, '\n')))
+        colored(BAD, "This file is not valid TOML: " * first(split(s.error, '\n')))
     elseif s.summary !== nothing
         sm = s.summary
         CImGui.TextWrapped(replace("$(isempty(sm.name) ? "(no name)" : sm.name): $(sm.timing); " *
                                    "$(sm.frames) frames; $(length(sm.layers)) layers", "%" => "%%"))
         dirty(s) && (CImGui.SameLine(); colored(WARN, "unsaved edits"))
-    end
-end
-
-function spec_editor!(st)
-    s = st.spec
-    F = st.fields
-    if CImGui.CollapsingHeader("Layers and files", CImGui.ImGuiTreeNodeFlags_DefaultOpen) && s.summary !== nothing
-        flags = CImGui.ImGuiTableFlags_Borders | CImGui.ImGuiTableFlags_RowBg |
-                CImGui.ImGuiTableFlags_SizingFixedFit | CImGui.ImGuiTableFlags_ScrollX
-        rows_h = CImGui.GetFrameHeightWithSpacing() * (length(s.summary.layers) + 1) + 20
-        if CImGui.BeginTable("layers", 4, flags, CImGui.ImVec2(0, rows_h))
-            for h in ("kind", "file", "window", "check")
-                CImGui.TableSetupColumn(h)
-            end
-            CImGui.TableHeadersRow()
-            for l in s.summary.layers
-                CImGui.TableNextRow()
-                CImGui.TableNextColumn(); CImGui.TextUnformatted(l.kind)
-                CImGui.TableNextColumn(); CImGui.TextUnformatted(shortpath(l.path))
-                isempty(l.name) || (CImGui.SameLine(); CImGui.TextDisabled(replace(l.name, "%" => "%%")))
-                CImGui.TableNextColumn(); CImGui.TextUnformatted(l.window === nothing ? "whole file" : string(Int.(l.window)))
-                CImGui.TableNextColumn()
-                if !isfile(l.path)
-                    colored(BAD, "missing")
-                else
-                    known = get(st.inputs.hashes, l.path, nothing)
-                    if isempty(l.sha256)
-                        colored(DIM, "no hash in spec")
-                    elseif known === nothing
-                        colored(DIM, "present; hash not checked")
-                    elseif known.sha256 == lowercase(l.sha256)
-                        colored(GOOD, "hash matches")
-                    else
-                        colored(BAD, "hash differs")
-                    end
-                end
-            end
-            CImGui.EndTable()
-        end
-        note("Hash checks use the Inputs tab's cached hashes. The mapset command always verifies hashes before it runs.")
-    end
-    if CImGui.CollapsingHeader("Edit TOML")
-        h = CImGui.GetTextLineHeight() * 18
-        if CImGui.InputTextMultiline("##toml", s.editor.buf, length(s.editor.buf), CImGui.ImVec2(-1, h),
-                                     CImGui.ImGuiInputTextFlags_AllowTabInput)
-            reparse!(s)
-        end
-        CImGui.BeginDisabled(!dirty(s) || s.cfg === nothing)
-        if CImGui.Button("Save")
-            write(s.path, value(s.editor))
-            s.saved = value(s.editor)
-        end
-        CImGui.EndDisabled()
-        CImGui.SameLine()
-        CImGui.BeginDisabled(!dirty(s))
-        CImGui.Button("Revert") && open_spec!(s, s.path)
-        CImGui.EndDisabled()
-        CImGui.SameLine()
-        CImGui.SetNextItemWidth(220)
-        input!("##saveas", tf(F, :saveas); hint = "new_spec_name.toml")
-        CImGui.SameLine()
-        target = joinpath(SPEC_DIR, safe_name(replace(str(F, :saveas), r"\.toml$" => "")) * ".toml")
-        CImGui.BeginDisabled(isempty(str(F, :saveas)) || s.cfg === nothing || isfile(target))
-        if CImGui.Button("Save as")
-            write(target, value(s.editor))
-            refresh_specs!(s; select = target)
-            open_spec!(s, target)
-            set!(tf(F, :saveas), "")
-        end
-        CImGui.EndDisabled()
-        isfile(target) && !isempty(str(F, :saveas)) && (CImGui.SameLine(); colored(WARN, "exists"))
-        note("Paths in the spec are relative to the repository root. Unsaved edits are used for runs " *
-             "through a scratch copy in data/outputs/.hyperion_gui/.")
+        isempty(s.field_errors) || colored(BAD, "Fix the marked fields before running.")
     end
 end
