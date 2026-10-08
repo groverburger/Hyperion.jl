@@ -349,7 +349,6 @@ function fit_to!(p::LayerPanel, vp_w, vp_h, r0, c0, r1, c1; margin = 0.1)
     # Screen position of pixel coordinate c is pan + (c + 0.5) * zoom.
     p.pan = ((vp_w - (c1 - c0) * p.zoom) / 2 - (c0 + 0.5) * p.zoom,
              (vp_h - (r1 - r0) * p.zoom) / 2 - (r0 + 0.5) * p.zoom)
-    p.fit = false
 end
 
 function draw_layer_panel!(app, st, i, p::LayerPanel, size)
@@ -380,6 +379,7 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
             if out !== nothing
                 rs, cs = first.(p.outlines[out].points), last.(p.outlines[out].points)
                 fit_to!(p, vp.width, vp.height, minimum(rs), minimum(cs), maximum(rs), maximum(cs); margin = 0.6)
+                p.fit = false
             end
         end
         X(c) = p.pan[1] + (c + 0.5) * p.zoom
