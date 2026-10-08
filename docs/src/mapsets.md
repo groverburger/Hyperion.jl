@@ -171,6 +171,14 @@ The default output path is `data/outputs/<name>/`.
 | `other/manifest.csv` | Configuration and run metadata |
 | `other/timestamps.txt` | Explicit timestamps; absent in range mode |
 
+The sun and DSN images are 8-bit palette PNGs.
+Each pixel stores its value, and the palette supplies only the display colour.
+DSN values are Earth elevation above the horizon in tenths of a degree, from 0 to 250.
+For example, 15 means 1.5°.
+DSN values from 71 (7.1°) up are transparent, as in mapbuilder output.
+Read the stored values, not the colours: one DSN colour covers a 1° range.
+Images made before October 2026 are RGB and keep only the colour.
+
 A normal run keeps full image pairs.
 A run with one missing image calculates the frame and saves the missing image.
 `--overwrite` replaces existing images.

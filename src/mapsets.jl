@@ -287,7 +287,8 @@ function _generate_mapset(spec::MapsetSpec;
             @warn "sun image already exists; leaving it unchanged" timestamp=tag path=sun_path
         end
         if overwrite || !dsn_exists
-            save_indexed_png(dsn, DSN_PALETTE, dsn_path)
+            save_indexed_png(dsn, DSN_PALETTE, dsn_path;
+                             transparent_from = DSN_TRANSPARENT_FROM)
         else
             @warn "dsn image already exists; leaving it unchanged" timestamp=tag path=dsn_path
         end

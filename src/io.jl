@@ -3,7 +3,8 @@
 import ArchGDAL
 import Mmap
 import FileIO
-using Images: RGB, N0f8
+using Images: RGB, RGBA, N0f8
+using IndirectArrays: IndirectArray
 
 """
     LDEM
@@ -56,7 +57,8 @@ end
 
 """
     SUN_PALETTE — grayscale 0..255. UInt8 index → (v, v, v).
-    DSN_PALETTE — signal-strength colormap per DSN spec (0..70+ deg).
+    DSN_PALETTE — signal-strength colormap per DSN spec. Indices are Earth
+    elevation above the horizon in tenths of a degree, so 70 means 7.0°.
 """
 function _make_sun_palette()
     pal = Matrix{UInt8}(undef, 256, 3)
@@ -90,21 +92,26 @@ end
 const SUN_PALETTE = _make_sun_palette()
 const DSN_PALETTE = _make_dsn_palette()
 
-"""
-    save_indexed_png(data::Matrix{UInt8}, palette, path)
+# DSN values from 71 (7.1°) up are transparent, matching mapbuilder.
+const DSN_TRANSPARENT_FROM = 71
 
-Write UInt8 index matrix as a palette-mapped RGB PNG.
 """
-function save_indexed_png(data::Matrix{UInt8}, palette::Matrix{UInt8}, path::AbstractString)
-    H, W = size(data)
-    img = Array{RGB{N0f8}}(undef, H, W)
-    @inbounds for r in 1:H, c in 1:W
-        idx = data[r, c] + 1
-        img[r, c] = RGB{N0f8}(
-            reinterpret(N0f8, palette[idx, 1]),
-            reinterpret(N0f8, palette[idx, 2]),
-            reinterpret(N0f8, palette[idx, 3]),
-        )
+    save_indexed_png(data::Matrix{UInt8}, palette, path; transparent_from = nothing)
+
+Write a UInt8 matrix as an 8-bit palette PNG. Each pixel stores its value
+from `data`, and `palette` (256×3) supplies only the display colour, so the
+values can be read back exactly. Palette entries from `transparent_from` up
+are fully transparent.
+"""
+function save_indexed_png(data::Matrix{UInt8}, palette::Matrix{UInt8}, path::AbstractString;
+                          transparent_from::Union{Nothing,Integer} = nothing)
+    rgb(i) = RGB{N0f8}(reinterpret(N0f8, palette[i, 1]),
+                       reinterpret(N0f8, palette[i, 2]),
+                       reinterpret(N0f8, palette[i, 3]))
+    colors = if transparent_from === nothing
+        [rgb(i) for i in 1:256]
+    else
+        [RGBA{N0f8}(rgb(i), i - 1 >= transparent_from ? 0 : 1) for i in 1:256]
     end
-    FileIO.save(path, img)
+    FileIO.save(path, IndirectArray(Int.(data) .+ 1, colors))
 end

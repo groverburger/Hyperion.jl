@@ -118,6 +118,7 @@ end
 
 # ─── Terrain-stack site/farfield path ────────────────────────────────────
 include("terrain_stack.jl")
+include("png_output.jl")
 include("light_curve.jl")
 include("mapset_workers.jl")
 
