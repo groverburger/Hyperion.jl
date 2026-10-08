@@ -101,8 +101,41 @@ mutable struct LayersView
     draw_window::Base.RefValue{Bool}
     drag::Union{Nothing,NTuple{2,Float64}}   # window drag start (row, col)
     drag_end::NTuple{2,Float64}
+    press::Union{Nothing,Tuple{Int,NTuple{2,Float64}}}   # (panel, screen position) of a left press
+    message::String
 end
-LayersView() = LayersView(LayerPanel[], -1, "", Ref(false), nothing, (0.0, 0.0))
+LayersView() = LayersView(LayerPanel[], -1, "", Ref(false), nothing, (0.0, 0.0), nothing, "")
+
+# Where the picked point falls in panel `i`, as (row, col), or nothing.
+function picked_in_panel(st, i)
+    p, lv = st.view.picked, st.view.layers
+    (p === nothing || get(p, :spec, "") != st.spec.path || isempty(lv.panels)) && return nothing
+    first, q = lv.panels[1], lv.panels[i]
+    (first.grid === nothing || q.grid === nothing) && return nothing
+    return i == 1 ? (Float64(p.dem_row), Float64(p.dem_col)) : map_pixel(first.grid, q.grid, p.dem_row, p.dem_col)
+end
+
+"""
+Pick the point under a click on panel `i`. Picks are stored in first-layer
+pixels, like picks on the maps, so the light curve and probe can use them.
+"""
+function pick_from_layer!(st, i, row, col)
+    lv = st.view.layers
+    first, p = lv.panels[1], lv.panels[i]
+    first.grid === nothing && return
+    m = i == 1 ? (row, col) : map_pixel(p.grid, first.grid, row, col)
+    if m === nothing || !(-0.5 <= m[1] < first.grid.H - 0.5 && -0.5 <= m[2] < first.grid.W - 0.5)
+        lv.message = "That point is outside layer 1, so the light curve and probe cannot use it."
+        return
+    end
+    lv.message = ""
+    r, c = round(Int, m[1]), round(Int, m[2])
+    origin = output_origin(st.spec.cfg)
+    o = output_size(st.spec.cfg)
+    size = o === nothing ? (first.grid.H, first.grid.W) : (o.rows, o.cols)
+    st.view.picked = (; row = r - origin[1], col = c - origin[2], dem_row = r, dem_col = c,
+                      image = "", size, spec = st.spec.path)
+end
 
 function overview_key(layer)
     path = projpath(String(get(layer, "path", "")))
@@ -290,7 +323,6 @@ end
 
 function show_layers!(app, st)
     st.view.mode = :layers
-    st.view.title = "DEMs and windows: " * spec_name(st.spec)
     st.view.layers.edits = -1
     sync_layers!(app, st)
 end
@@ -370,6 +402,8 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
             (r0, c0), (r1, c1) = lv.drag, lv.drag_end
             stroke_outline(Outline("", WINDOW_COLOR, [(r0, c0), (r0, c1), (r1, c1), (r1, c0)], false), X, Y)
         end
+        q = picked_in_panel(st, i)
+        q === nothing || pick_marker(X(q[2]), Y(q[1]), p.zoom)
     end
     p.grid === nothing && (CImGui.EndGroup(); return)
 
@@ -401,7 +435,17 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
             set_output_window!(st, p, lv.drag, lv.drag_end)
             lv.drag = nothing
         end
+    else
+        # A left press and release without moving picks the point. Panning
+        # resets ImGui's drag delta, so compare the screen positions instead.
+        vp.hovered && CImGui.IsMouseClicked(0) && (lv.press = (i, vp.mouse_pos))
+        if lv.press !== nothing && lv.press[1] == i && CImGui.IsMouseReleased(0)
+            moved = hypot(vp.mouse_pos[1] - lv.press[2][1], vp.mouse_pos[2] - lv.press[2][2])
+            moved < 4 && vp.hovered && pick_from_layer!(st, i, row, col)
+            lv.press = nothing
+        end
     end
+    vp.hovered && CImGui.IsMouseClicked(1) && (st.view.picked = nothing)
     if vp.hovered && -0.5 <= row < p.grid.H - 0.5 && -0.5 <= col < p.grid.W - 0.5
         r, c = round(Int, row), round(Int, col)
         loc = LC.pixel_location(p.grid, r, c)
@@ -423,7 +467,8 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
             inside = -0.5 <= m[1] < q.grid.H - 0.5 && -0.5 <= m[2] < q.grid.W - 0.5
             colored(inside ? DIM : WARN, @sprintf("layer %d pixel  row %.0f, col %.0f%s", j, m[1], m[2], inside ? "" : " (outside)"))
         end
-        drawing && CImGui.TextUnformatted("drag to draw the output window")
+        CImGui.TextUnformatted(drawing ? "drag to draw the output window" :
+                               "click to pick this point; right-click to clear the pick")
         CImGui.EndTooltip()
     end
     CImGui.EndGroup()
@@ -459,6 +504,13 @@ function draw_layers!(app, st)
         CImGui.SameLine(0, 4)
         CImGui.TextUnformatted(label)
     end
+    pk = st.view.picked
+    if pk !== nothing && get(pk, :spec, "") == st.spec.path
+        colored(PICK_TEXT, "picked layer 1 col $(pk.dem_col), row $(pk.dem_row)")
+        CImGui.SameLine()
+        CImGui.SmallButton("Clear##layerpick") && (st.view.picked = nothing)
+    end
+    isempty(lv.message) || colored(WARN, lv.message)
     pending = count(p -> p.overview === nothing && p.grid !== nothing, lv.panels)
     pending > 0 && colored(DIM, "Building $(pending) DEM overview(s) in the background; outlines are already exact.")
     avail = CImGui.GetContentRegionAvail()

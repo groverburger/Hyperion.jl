@@ -144,6 +144,30 @@ function set_images!(v::View, title, images; keep_view = false)
     keep_view || (v.fit[] = true)
 end
 
+const PICK_COLOR = (1.0, 0.25, 0.85)
+const PICK_TEXT = (1f0, 0.45f0, 0.9f0, 1f0)
+
+# Crosshair and ring at the picked pixel. The ring also outlines the pixel
+# itself when zoomed in far enough to see it.
+function pick_marker(cx, cy, zoom)
+    r = max(9.0, 0.75 * zoom)
+    gap = r * 0.45
+    arm = r + 8
+    for (colour, width) in (((0.0, 0.0, 0.0, 0.85), 4.5), ((PICK_COLOR..., 1.0), 2.0))
+        Mirage.strokecolor(colour)
+        Mirage.strokewidth(width)
+        Mirage.beginpath()
+        Mirage.circle(r, cx, cy, 40)
+        Mirage.stroke()
+        for (dx, dy) in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            Mirage.beginpath()
+            Mirage.moveto(cx + dx * gap, cy + dy * gap)
+            Mirage.lineto(cx + dx * arm, cy + dy * arm)
+            Mirage.stroke()
+        end
+    end
+end
+
 function draw_images!(app, st)
     v = st.view
     labels = [im.label for im in v.images]
@@ -158,6 +182,13 @@ function draw_images!(app, st)
         v.pan = (0.0, 0.0)
     end
     im = v.images[v.current[] + 1]
+    picked_here = v.picked !== nothing && v.picked.size == im.size
+    if picked_here
+        CImGui.SameLine(0, 16)
+        colored(PICK_TEXT, "picked col $(v.picked.col), row $(v.picked.row)")
+        CImGui.SameLine()
+        CImGui.SmallButton("Clear##pick") && (v.picked = nothing)
+    end
     under = v.underlay !== nothing && v.underlay.size == im.size ? v.underlay : nothing
     if under !== nothing
         CImGui.SameLine()
@@ -190,6 +221,9 @@ function draw_images!(app, st)
         # drawimage tints the texture with the fill colour.
         Mirage.fillcolor((1.0, 1.0, 1.0, alpha))
         Mirage.drawimage(x, y, w, h, im.texture)
+        if v.picked !== nothing && v.picked.size == im.size
+            pick_marker(x + (v.picked.col + 0.5) * v.zoom, y + (v.picked.row + 0.5) * v.zoom, v.zoom)
+        end
     end
 
     # Zoom around the cursor, drag to pan.
@@ -220,7 +254,7 @@ function draw_images!(app, st)
         row = floor(Int, (vp.mouse_rel[2] - v.pan[2]) / v.zoom)
         if 0 <= row < H && 0 <= col < W
             v.hover = (; row, col, dem_row = row + im.origin[1], dem_col = col + im.origin[2],
-                        image = im.path, size = im.size)
+                        image = im.path, size = im.size, spec = "")
             CImGui.BeginTooltip()
             CImGui.TextUnformatted("output pixel  col $col, row $row")
             CImGui.TextUnformatted("first DEM     col $(col + im.origin[2]), row $(row + im.origin[1])")
@@ -230,11 +264,12 @@ function draw_images!(app, st)
                 txt = other.describe(other.values[row + 1, col + 1])
                 other === im ? CImGui.TextUnformatted(txt) : colored(DIM, txt)
             end
-            CImGui.TextUnformatted("click to pick this pixel")
+            CImGui.TextUnformatted("click to pick this pixel; right-click to clear the pick")
             CImGui.EndTooltip()
             if CImGui.IsMouseReleased(0) && CImGui.GetMouseDragDelta(0).x == 0
                 v.picked = v.hover
             end
+            CImGui.IsMouseClicked(1) && (v.picked = nothing)
         end
     end
 end
@@ -284,6 +319,8 @@ const SERIES_COLORS = [(86, 180, 233), (230, 159, 0), (0, 158, 115), (204, 121, 
 function draw_plot!(app, st)
     p = st.view.plot
     CImGui.TextUnformatted(shortpath(p.path) * "  ($(length(p.times)) samples)")
+    CImGui.SameLine()
+    file_buttons(p.path; id = "plot")
     right_edge = CImGui.GetCursorScreenPos().x + CImGui.GetContentRegionAvail().x
     for (i, name) in enumerate(p.names)
         # Wrap the legend when the next checkbox would not fit.
@@ -393,21 +430,46 @@ function stroke_series(secs, ys, X, Y, width)
     Mirage.stroke()
 end
 
+# Buttons that switch between the spec's DEMs, the loaded map frames, and the
+# last plot. Each keeps its content while another is shown.
+function view_switcher!(st)
+    v = st.view
+    modes = [(:layers, "DEMs and windows", st.spec.cfg !== nothing),
+             (:images, "Maps", !isempty(v.images)),
+             (:plot, "Plot", v.plot !== nothing)]
+    for (i, (mode, label, available)) in enumerate(modes)
+        i > 1 && CImGui.SameLine()
+        active = v.mode == mode
+        active && CImGui.PushStyleColor(CImGui.ImGuiCol_Button, ACCENT)
+        CImGui.BeginDisabled(!available)
+        if CImGui.Button(label)
+            v.mode = mode
+            mode == :layers && (v.layers.edits = -1)
+        end
+        CImGui.EndDisabled()
+        active && CImGui.PopStyleColor()
+    end
+    CImGui.SameLine(0, 16)
+    title = v.mode == :layers ? spec_name(st.spec) * " (the selected spec)" :
+            v.mode == :images ? v.title : v.mode == :plot && v.plot !== nothing ? v.plot.title : ""
+    CImGui.AlignTextToFramePadding()
+    colored(DIM, title)
+    CImGui.Separator()
+end
+
 function view_window!(app, st)
     v = st.view
     if CImGui.Begin("View")
+        view_switcher!(st)
         if v.mode == :images && !isempty(v.images)
-            CImGui.TextUnformatted(v.title)
             draw_images!(app, st)
         elseif v.mode == :plot && v.plot !== nothing
             draw_plot!(app, st)
-        elseif v.mode == :layers
-            CImGui.TextUnformatted(v.title)
+        elseif v.mode == :layers && st.spec.cfg !== nothing
             draw_layers!(app, st)
         else
-            note("Results appear here: DEMs and windows of a spec, preview frames, mapset frames, " *
-                 "light curves, and az/el plots. Hover a map for pixel values; click to pick a pixel " *
-                 "for the light-curve and probe tools.")
+            note("Choose a spec in the Mapset tab to see its DEMs and windows here. Maps from previews, " *
+                 "runs, and the Results tab, and plots from the Point tools, also appear here.")
         end
     end
     CImGui.End()

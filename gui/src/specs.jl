@@ -203,13 +203,13 @@ end
 """
 Spec selector shown at the top of the spec-based tabs.
 """
-function spec_selector!(st)
+function spec_selector!(st; summary = true, width = -90)
     s = st.spec
     names = [basename(f) for f in s.files]
     CImGui.AlignTextToFramePadding()
     CImGui.TextUnformatted("Spec")
-    CImGui.SameLine(150)
-    CImGui.SetNextItemWidth(-90)
+    CImGui.SameLine(LABEL_X)
+    CImGui.SetNextItemWidth(width)
     if combo!("##spec", s.index, names)
         if dirty(s)
             st.pending_spec = s.files[s.index[] + 1]
@@ -234,7 +234,7 @@ function spec_selector!(st)
     end
     if !isempty(s.error)
         colored(BAD, "This file is not valid TOML: " * first(split(s.error, '\n')))
-    elseif s.summary !== nothing
+    elseif summary && s.summary !== nothing
         sm = s.summary
         CImGui.TextWrapped(replace("$(isempty(sm.name) ? "(no name)" : sm.name): $(sm.timing); " *
                                    "$(sm.frames) frames; $(length(sm.layers)) layers", "%" => "%%"))

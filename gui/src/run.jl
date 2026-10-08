@@ -4,7 +4,7 @@
 function backend_combo!(F::Fields, key::Symbol, settings::Settings; default = nothing)
     CImGui.AlignTextToFramePadding()
     CImGui.TextUnformatted("Backend")
-    CImGui.SameLine(150)
+    CImGui.SameLine(LABEL_X)
     CImGui.SetNextItemWidth(160)
     idx = iref(F, key, something(default, settings.backend[]))
     combo!("##$key", idx, BACKENDS)
@@ -14,7 +14,7 @@ end
 function radio_row!(label, idx::Base.RefValue{Int32}, options)
     CImGui.AlignTextToFramePadding()
     CImGui.TextUnformatted(label)
-    CImGui.SameLine(150)
+    CImGui.SameLine(LABEL_X)
     for (i, o) in enumerate(options)
         i > 1 && CImGui.SameLine()
         CImGui.RadioButton("$o##$label", idx[] == i - 1) && (idx[] = i - 1)
@@ -118,100 +118,7 @@ function mapset_job!(app, st; dry = false)
             show_images!(st.view, "Latest frames: $name", latest_frames(status.dir); origin)))
 end
 
-function mapset_panel!(app, st)
-    s, F = st.spec, st.fields
-    spec_form!(app, st)
-    CImGui.SeparatorText("Run")
-    name = isempty(str(F, :ms_name)) ? spec_name(s) : str(F, :ms_name)
-    field!(F, "Output name", :ms_name; hint = spec_name(s))
-    field!(F, "Output root", :ms_out; default = "data/outputs")
-    mode = radio_row!("Times for this run", iref(F, :ms_time_mode), ("as in spec", "range", "list"))
-    help("Override the spec's times for this run only. The spec file is not changed.")
-    if mode == 1
-        cfg = something(s.cfg, Dict{String,Any}())
-        isempty(str(F, :ms_start)) && set!(tf(F, :ms_start), string(get(cfg, "start", "")))
-        isempty(str(F, :ms_stop)) && set!(tf(F, :ms_stop), string(get(cfg, "stop", "")))
-        field!(F, "Start (UTC)", :ms_start; hint = "2027-09-14T00:00:00")
-        field!(F, "Stop (UTC)", :ms_stop; hint = "2027-09-15T00:00:00")
-        field!(F, "Step (hours)", :ms_step; default = string(get(cfg, "step_hours", 2)), width = 80)
-        CImGui.SameLine()
-        CImGui.TextUnformatted("az/el step (hours)")
-        CImGui.SameLine()
-        CImGui.SetNextItemWidth(80)
-        input!("##ms_azel", tf(F, :ms_azel, string(get(cfg, "azel_step_hours", 1))))
-    elseif mode == 2
-        CImGui.TextUnformatted("One UTC timestamp per line; # starts a comment.")
-        CImGui.InputTextMultiline("##ms_list", tf(F, :ms_list; capacity = 1 << 16).buf, 1 << 16,
-                                  CImGui.ImVec2(-1, CImGui.GetTextLineHeight() * 6))
-    end
-    backend = backend_combo!(F, :ms_backend, st.settings)
-    if backend == "cuda"
-        CImGui.SameLine()
-        CImGui.SetNextItemWidth(100)
-        CImGui.InputInt("GPUs", iref(F, :ms_gpus, 1))
-        iref(F, :ms_gpus)[] = max(1, iref(F, :ms_gpus)[])
-    end
-    CImGui.Checkbox("Overwrite existing frames", bref(F, :ms_overwrite))
-    help("Off: keep complete frames and render only missing ones, so a stopped run continues. " *
-         "On: re-render every frame.")
-    CImGui.SameLine()
-    CImGui.Checkbox("dataset_description.json", bref(F, :ms_dsdesc))
-
-    name, root, status = mapset_output(st)
-    want = expected_frames(st)
-    CImGui.SeparatorText("Output")
-    CImGui.TextUnformatted(shortpath(status.dir))
-    if status.exists
-        done = min(status.sun, status.dsn)
-        colored(done >= want && want > 0 ? GOOD : WARN,
-                "$(status.sun) sun and $(status.dsn) DSN frames present; $want expected")
-        CImGui.SameLine()
-        if CImGui.Button("Open in browser")
-            open_mapset!(st, status.dir)
-            st.select_tab = "Browse"
-        end
-    else
-        note("Not started. $want frames expected.")
-    end
-
-    times = mapset_times(st)
-    times isa AbstractString && colored(BAD, times)
-    blocked = s.cfg === nothing || times isa AbstractString || isempty(s.path)
-    resume = status.exists && 0 < min(status.sun, status.dsn) < want && !bref(F, :ms_overwrite)[]
-    for (label, dry) in (("Dry run", true), (resume ? "Resume" : "Run", false))
-        dry || CImGui.SameLine()
-        job_button(label; disabled = blocked) && mapset_job!(app, st; dry)
-    end
-    help("Runs scripts/generate_mapset.jl in a separate low-priority process. " *
-         "The dry run checks paths and hashes and prints the plan without rendering.")
-end
-
 # ─── Single-frame preview ─────────────────────────────────────────────────
-
-function preview_panel!(app, st)
-    s, F = st.spec, st.fields
-    note("Render one timestamp of the selected spec, optionally for a smaller window, " *
-         "to check a spec before a long run. Output goes to data/outputs/.hyperion_gui/preview/.")
-    isempty(str(F, :pv_time)) && set!(tf(F, :pv_time), first_spec_time(s.cfg))
-    field!(F, "Time (UTC)", :pv_time; hint = "2027-09-14T00:00:00")
-    crop = bref(F, :pv_crop)
-    CImGui.Checkbox("Limit the output window", crop)
-    help("Replaces the first layer's window (row, column, height, width, in that layer's file pixels). " *
-         "A small window renders much faster.")
-    if crop[]
-        w = s.cfg === nothing ? nothing : first_window(s.cfg)
-        defaults = w === nothing ? (0, 0, 256, 256) : (w[1], w[2], min(w[3], 256), min(w[4], 256))
-        for (i, k) in enumerate((:pv_row, :pv_col, :pv_h, :pv_w))
-            i > 1 && CImGui.SameLine()
-            CImGui.SetNextItemWidth(110)
-            CImGui.InputInt(("row", "col", "height", "width")[i], iref(F, k, defaults[i]), 0)
-        end
-    end
-    backend_combo!(F, :pv_backend, st.settings)
-    t = parse_utc(str(F, :pv_time))
-    t === nothing && colored(BAD, "Enter a UTC time such as 2027-09-14T00:00:00.")
-    job_button("Render preview"; disabled = s.cfg === nothing || t === nothing) && preview_job!(app, st)
-end
 
 function preview_job!(app, st)
     s, F = st.spec, st.fields
@@ -227,7 +134,7 @@ function preview_job!(app, st)
     origin = window === nothing ? output_origin(s.cfg) : (window[1], window[2])
     root = joinpath(GUI_DIR, "preview")
     return launch!(app, st, "Preview $(spec_name(s)) $t", "scripts/generate_mapset.jl", "--spec=$spec",
-        "--name=preview", "--out=$root", "--backend=$(panel_backend(st, :pv_backend))", "--overwrite";
+        "--name=preview", "--out=$root", "--backend=$(panel_backend(st, :ms_backend))", "--overwrite";
         on_done = j -> j.status == :done && follow_up(() ->
             show_images!(st.view, "Preview: $(spec_name(s)) at $t", latest_frames(joinpath(root, "preview")); origin)))
 end
@@ -238,14 +145,21 @@ const LOCATION_KEYS = (("lat", "lon"), ("x", "y"), ("col", "row"))
 
 function use_picked!(st, F, mode_key, a, b; dem = true)
     p = st.view.picked
-    CImGui.SameLine()
+    label!("")
     if job_button("Use picked pixel"; disabled = p === nothing)
         iref(F, mode_key)[] = 2
         set!(tf(F, a), string(dem ? p.dem_col : p.col))
         set!(tf(F, b), string(dem ? p.dem_row : p.row))
     end
-    p === nothing ? help("Click a pixel in the View window first.") :
-        help("Picked: output col $(p.col), row $(p.row); first DEM col $(p.dem_col), row $(p.dem_row).")
+    if p === nothing
+        help("Click a pixel of a map in the View first.")
+    else
+        CImGui.SameLine()
+        colored(PICK_TEXT, dem ? "col $(p.dem_col), row $(p.dem_row)" : "col $(p.col), row $(p.row)")
+        CImGui.SameLine()
+        CImGui.SmallButton("Clear pick##lc") && (st.view.picked = nothing)
+        help("Picked in the View: output col $(p.col), row $(p.row); first DEM col $(p.dem_col), row $(p.dem_row).")
+    end
 end
 
 function light_curve_out(st)
@@ -275,8 +189,7 @@ end
 
 function light_curve_panel!(app, st)
     s, F = st.spec, st.fields
-    note("Solar visibility over time at one location, from scripts/generate_light_curve.jl. " *
-         "It uses the selected spec's terrain.")
+    note("Visible fraction of the solar disk over time at one location, with terrain shadows.")
     mode = radio_row!("Location", iref(F, :lc_mode), ("lat/lon", "x/y (m)", "col/row"))
     use_picked!(st, F, :lc_mode, :lc_a, :lc_b)
     a, b = LOCATION_KEYS[mode + 1]
@@ -291,22 +204,33 @@ function light_curve_panel!(app, st)
     field!(F, "Stop (UTC)", :lc_stop; default = string(get(something(s.cfg, Dict()), "stop", "")))
     field!(F, "Step", :lc_step; default = "1h", width = 100)
     help("Ns, Nm, Nh, Nd, or HH:MM:SS.")
-    field!(F, "Observer height (m)", :lc_height; hint = "from spec", width = 100)
-    backend_combo!(F, :lc_backend, st.settings; default = 3)
     default_out, out = light_curve_out(st)
-    field!(F, "Output CSV", :lc_out; hint = default_out)
-    CImGui.Checkbox("Overwrite", bref(F, :lc_overwrite))
-    isfile(out) && !bref(F, :lc_overwrite)[] && (CImGui.SameLine(); colored(WARN, "file exists"))
-
     ready = s.cfg !== nothing && !isempty(str(F, :lc_a)) && !isempty(str(F, :lc_b)) &&
             !isempty(str(F, :lc_start)) && !isempty(str(F, :lc_stop))
-    for (label, dry) in (("Dry run", true), ("Run", false))
-        dry || CImGui.SameLine()
-        job_button(label; disabled = !ready) && light_curve_job!(app, st; dry)
-    end
+    exists = isfile(out) && !bref(F, :lc_overwrite)[]
+    CImGui.Spacing()
+    primary_button("Calculate light curve"; disabled = !ready || exists) && light_curve_job!(app, st)
     CImGui.SameLine()
-    job_button("Plot existing CSV"; disabled = !isfile(out)) &&
-        show_plot!(st.view, load_csv_plot(out; title = "Light curve", show = ["sun_fraction"]))
+    job_button("Check"; disabled = !ready) && light_curve_job!(app, st; dry = true)
+    help("Check finds the pixel and the time range without calculating.")
+    if isfile(out)
+        CImGui.SameLine()
+        CImGui.Button("Plot saved result") &&
+            show_plot!(st.view, load_csv_plot(out; title = "Light curve", show = ["sun_fraction"]))
+        label!("Result")
+        CImGui.TextWrapped(replace(shortpath(out), "%" => "%%"))
+        label!("")
+        file_buttons(out; id = "lc")
+        exists && colored(DIM, "A result for this location exists. Turn on Overwrite in Options to calculate it again.")
+    end
+    CImGui.Spacing()
+    if CImGui.CollapsingHeader("Options##lc")
+        field!(F, "Observer height (m)", :lc_height; hint = "from spec", width = 100)
+        backend_combo!(F, :lc_backend, st.settings; default = 3)
+        field!(F, "Output CSV", :lc_out; hint = default_out)
+        label!("")
+        CImGui.Checkbox("Overwrite an existing result", bref(F, :lc_overwrite))
+    end
 end
 
 # ─── Az/el export ─────────────────────────────────────────────────────────
@@ -339,8 +263,7 @@ end
 
 function azel_panel!(app, st)
     F = st.fields
-    note("Sun and Earth azimuth, elevation, distance, and angular size at one point, " *
-         "from scripts/generate_azel_csv.jl. No terrain is used.")
+    note("Sun and Earth azimuth, elevation, distance, and angular size at one point. No terrain is used.")
     mode = radio_row!("Location", iref(F, :az_mode), ("lat/lon", "Shirley LDEM pixel"))
     a, b = mode == 0 ? ("lat", "lon") : ("row", "col")
     field!(F, a, :az_a; width = 160)
@@ -359,24 +282,33 @@ function azel_panel!(app, st)
     else
         field!(F, "Timestamp CSV", :az_list; hint = "path with a time column")
     end
-    field!(F, "Elevation (m)", :az_elev; hint = "0", width = 100)
-    help("Query elevation above the 1737.4 km reference sphere, in metres (--elev).")
     default_out, out = azel_out(st)
-    field!(F, "Output CSV", :az_out; hint = default_out)
     ready = !isempty(str(F, :az_a)) && !isempty(str(F, :az_b)) &&
             (tmode == 0 ? !isempty(str(F, :az_start)) && !isempty(str(F, :az_stop)) : !isempty(str(F, :az_list)))
-    job_button("Run"; disabled = !ready) && azel_job!(app, st)
-    CImGui.SameLine()
-    job_button("Plot existing CSV"; disabled = !isfile(out)) &&
-        show_plot!(st.view, load_csv_plot(out; title = "Az/el", show = AZEL_SHOWN))
+    CImGui.Spacing()
+    primary_button("Calculate az/el"; disabled = !ready) && azel_job!(app, st)
+    if isfile(out)
+        CImGui.SameLine()
+        CImGui.Button("Plot saved result") && show_plot!(st.view, load_csv_plot(out; title = "Az/el", show = AZEL_SHOWN))
+        label!("Result")
+        CImGui.TextWrapped(replace(shortpath(out), "%" => "%%"))
+        label!("")
+        file_buttons(out; id = "az")
+    end
+    CImGui.Spacing()
+    if CImGui.CollapsingHeader("Options##az")
+        field!(F, "Elevation (m)", :az_elev; hint = "0", width = 100)
+        help("Query elevation above the 1737.4 km reference sphere, in metres.")
+        field!(F, "Output CSV", :az_out; hint = default_out)
+    end
 end
 
 # ─── Pixel probe ──────────────────────────────────────────────────────────
 
 function probe_panel!(app, st)
     s, F = st.spec, st.fields
-    note("Explain one pixel at one time with tools/debug/probe_pixel.jl: Sun-ray blockers and an " *
-         "independent horizon check. The first spec layer must be a site DEM. Results appear in the Jobs log.")
+    note("Explains one pixel at one time: which terrain blocks each Sun ray, and an independent " *
+         "horizon check. The report appears in the Jobs window.")
     isempty(str(F, :pr_time)) && set!(tf(F, :pr_time), first_spec_time(s.cfg))
     field!(F, "Time (UTC)", :pr_time)
     field!(F, "col", :pr_col; width = 120)
@@ -386,23 +318,35 @@ function probe_panel!(app, st)
     CImGui.SetNextItemWidth(120)
     input!("##pr_row", tf(F, :pr_row))
     p = st.view.picked
-    CImGui.SameLine()
+    label!("")
     if job_button("Use picked pixel"; disabled = p === nothing)
         set!(tf(F, :pr_col), string(p.col))
         set!(tf(F, :pr_row), string(p.row))
     end
-    note("Output-image column and row, starting at zero.")
-    field!(F, "Observer (m)", :pr_observer; default = "0.0", width = 100)
-    CImGui.SetNextItemWidth(100)
-    CImGui.SameLine()
-    CImGui.InputInt("ASCII patch radius", iref(F, :pr_patch, 0))
-    iref(F, :pr_patch)[] = max(0, iref(F, :pr_patch)[])
-    CImGui.Checkbox("Without far-field layers", bref(F, :pr_nofar))
+    if p === nothing
+        help("Click a pixel of a map in the View first.")
+    else
+        CImGui.SameLine()
+        CImGui.SmallButton("Clear pick##pr") && (st.view.picked = nothing)
+        help("Output-image column and row, starting at zero.")
+    end
     first_kind = s.summary === nothing || isempty(s.summary.layers) ? "" : s.summary.layers[1].kind
-    first_kind == "site" || colored(WARN, "The first layer of this spec is not a site DEM.")
-    ready = s.cfg !== nothing && parse_utc(str(F, :pr_time)) !== nothing &&
+    first_kind == "site" || colored(WARN, "The probe needs a spec whose first layer is a site DEM.")
+    ready = s.cfg !== nothing && first_kind == "site" && parse_utc(str(F, :pr_time)) !== nothing &&
             tryparse(Int, str(F, :pr_col)) !== nothing && tryparse(Int, str(F, :pr_row)) !== nothing
-    job_button("Probe"; disabled = !ready) && probe_job!(app, st)
+    CImGui.Spacing()
+    primary_button("Probe pixel"; disabled = !ready) && probe_job!(app, st)
+    CImGui.Spacing()
+    if CImGui.CollapsingHeader("Options##pr")
+        field!(F, "Observer (m)", :pr_observer; default = "0.0", width = 100)
+        label!("ASCII patch radius")
+        CImGui.SetNextItemWidth(120)
+        CImGui.InputInt("##patch", iref(F, :pr_patch, 0))
+        iref(F, :pr_patch)[] = max(0, iref(F, :pr_patch)[])
+        help("Also print an ASCII Sun map of the (2N+1) × (2N+1) neighbourhood.")
+        label!("")
+        CImGui.Checkbox("Without far-field layers", bref(F, :pr_nofar))
+    end
 end
 
 function probe_job!(app, st)

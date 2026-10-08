@@ -28,10 +28,11 @@ include("src/util.jl")     # text fields, widget helpers, paths
 include("src/jobs.jl")     # background Julia processes
 include("src/view.jl")     # central view: map images and CSV plots
 include("src/specs.jl")    # mapset specification loading and editing
-include("src/run.jl")      # mapset, preview, light-curve, az/el, and probe panels
+include("src/run.jl")      # mapset jobs and the point tools
 include("src/browse.jl")   # mapset browser, contact maps, comparison, statistics
 include("src/layers_view.jl")  # DEM overviews, windows, and layer extents
 include("src/editor.jl")   # form editor for mapset specifications
+include("src/mapset_tab.jl")  # Mapset tab: summary, run, and options
 include("src/house.jl")    # input data, tests, and settings panels
 include("src/app.jl")      # window layout and main loop
 

@@ -323,12 +323,13 @@ function layer_form!(app, st, layers, i)
             CImGui.Dummy(CImGui.ImVec2(LABEL_X - 8, 0)); CImGui.SameLine(LABEL_X)
             colored(BAD, "file not found")
         end
+        window_form!(st, layer, i)
+        if CImGui.TreeNode("More settings##more$i")
         apply!(s, layer, "name", param!(st, "Display name", "name$i", get(layer, "name", nothing); optional = true))
         apply!(s, layer, "sha256", param!(st, "SHA-256", "sha$i", get(layer, "sha256", nothing);
             parse = parse_sha, optional = true, hint = "64 hex characters; empty skips the check",
             help_text = "The mapset command refuses to run when the file does not match."))
         hash_status!(app, st, layer, i)
-        window_form!(st, layer, i)
         if kind == "site"
             c = Ref(Bool(get(layer, "cutoff", false)))
             label!("Cutoff")
@@ -358,6 +359,8 @@ function layer_form!(app, st, layers, i)
                     help_text = "Metres per stored unit. Empty means 0.5 for Int16 and 1 for Float32."))
             end
         end
+        CImGui.TreePop()
+        end
         CImGui.Spacing()
     end
     CImGui.PopID()
@@ -382,11 +385,6 @@ function layers_form!(app, st)
         s.generation += 1
         changed!(s)
     end
-    CImGui.SameLine()
-    if CImGui.Button("Show DEMs and windows")
-        show_layers!(app, st)
-    end
-    help("Draws every layer's DEM in the View with its window, the output area, and the other layers' extents.")
 end
 
 # ─── Whole form ───────────────────────────────────────────────────────────
@@ -426,22 +424,11 @@ function spec_form!(app, st)
         set!(tf(F, :saveas), "")
     end
     CImGui.EndDisabled()
-    CImGui.SameLine()
-    CImGui.BeginDisabled(!named || isfile(target))
-    if CImGui.Button("New")
-        new = deepcopy(NEW_SPEC)
-        new["name"] = splitext(basename(target))[1]
-        write(target, render_toml(new))
-        refresh_specs!(s; select = target)
-        open_spec!(s, target)
-        set!(tf(F, :saveas), "")
-    end
-    CImGui.EndDisabled()
-    help("Save as writes this form to a new file. New creates an empty spec with that file name.")
+    help("Save as writes this form to a new file in data/inputs/mapsets/.")
     named && isfile(target) && colored(WARN, "$(basename(target)) already exists.")
     s.has_comments && dirty(s) && colored(WARN, "Saving rewrites $(basename(s.path)) without its comments.")
 
-    CImGui.SeparatorText("Run settings")
+    CImGui.Spacing()
     apply!(s, cfg, "name", param!(st, "Mapset name", "name", get(cfg, "name", nothing);
         help_text = "The output folder name, unless the run settings below override it."))
     times_form!(st)

@@ -24,9 +24,14 @@ mutable struct Job
     started::Float64
     finished::Float64
     on_done::Union{Nothing,Function}
+    warning::String               # shown with the job, e.g. a GPU fallback
 end
 
 const JOBS = Job[]
+
+const GPU_FALLBACK = "The GPU backend did not load, so this job runs on the CPU. " *
+    "Metal or CUDA must be installed in the default environment of the Julia version that runs " *
+    "the job (Julia $(VERSION.major).$(VERSION.minor)); see Settings."
 
 # Repaint the window after output arrives; `app` is nothing in headless use.
 wake(app) = app === nothing || request_frame!(app)
@@ -60,7 +65,7 @@ runs on the GUI task after the process exits.
 """
 function start_job!(app, title::AbstractString, cmd::Cmd; on_done = nothing)
     job = Job(length(JOBS) + 1, String(title), cmd, String[], "", "", :running,
-              nothing, time(), 0.0, on_done)
+              nothing, time(), 0.0, on_done, "")
     push!(JOBS, job)
     push!(job.lines, "\$ " * join(cmd.exec, " "))
     out = Pipe()
@@ -109,6 +114,7 @@ function feed!(job::Job, chunk::AbstractString)
         # Keep the final state of lines redrawn with carriage returns.
         segs = filter(!isempty, split(line, '\r'))
         isempty(segs) || push!(job.lines, String(last(segs)))
+        occursin("falling back to CPU", line) && (job.warning = GPU_FALLBACK)
     end
     rest = parts[end]
     if occursin('\r', rest)

@@ -208,26 +208,34 @@ end
 
 function browse_panel!(app, st)
     b, F = st.browser, st.fields
-    note("Open a mapset folder (with sun/ and dsn/ subfolders) from Hyperion or mapbuilder.")
-    field!(F, "Folder of mapsets", :br_root; default = "data/outputs")
-    root = projpath(str(F, :br_root))
+    root = projpath(isempty(str(F, :br_root)) ? "data/outputs" : str(F, :br_root))
     folders = mapset_folders(root)
-    CImGui.BeginChild("mapsets", CImGui.ImVec2(0, CImGui.GetTextLineHeightWithSpacing() * 6), CImGui.ImGuiChildFlags_Borders)
-    isempty(folders) && note("No mapsets in $(shortpath(root)).")
-    for d in folders
-        CImGui.Selectable(basename(d), d == b.dir) && open_mapset!(st, d)
+    label!("Mapset")
+    CImGui.SetNextItemWidth(-1)
+    if CImGui.BeginCombo("##mapset", isempty(b.dir) ? "Choose a mapset" : basename(b.dir), CImGui.ImGuiComboFlags_HeightLarge)
+        isempty(folders) && CImGui.TextDisabled("No mapsets in $(shortpath(root))")
+        for d in folders
+            CImGui.Selectable(basename(d), d == b.dir) && open_mapset!(st, d)
+        end
+        CImGui.EndCombo()
     end
-    CImGui.EndChild()
-    isempty(b.dir) && return
-    CImGui.SeparatorText(basename(b.dir))
+    if CImGui.TreeNode("Look in another folder")
+        field!(F, "Folder of mapsets", :br_root; hint = "data/outputs")
+        note("Any folder whose subfolders have sun/ and dsn/ folders, from Hyperion or mapbuilder.")
+        CImGui.TreePop()
+    end
+    if isempty(b.dir)
+        note("Choose a mapset to step through its Sun and DSN frames.")
+        return
+    end
     n = length(b.tags)
     if n == 0
         note("No sun or DSN frames found.")
         return
     end
     nsun, ndsn = length(frame_tags(b.dir, "sun")), length(frame_tags(b.dir, "dsn"))
-    CImGui.TextWrapped("$n timestamps ($nsun sun, $ndsn DSN), $(tag_time(b.tags[1])) to $(tag_time(b.tags[end]))" *
-                       (b.origin == (0, 0) ? "" : "; first-DEM origin row $(b.origin[1]), col $(b.origin[2])"))
+    colored(DIM, "$n timestamps ($nsun sun, $ndsn DSN), $(tag_time(b.tags[1])) to $(tag_time(b.tags[end]))")
+    CImGui.Spacing()
 
     # Frame navigation.
     CImGui.SetNextItemWidth(-1)
@@ -266,16 +274,18 @@ function browse_panel!(app, st)
     if st.view.mode != :images || b.loaded == 0
         CImGui.Button("Show in view") && load_frame!(st; keep_view = false)
     end
+    CImGui.Spacing()
 
-    CImGui.SeparatorText("Earth contact")
+    if CImGui.CollapsingHeader("Earth contact map")
     CImGui.SetNextItemWidth(200)
     CImGui.SliderFloat("DSN threshold (°)", b.threshold, 0f0, 7f0, "%.1f")
     CImGui.IsItemDeactivatedAfterEdit() && refresh_contact!(st)
     help("Contact means the Earth centre is at least this far above the terrain horizon. " *
          "Pick the 'contact' or 'sun and contact' layer in the View. Needs palette DSN files.")
     b.dsn === nothing && b.loaded > 0 && colored(WARN, "This frame has no stored DSN values (RGB file).")
+    end
 
-    CImGui.SeparatorText("Compare")
+    if CImGui.CollapsingHeader("Compare with another mapset")
     field!(F, "Mapset B", :br_compare; hint = "folder to compare with", width = -60)
     CImGui.SameLine()
     if CImGui.Button("Set")
@@ -292,15 +302,18 @@ function browse_panel!(app, st)
             colored(WARN, "B has no frame at this timestamp.")
         CImGui.SmallButton("Clear B") && (b.compare = ""; load_frame!(st))
     end
+    end
 
-    CImGui.SeparatorText("Time series at a pixel")
+    if CImGui.CollapsingHeader("Time series at a pixel")
     p = st.view.picked
     frame_size = b.sun !== nothing ? size(b.sun) : b.dsn !== nothing ? size(b.dsn) : (0, 0)
     p !== nothing && p.size != frame_size && (p = nothing)
     if p === nothing
         note("Click a pixel of this mapset in the View to pick it.")
     else
-        CImGui.TextUnformatted("Picked: col $(p.col), row $(p.row)")
+        colored(PICK_TEXT, "Picked: col $(p.col), row $(p.row)")
+        CImGui.SameLine()
+        CImGui.SmallButton("Clear##brpick") && (st.view.picked = nothing)
     end
     CImGui.SetNextItemWidth(100)
     CImGui.InputInt("every Nth frame##series", iref(F, :br_series_stride, 1))
@@ -316,8 +329,9 @@ function browse_panel!(app, st)
     end
     help("Reads every frame in a separate low-priority process. Large 1 m mapsets take a while; " *
          "use every Nth frame for a quicker look.")
+    end
 
-    CImGui.SeparatorText("Statistics over all frames")
+    if CImGui.CollapsingHeader("Statistics over all frames")
     CImGui.SetNextItemWidth(100)
     CImGui.InputInt("every Nth frame##stats", iref(F, :br_stats_stride, 1))
     iref(F, :br_stats_stride)[] = max(1, iref(F, :br_stats_stride)[])
@@ -337,4 +351,5 @@ function browse_panel!(app, st)
     job_button("Load previous result"; disabled = !isfile(joinpath(out, "stats.toml"))) && load_stats!(st, out)
     help("Percent of frames lit, in contact (DSN threshold above), and both; mean solar fraction; and the " *
          "longest continuous shadow and outage in hours. Results appear as 'stat:' layers in the View.")
+    end
 end
