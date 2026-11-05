@@ -25,6 +25,7 @@ Base.@kwdef struct Options
     azel_step::Period = Hour(1)
     times::Union{Nothing,Vector{DateTime}} = nothing
     dataset_description::Bool = false
+    image_format::Union{Nothing,Symbol} = nothing
 end
 
 function usage()
@@ -47,7 +48,14 @@ function usage()
       --overwrite               rerender existing frames instead of resuming
       --dry-run
       --dataset-description    write other/dataset_description.json
+      --format=png|geotiff      frame file format; default image_format in the spec, else png
     """
+end
+
+function parse_image_format(s)
+    f = lowercase(strip(String(s)))
+    f in ("png", "geotiff") || error("image format must be png or geotiff; got $s")
+    return Symbol(f)
 end
 
 parse_backend(s) = begin
@@ -115,6 +123,8 @@ function parse_args(args)
             opts = Options(opts; dry_run = true)
         elseif arg == "--dataset-description"
             opts = Options(opts; dataset_description = true)
+        elseif startswith(arg, "--format=")
+            opts = Options(opts; image_format = parse_image_format(split(arg, "=", limit = 2)[2]))
         else
             error("unknown argument: $arg\n\n$(usage())")
         end
@@ -211,12 +221,13 @@ function configured_range(cfg, opts::Options)
 end
 
 function build_spec(cfg, name, layers, start, stop, step, azel_step, output_root;
-                    dataset_description::Bool = false)
+                    dataset_description::Bool = false, image_format::Symbol = :png)
     kwargs = Dict{Symbol,Any}(
         :step => step,
         :azel_step => azel_step,
         :output_root => output_root,
         :dataset_description => dataset_description,
+        :image_format => image_format,
     )
     for (key, sym, cast) in (
             ("observer_height_m", :observer_height_m, Float64),
@@ -235,10 +246,16 @@ function configured_dataset_description(cfg, opts::Options)
         (haskey(cfg, "dataset_description") && Bool(cfg["dataset_description"]))
 end
 
-function print_plan(name, layers, output_root, backend, times, start, stop, step, azel_step)
+function configured_image_format(cfg, opts::Options)
+    opts.image_format === nothing || return opts.image_format
+    return parse_image_format(get(cfg, "image_format", "png"))
+end
+
+function print_plan(name, layers, output_root, backend, times, start, stop, step, azel_step, image_format)
     println("Mapset:      $name")
     println("Output root: $output_root")
     println("Backend:     $backend")
+    println("Format:      $image_format")
     println("Layers:      $(length(layers))")
     if times === nothing
         println("Time range:  $start through $stop inclusive, step $step")
@@ -310,6 +327,7 @@ function main(args = ARGS)
     output_root = abspath(opts.output_root)
     times = configured_times(cfg, opts)
     write_dataset_description = configured_dataset_description(cfg, opts)
+    image_format = configured_image_format(cfg, opts)
     if times === nothing
         start, stop, step, azel_step = configured_range(cfg, opts)
         Hyp._mapset_period_positive(step) || error("step must be positive")
@@ -323,7 +341,7 @@ function main(args = ARGS)
         step = azel_step = Hour(1)
         write_dataset_description && Hyp._mapset_explicit_step(times)
     end
-    print_plan(name, layers, output_root, opts.backend, times, start, stop, step, azel_step)
+    print_plan(name, layers, output_root, opts.backend, times, start, stop, step, azel_step, image_format)
     count = min(opts.gpus, length(timestamps))
     opts.gpus > 1 && println("GPU workers: $count (requested $(opts.gpus)); timestamps assigned in turn")
     opts.dry_run && return nothing
@@ -336,7 +354,7 @@ function main(args = ARGS)
         index, workers = something(opts.worker, (1, 1))
         backend = opts.worker === nothing ? opts.backend : cuda_backend_for_worker(index, workers)
         spec = build_spec(cfg, name, layers, start, stop, step, azel_step, output_root;
-                          dataset_description = write_dataset_description)
+                          dataset_description = write_dataset_description, image_format)
         # GPU module bindings can be newer than this call's world on Julia 1.12.
         outdir = Base.invokelatest(Hyp._generate_mapset, spec; backend,
             overwrite = opts.overwrite, times, worker_index = index, worker_count = workers)

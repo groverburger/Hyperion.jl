@@ -124,6 +124,22 @@ end
             @test length(readdir(joinpath(irregular, "sun"))) == 3
             @test !isfile(joinpath(irregular, "other", "dataset_description.json"))
 
+            # GeoTIFF frames hold the PNG values on the hillshade's grid.
+            geotiff = cli.main([args..., "--name=geotiff", "--format=geotiff"])
+            for sub in ("sun", "dsn"), file in readdir(joinpath(explicit, sub))
+                tif = joinpath(geotiff, sub, replace(file, ".png" => ".tif"))
+                png = Hyperion.FileIO.load(joinpath(explicit, sub, file))
+                ArchGDAL.read(tif) do ds
+                    @test permutedims(ArchGDAL.read(ArchGDAL.getband(ds, 1))) == png.index
+                    ArchGDAL.read(joinpath(geotiff, "other", "hillshade.tif")) do hs
+                        @test ArchGDAL.getgeotransform(ds) == ArchGDAL.getgeotransform(hs)
+                        @test ArchGDAL.getproj(ds) == ArchGDAL.getproj(hs)
+                    end
+                end
+            end
+            @test occursin("image_format,geotiff", read(joinpath(geotiff, "other", "manifest.csv"), String))
+            @test_throws ErrorException cli.parse_args(["--format=jpeg"])
+
             # Optional hardware check: run this test on a node with N visible NVIDIA GPUs.
             gpu_count = parse(Int, get(ENV, "HYP_MAPSET_TEST_GPUS", "0"))
             gpu_count == 0 || gpu_count >= 2 || error("HYP_MAPSET_TEST_GPUS must be 0 or at least 2")

@@ -163,8 +163,8 @@ The default output path is `data/outputs/<name>/`.
 
 | File | Content |
 |---|---|
-| `sun/sun.<timestamp>.png` | Solar disk visibility |
-| `dsn/dsn.<timestamp>.png` | Earth elevation above the terrain horizon |
+| `sun/sun.<timestamp>.png` | Solar disk visibility (`.tif` with `--format=geotiff`) |
+| `dsn/dsn.<timestamp>.png` | Earth elevation above the terrain horizon (`.tif` with `--format=geotiff`) |
 | `other/hillshade.tif` | Terrain hillshade |
 | `other/slope.tif` | Terrain slope |
 | `other/azimuths_elevations.csv` | Sun and Earth geometry at the output window center |
@@ -178,6 +178,13 @@ For example, 15 means 1.5°.
 DSN values from 71 (7.1°) up are transparent, as in mapbuilder output.
 Read the stored values, not the colours: one DSN colour covers a 1° range.
 Images made before October 2026 are RGB and keep only the colour.
+
+`--format=geotiff`, or `image_format = "geotiff"` in the specification, writes the frames as GeoTIFFs instead.
+The option on the command line overrides the specification; the default is `png`.
+A GeoTIFF frame is a single-band, LZW-compressed UInt8 raster with the same values and a colour table.
+It has the geotransform and projection of `other/hillshade.tif`: the first layer's projection, offset to the output window.
+TIFF colour tables have no transparency, so DSN values from 7.1° up are opaque in GeoTIFFs.
+Continuation counts only images in the selected format.
 
 A normal run keeps full image pairs.
 A run with one missing image calculates the frame and saves the missing image.

@@ -115,3 +115,35 @@ function save_indexed_png(data::Matrix{UInt8}, palette::Matrix{UInt8}, path::Abs
     end
     FileIO.save(path, IndirectArray(Int.(data) .+ 1, colors))
 end
+
+"""
+    save_indexed_geotiff(data::Matrix{UInt8}, palette, path; geotransform, projection)
+
+Write a UInt8 matrix as a single-band, LZW-compressed GeoTIFF with a colour
+table. Like [`save_indexed_png`](@ref), each pixel stores its value and the
+palette supplies only the display colour. `geotransform` (six GDAL
+coefficients) and `projection` (WKT) georeference the image when given.
+TIFF colour maps have no alpha, so no palette entry is transparent.
+"""
+function save_indexed_geotiff(data::Matrix{UInt8}, palette::Matrix{UInt8}, path::AbstractString;
+                              geotransform::Union{Nothing,AbstractVector{<:Real}} = nothing,
+                              projection::AbstractString = "")
+    H, W = size(data)
+    ArchGDAL.create(path; driver = ArchGDAL.getdriver("GTiff"), width = W, height = H,
+                    nbands = 1, dtype = UInt8, options = ["COMPRESS=LZW"]) do ds
+        geotransform === nothing || ArchGDAL.setgeotransform!(ds, Float64.(collect(geotransform)))
+        isempty(projection) || ArchGDAL.setproj!(ds, String(projection))
+        band = ArchGDAL.getband(ds, 1)
+        # GDAL fixes the photometric interpretation at the first pixel write,
+        # so the colour table must come first.
+        ArchGDAL.createcolortable(ArchGDAL.GPI_RGB) do ct
+            for i in 1:256
+                ArchGDAL.setcolorentry!(ct, i - 1, ArchGDAL.GDAL.GDALColorEntry(
+                    palette[i, 1], palette[i, 2], palette[i, 3], 255))
+            end
+            ArchGDAL.setcolortable!(band, ct)
+        end
+        ArchGDAL.write!(band, permutedims(data))   # GDAL stores (columns, rows)
+    end
+    return path
+end

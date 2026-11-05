@@ -13,6 +13,7 @@ makedocs(;
         "Desktop GUI" => "gui.md",
         "Light curves" => "light-curves.md",
         "Mapsets" => "mapsets.md",
+        "Permanent shadow" => "psr.md",
         "Azimuth and elevation CSV" => "azel.md",
         "Tests" => "testing.md",
         "Terms" => "terms.md",

@@ -121,6 +121,8 @@ include("terrain_stack.jl")
 include("png_output.jl")
 include("light_curve.jl")
 include("mapset_workers.jl")
+include("psr.jl")
+include("psr_filter.jl")
 
 # ─── Tier 0 correctness regression (default; skip via HYP_SKIP_CORRECTNESS=1)
 # Requires a GPU backend (Metal or CUDA) in the active environment;

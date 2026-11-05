@@ -916,7 +916,10 @@ end
     @Const(stack_packed),
     @Const(atan_lut), @Const(iparams),
     @Const(layer_iparams), @Const(layer_fparams),
-    @Const(edge_fparams), @Const(fparams))
+    @Const(edge_fparams), @Const(fparams),
+    ::Val{PSR}) where {PSR}
+
+    psr_mode = PSR
 
     H = iparams[Int32(1)]
     W = iparams[Int32(2)]
@@ -968,8 +971,10 @@ end
     moonme_r33 = edge_fparams[Int32(9), Int32(1)]
 
     idx = @index(Global)
-    local_row = (idx - Int32(1)) ÷ W
-    local_col = (idx - Int32(1)) % W
+    local_row = psr_mode ? unsafe_trunc(Int32, stack_packed[idx, Int32(1), Int32(15)]) : (idx - Int32(1)) ÷ W
+    local_col = psr_mode ? unsafe_trunc(Int32, stack_packed[idx, Int32(1), Int32(16)]) : (idx - Int32(1)) % W
+    packed_row = psr_mode ? idx : local_row + Int32(1)
+    packed_col = psr_mode ? Int32(1) : local_col + Int32(1)
     if local_row < H
     site_col = site_origin_col + local_col
     site_row = site_origin_row + local_row
@@ -991,10 +996,10 @@ end
         qx = fma(q_elev_km, M31, gx0)
         qy = fma(q_elev_km, M32, gy0)
         qz = fma(q_elev_km, M33, gz0)
-        ldem_col = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(13)]
-        ldem_row = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(14)]
-        ldem2_col = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(15)]
-        ldem2_row = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(16)]
+        ldem_col = stack_packed[packed_row, packed_col, Int32(13)]
+        ldem_row = stack_packed[packed_row, packed_col, Int32(14)]
+        ldem2_col = stack_packed[packed_row, packed_col, Int32(15)]
+        ldem2_row = stack_packed[packed_row, packed_col, Int32(16)]
     else
         qx, qy, qz, qz_pos, M31, M32, M33, _ =
             _gpu_stereo_query_setup(Float32(site_col), Float32(site_row),
@@ -1028,21 +1033,21 @@ end
     l2rho_km = sqrt(l2rho2_q)
     l2_slope_safety = fma(l2rho_km, INV_R_KM_F32, Float32(0.01))
 
-    site_sun_rc = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(1)]
-    site_sun_rs = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(2)]
-    sun_el_deg = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(3)]
-    site_earth_rc = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(4)]
-    site_earth_rs = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(5)]
-    earth_el_deg = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(6)]
-    sun_thresh = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(7)]
-    dsn_thresh = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(8)]
-    ldem_sun_rc = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(9)]
-    ldem_sun_rs = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(10)]
-    ldem_earth_rc = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(11)]
-    ldem_earth_rs = stack_packed[local_row + Int32(1), local_col + Int32(1), Int32(12)]
+    site_sun_rc = stack_packed[packed_row, packed_col, Int32(1)]
+    site_sun_rs = stack_packed[packed_row, packed_col, Int32(2)]
+    sun_el_deg = stack_packed[packed_row, packed_col, Int32(3)]
+    site_earth_rc = stack_packed[packed_row, packed_col, Int32(4)]
+    site_earth_rs = stack_packed[packed_row, packed_col, Int32(5)]
+    earth_el_deg = stack_packed[packed_row, packed_col, Int32(6)]
+    sun_thresh = stack_packed[packed_row, packed_col, Int32(7)]
+    dsn_thresh = stack_packed[packed_row, packed_col, Int32(8)]
+    ldem_sun_rc = stack_packed[packed_row, packed_col, Int32(9)]
+    ldem_sun_rs = stack_packed[packed_row, packed_col, Int32(10)]
+    ldem_earth_rc = stack_packed[packed_row, packed_col, Int32(11)]
+    ldem_earth_rs = stack_packed[packed_row, packed_col, Int32(12)]
 
     sun_below = (sun_el_deg + SUN_HALF_ANGLE_DEG) <= TWILIGHT_SKIP_DEG
-    earth_below = earth_el_deg <= TWILIGHT_SKIP_DEG
+    earth_below = psr_mode || earth_el_deg <= TWILIGHT_SKIP_DEG
     sun_max_site = _stack_dynamic_max_pixels(sun_thresh, max_terrain_m, site_pixel_size_m)
     dsn_max_site = _stack_dynamic_max_pixels(dsn_thresh, max_terrain_m, site_pixel_size_m)
     sun_max_ldem = _stack_dynamic_max_pixels(sun_thresh, max_terrain_m, ldem_pixel_size_m)
@@ -1228,6 +1233,9 @@ end
             sun_el_deg, d_0, d_1, d_2, d_3, d_4, d_5, d_6, d_7)
     end
 
+    if psr_mode
+        sun_out[idx] = sun_frac
+    else
     over_hz_deg = earth_below ? Float32(-90.0) : (earth_el_deg - de)
     sun_out[local_row + Int32(1), local_col + Int32(1)] =
         _gpu_encode_sun_u8(sun_frac)
@@ -1244,6 +1252,7 @@ end
         sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(7)] = d_6
         sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(8)] = d_7
     end
+    end  # normal frame outputs
     end
 end
 
@@ -1307,7 +1316,8 @@ function _prepare_layered_polar_stack_gpu_context(
         DeviceArray,
         workgroup_size::Int = 512,
         debug_outputs::Bool = false,
-        farfield_cache = nothing)
+        farfield_cache = nothing,
+        sparse_capacity::Union{Nothing,Int} = nothing)
 
     origin_r, origin_c, H, W = _source_window(inner_source)
     observer_km = Float32(observer_height_m / 1000.0)
@@ -1367,7 +1377,8 @@ function _prepare_layered_polar_stack_gpu_context(
             (farfield_cache.d_ldem_max, farfield_cache.d_ldem_min,
              farfield_cache.d_ldem2_max, farfield_cache.d_ldem2_min)
         end
-    packed = Array{Float32, 3}(undef, H, W, inner_source isa SiteTerrain ? 14 : 16)
+    PH, PW = sparse_capacity === nothing ? (H, W) : (sparse_capacity, 1)
+    packed = zeros(Float32, PH, PW, inner_source isa SiteTerrain && sparse_capacity === nothing ? 14 : 16)
     d_packed = DeviceArray(packed)
     d_atan = DeviceArray(ATAN_LUT)
     d_iparams = DeviceArray(Int32[
@@ -1443,8 +1454,8 @@ function _prepare_layered_polar_stack_gpu_context(
             observer_km,
             MAX_TERRAIN_M_F32,
         ]),
-        DeviceArray(zeros(UInt8, H, W)),
-        DeviceArray(zeros(UInt8, H, W)),
+        DeviceArray(zeros(UInt8, PH, PW)),
+        DeviceArray(zeros(UInt8, PH, PW)),
         DeviceArray(zeros(Float32, debug_outputs ? H : 1,
                           debug_outputs ? W : 1)),
         DeviceArray(zeros(Float32, debug_outputs ? H : 1,
@@ -1482,7 +1493,8 @@ function _render_layered_polar_stack_gpu(ctx::_LayeredPolarStackGPUContext,
         ctx.d_ldem2_max[4], ctx.d_ldem2_max[5],
         ctx.d_ldem2_min[2], ctx.d_ldem2_min[3], ctx.d_ldem2_min[4], ctx.d_ldem2_min[5],
         ctx.d_packed, ctx.d_atan, ctx.d_iparams,
-        ctx.d_layer_iparams, ctx.d_layer_fparams, ctx.d_edge_fparams, ctx.d_fparams;
+        ctx.d_layer_iparams, ctx.d_layer_fparams, ctx.d_edge_fparams, ctx.d_fparams,
+        Val(false);
         ndrange = ctx.H * ctx.W)
     Base.invokelatest(KernelAbstractions.synchronize, ctx.backend)
 
@@ -1650,7 +1662,8 @@ function _generate_layered_polar_stack_gpu(
            d_ldem2_max[4], d_ldem2_max[5],
            d_ldem2_min[2], d_ldem2_min[3], d_ldem2_min[4], d_ldem2_min[5],
            d_packed, d_atan, d_iparams,
-           d_layer_iparams, d_layer_fparams, d_edge_fparams, d_fparams;
+           d_layer_iparams, d_layer_fparams, d_edge_fparams, d_fparams,
+           Val(false);
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 

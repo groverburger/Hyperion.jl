@@ -46,6 +46,7 @@ Base.@kwdef struct MapsetSpec
     tile_height::Int = 1024
     tile_width::Int = 1024
     dataset_description::Bool = false
+    image_format::Symbol = :png      # :png or :geotiff
     verbose::Bool = true
 end
 
@@ -90,7 +91,8 @@ Render a reproducible Sun/DSN mapset into
 `spec.step` controls Sun/DSN frame cadence. `spec.azel_step` controls
 the azimuth/elevation CSV cadence and defaults to one hour.
 Set `dataset_description = true` on the spec to also write
-`other/dataset_description.json`.
+`other/dataset_description.json`. Set `image_format = :geotiff` to write
+the frames as georeferenced `.tif` files with the same values and palettes.
 
 Existing complete frames are skipped by default so interrupted mapset
 generation can be resumed. Pass `overwrite=true` to rerender existing frames.
@@ -152,6 +154,7 @@ function _generate_mapset(spec::MapsetSpec;
         error("step must be a positive Dates.Period")
     _mapset_period_positive(spec.azel_step) ||
         error("azel_step must be a positive Dates.Period")
+    ext = _mapset_frame_extension(spec.image_format)
     timestamps = times === nothing ?
         _mapset_timestamps(spec.start_time, spec.stop_time, spec.step) : sort(unique(times))
     isempty(timestamps) && error("timestamp list is empty")
@@ -182,6 +185,9 @@ function _generate_mapset(spec::MapsetSpec;
     first = loaded[1]
     origin_r, origin_c, H, W = _mapset_render_window(first)
     init_spice(spec.kernels_dir)
+    georef = spec.image_format === :geotiff ?
+        (geotransform = _mapset_geotransform(first),
+         projection = _dataset_description_projection(first)) : nothing
 
     if worker_index == 1
         _write_mapset_terrain_derivatives(other_dir, first)
@@ -231,8 +237,8 @@ function _generate_mapset(spec::MapsetSpec;
 
     for (idx, ts) in pairs(timestamps)
         tag = _mapset_timestamp_tag(ts)
-        sun_path = joinpath(sun_dir, "sun.$tag.png")
-        dsn_path = joinpath(dsn_dir, "dsn.$tag.png")
+        sun_path = joinpath(sun_dir, "sun.$tag$ext")
+        dsn_path = joinpath(dsn_dir, "dsn.$tag$ext")
         sun_exists = isfile(sun_path)
         dsn_exists = isfile(dsn_path)
         if !overwrite && sun_exists && dsn_exists
@@ -282,13 +288,13 @@ function _generate_mapset(spec::MapsetSpec;
                 debug_outputs = false)
         end
         if overwrite || !sun_exists
-            save_indexed_png(sun, SUN_PALETTE, sun_path)
+            _save_mapset_frame(sun, SUN_PALETTE, sun_path, georef)
         else
             @warn "sun image already exists; leaving it unchanged" timestamp=tag path=sun_path
         end
         if overwrite || !dsn_exists
-            save_indexed_png(dsn, DSN_PALETTE, dsn_path;
-                             transparent_from = DSN_TRANSPARENT_FROM)
+            _save_mapset_frame(dsn, DSN_PALETTE, dsn_path, georef;
+                               transparent_from = DSN_TRANSPARENT_FROM)
         else
             @warn "dsn image already exists; leaving it unchanged" timestamp=tag path=dsn_path
         end
@@ -300,6 +306,18 @@ function _generate_mapset(spec::MapsetSpec;
 
     return outdir
 end
+
+function _mapset_frame_extension(format::Symbol)
+    format === :png && return ".png"
+    format === :geotiff && return ".tif"
+    error("image_format must be :png or :geotiff; got :$format")
+end
+
+_save_mapset_frame(data, palette, path, ::Nothing; kwargs...) =
+    save_indexed_png(data, palette, path; kwargs...)
+# GeoTIFF colour maps cannot mark the DSN values from 7.1° up as transparent.
+_save_mapset_frame(data, palette, path, georef::NamedTuple; transparent_from = nothing) =
+    save_indexed_geotiff(data, palette, path; georef...)
 
 function _mapset_explicit_step(times)
     length(times) == 1 && return Second(0)
@@ -646,6 +664,7 @@ function _mapset_manifest_rows(spec::MapsetSpec)
         "workgroup_size" => string(spec.workgroup_size),
         "tile_height" => string(spec.tile_height),
         "tile_width" => string(spec.tile_width),
+        "image_format" => string(spec.image_format),
     ]
 end
 

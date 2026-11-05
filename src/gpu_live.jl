@@ -473,11 +473,17 @@ end
     pixel_size_km::Float32, pixel_size_m::Float32,
     max_terrain_pix_scale::Float32, mipmap_base::Float32,
     elev_scale_to_m::Float32,
-    sun_half_angle_deg::Float32, max_terrain_m::Float32)
+    sun_half_angle_deg::Float32, max_terrain_m::Float32,
+    ::Val{PSR}) where {PSR}
+
+    psr_mode = PSR
 
     idx = @index(Global)
-    local_row = (idx - Int32(1)) ÷ W
-    local_col = (idx - Int32(1)) % W
+    # PSR launches contain only surviving pixel coordinates, packed as exact Float32 integers.
+    local_row = psr_mode ? unsafe_trunc(Int32, azel_packed[idx, Int32(1), Int32(9)]) : (idx - Int32(1)) ÷ W
+    local_col = psr_mode ? unsafe_trunc(Int32, azel_packed[idx, Int32(1), Int32(10)]) : (idx - Int32(1)) % W
+    packed_row = psr_mode ? idx : local_row + Int32(1)
+    packed_col = psr_mode ? Int32(1) : local_col + Int32(1)
     if local_row < H
     ldem_col = ldem_origin_col + local_col
     ldem_row = ldem_origin_row + local_row
@@ -513,21 +519,21 @@ end
     # 6: earth_el_deg
     # 7: sun_slope_tan   (tan of sun-disk-top elevation, early-return threshold)
     # 8: dsn_slope_tan   (tan of earth elevation)
-    sun_rc_base   = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(1)]
-    sun_rs_base   = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(2)]
-    sun_el_deg    = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(3)]
-    earth_rc      = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(4)]
-    earth_rs      = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(5)]
-    earth_el_deg  = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(6)]
-    sun_slope_thresh = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(7)]
-    dsn_slope_thresh = azel_packed[local_row + Int32(1), local_col + Int32(1), Int32(8)]
+    sun_rc_base   = azel_packed[packed_row, packed_col, Int32(1)]
+    sun_rs_base   = azel_packed[packed_row, packed_col, Int32(2)]
+    sun_el_deg    = azel_packed[packed_row, packed_col, Int32(3)]
+    earth_rc      = azel_packed[packed_row, packed_col, Int32(4)]
+    earth_rs      = azel_packed[packed_row, packed_col, Int32(5)]
+    earth_el_deg  = azel_packed[packed_row, packed_col, Int32(6)]
+    sun_slope_thresh = azel_packed[packed_row, packed_col, Int32(7)]
+    dsn_slope_thresh = azel_packed[packed_row, packed_col, Int32(8)]
 
     # Twilight skip at -10°. Matches TWILIGHT_SKIP_DEG in live_helpers.jl;
     # kept as a literal here (identical Float32 bit pattern) rather than
     # referencing the host const inside kernel source.
     sun_top_el_deg = sun_el_deg + sun_half_angle_deg
     sun_below = sun_top_el_deg <= -10.0f0
-    earth_below = earth_el_deg <= -10.0f0
+    earth_below = psr_mode || earth_el_deg <= -10.0f0
 
     # Dynamic max ray distance. Consolidated to one mul + one div (was two
     # divs + one mul) so vendor-specific `/ const` rounding can't accumulate.
@@ -676,6 +682,10 @@ end
     over_hz_deg = earth_below ? Float32(-90.0) : (earth_el_deg - de)
 
     # ── Emit UInt8 ────────────────────────────────────────────────────
+    if psr_mode
+        # Classify before UInt8 quantization: even a tiny positive exposure retires it.
+        sun_out[idx] = sun_frac
+    else
     sun_u8 = _gpu_encode_sun_u8(sun_frac)
     dsn_u8 = _gpu_encode_dsn_u8(over_hz_deg)
     sun_out[local_row + Int32(1), local_col + Int32(1)] = sun_u8
@@ -696,6 +706,7 @@ end
     @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(6)] = d_5
     @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(7)] = d_6
     @inbounds sun_rays_debug[local_row + Int32(1), local_col + Int32(1), Int32(8)] = d_7
+    end  # normal frame outputs
     end  # close if local_row < H
 end
 
@@ -770,7 +781,7 @@ function _render_stack_source_gpu(
            pixel_size_km, pixel_size_m,
            max_terrain_pix_scale, mipmap_base,
            elev_scale_to_m,
-           SUN_HALF_ANGLE_DEG, MAX_TERRAIN_M_F32;
+           SUN_HALF_ANGLE_DEG, MAX_TERRAIN_M_F32, Val(false);
            ndrange = H * W)
     KernelAbstractions.synchronize(backend)
 

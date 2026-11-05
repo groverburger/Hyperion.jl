@@ -1,6 +1,6 @@
 module Hyperion
 
-export MapsetSpec, SiteDEMLayer, PolarDEMLayer, generate_mapset
+export MapsetSpec, SiteDEMLayer, PolarDEMLayer, generate_mapset, generate_psr, filter_psr
 
 # Shared live ray-casting kernels support CPU and GPU backends.
 # The current mapset workflow does not use precomputed horizon tables.
@@ -16,6 +16,8 @@ include("terrain_stack.jl")     # Layered terrain renderer
 include("test_data.jl")         # External terrain input validation
 include("correctness.jl")       # Bundled NAC observation comparison
 include("mapsets.jl")           # Mapset generation API
+include("psr_filter.jl")
+include("psr.jl")               # Sparse, unquantized permanent-shadow workflow
 
 function __init__()
     if !verify_lut_integrity()
