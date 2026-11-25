@@ -1,6 +1,7 @@
-# Mapset specifications: list the TOML files in data/inputs/mapsets/, edit
-# them through a form, and write them back. Runs use the saved file, or a
-# scratch copy when the form has unsaved changes.
+# Presets: saved render settings, stored as mapset specifications (TOML files
+# in data/inputs/mapsets/). The GUI edits the current settings in memory and
+# writes them back on Save. Runs use the saved file, or a scratch copy when the
+# settings differ from it.
 
 const SPEC_DIR = joinpath(REPO, "data", "inputs", "mapsets")
 
@@ -90,7 +91,9 @@ function summarize(cfg)
               for l in get(cfg, "layers", Any[])]
     times = get(cfg, "times", nothing)
     frames, timing = if times !== nothing
-        length(times), "$(length(times)) explicit timestamps"
+        n = length(times)
+        n, n == 0 ? "no times" : n == 1 ? "at $(times[1])" :
+            "listed, $(minimum(string.(times))) to $(maximum(string.(times)))"
     else
         start = haskey(cfg, "start") ? parse_utc(string(cfg["start"])) : nothing
         stop = haskey(cfg, "stop") ? parse_utc(string(cfg["stop"])) : nothing
@@ -99,7 +102,7 @@ function summarize(cfg)
             0, "time range incomplete"
         else
             n = length(Hyperion._mapset_timestamps(start, stop, Hour(step)))
-            n, "$start to $stop every $(step) h"
+            n, "$start to $stop, every $(step) h"
         end
     end
     return (; name = String(get(cfg, "name", "")), layers, frames, timing)
@@ -171,7 +174,7 @@ function effective_spec_path(s::SpecState)
     return path
 end
 
-# Write a modified copy of the current spec (for previews and crops).
+# Write a modified copy of the current settings.
 function write_spec_variant(s::SpecState, filename; edit!)
     cfg = deepcopy(s.cfg)
     edit!(cfg)
@@ -181,18 +184,23 @@ function write_spec_variant(s::SpecState, filename; edit!)
     return path
 end
 
-function output_status(root::AbstractString, name::AbstractString)
+const FRAME_EXTENSIONS = (".tif", ".png")
+is_frame_file(f) = !startswith(f, "._") && any(e -> endswith(f, e), FRAME_EXTENSIONS)
+
+# Saved images in `root/name`, counting only files with extension `ext`.
+function output_status(root::AbstractString, name::AbstractString; ext = ".tif")
     dir = joinpath(root, name)
     count(sub) = isdir(joinpath(dir, sub)) ?
-        Base.count(f -> endswith(f, ".png") && !startswith(f, "._"), readdir(joinpath(dir, sub))) : 0
+        Base.count(f -> endswith(f, ext) && !startswith(f, "._"), readdir(joinpath(dir, sub))) : 0
     return (; dir, exists = isdir(dir), sun = count("sun"), dsn = count("dsn"))
 end
 
+# The most recently timestamped sun and DSN images in `dir`, in either format.
 function latest_frames(dir)
     pick(sub) = begin
         d = joinpath(dir, sub)
         isdir(d) || return nothing
-        fs = sort(filter(f -> endswith(f, ".png") && !startswith(f, "._"), readdir(d)))
+        fs = sort(filter(is_frame_file, readdir(d)); by = f -> (splitext(f)[1], f))
         isempty(fs) ? nothing : joinpath(d, last(fs))
     end
     return filter(!isnothing, [pick("sun"), pick("dsn")])
@@ -200,45 +208,41 @@ end
 
 # ─── Spec selector ────────────────────────────────────────────────────────
 
+preset_label(path) = splitext(basename(path))[1]
+
 """
-Spec selector shown at the top of the spec-based tabs.
+Preset selector at the top of the Render tab.
 """
-function spec_selector!(st; summary = true, width = -90)
+function spec_selector!(st; width = -90)
     s = st.spec
-    names = [basename(f) for f in s.files]
+    names = [preset_label(f) for f in s.files]
     CImGui.AlignTextToFramePadding()
-    CImGui.TextUnformatted("Spec")
+    CImGui.TextUnformatted("Preset")
     CImGui.SameLine(LABEL_X)
     CImGui.SetNextItemWidth(width)
     if combo!("##spec", s.index, names)
         if dirty(s)
             st.pending_spec = s.files[s.index[] + 1]
             s.index[] = something(findfirst(==(s.path), s.files), 1) - 1
-            CImGui.OpenPopup("Discard edits?")
+            CImGui.OpenPopup("Discard changes?")
         else
             open_spec!(s, s.files[s.index[] + 1])
         end
     end
     CImGui.SameLine()
     CImGui.Button("Reload") && refresh_specs!(s)
-    if CImGui.BeginPopupModal("Discard edits?", C_NULL, CImGui.ImGuiWindowFlags_AlwaysAutoResize)
-        CImGui.TextUnformatted("$(basename(s.path)) has unsaved edits.")
-        if CImGui.Button("Discard and switch")
+    if CImGui.BeginPopupModal("Discard changes?", C_NULL, CImGui.ImGuiWindowFlags_AlwaysAutoResize)
+        CImGui.TextUnformatted("The settings differ from the saved preset $(preset_label(s.path)).")
+        if CImGui.Button("Discard changes and switch")
             open_spec!(s, st.pending_spec)
             refresh_specs!(s; select = st.pending_spec)
             CImGui.CloseCurrentPopup()
         end
         CImGui.SameLine()
-        CImGui.Button("Keep editing") && CImGui.CloseCurrentPopup()
+        CImGui.Button("Keep them") && CImGui.CloseCurrentPopup()
         CImGui.EndPopup()
     end
     if !isempty(s.error)
-        colored(BAD, "This file is not valid TOML: " * first(split(s.error, '\n')))
-    elseif summary && s.summary !== nothing
-        sm = s.summary
-        CImGui.TextWrapped(replace("$(isempty(sm.name) ? "(no name)" : sm.name): $(sm.timing); " *
-                                   "$(sm.frames) frames; $(length(sm.layers)) layers", "%" => "%%"))
-        dirty(s) && (CImGui.SameLine(); colored(WARN, "unsaved edits"))
-        isempty(s.field_errors) || colored(BAD, "Fix the marked fields before running.")
+        colored(BAD, "This preset file is not valid TOML: " * first(split(s.error, '\n')))
     end
 end

@@ -1,5 +1,5 @@
-# Panels that run Hyperion: mapsets, single-frame previews, light curves,
-# az/el exports, and the pixel probe.
+# Panels that run Hyperion: rendering images, light curves, az/el exports,
+# and the pixel probe.
 
 function backend_combo!(F::Fields, key::Symbol, settings::Settings; default = nothing)
     CImGui.AlignTextToFramePadding()
@@ -46,186 +46,132 @@ function launch!(app, st, title, args...; env = (), on_done = nothing)
     return job
 end
 
-# ─── Mapset ────────────────────────────────────────────────────────────────
+# ─── Render ───────────────────────────────────────────────────────────────
 
-function mapset_times(st)
-    F = st.fields
-    mode = iref(F, :ms_time_mode)[]
-    mode == 0 && return nothing
-    if mode == 1
-        start, stop = parse_utc(str(F, :ms_start)), parse_utc(str(F, :ms_stop))
-        step = tryparse(Int, str(F, :ms_step))
-        (start === nothing || stop === nothing || step === nothing || step <= 0 || stop < start) &&
-            return "Range needs a start, a stop at or after it, and a positive whole step in hours."
-        return (; start, stop, step, azel = something(tryparse(Int, str(F, :ms_azel)), 1))
-    end
-    lines = [strip(split(l, '#')[1]) for l in split(value(tf(F, :ms_list; capacity = 1 << 16)), '\n')]
-    lines = filter(!isempty, lines)
-    bad = findfirst(l -> parse_utc(l) === nothing, lines)
-    bad === nothing || return "Cannot read timestamp: $(lines[bad])"
-    isempty(lines) && return "Enter at least one timestamp."
-    return lines
+# File format of the rendered images: the preset's image_format, GeoTIFF when unset.
+image_format(cfg) = cfg === nothing ? "geotiff" : String(get(cfg, "image_format", "geotiff"))
+image_extension(cfg) = image_format(cfg) == "png" ? ".png" : ".tif"
+
+function render_output(st)
+    name, root = spec_name(st.spec), render_root(st)
+    return name, root, output_status(root, name; ext = image_extension(st.spec.cfg))
 end
+render_root(st) = projpath(isempty(str(st.fields, :ms_out)) ? "data/outputs" : str(st.fields, :ms_out))
+# Folder of the current settings' images, without counting them.
+render_dir(st) = joinpath(render_root(st), spec_name(st.spec))
 
-function mapset_spec_for_run(st)
-    s = st.spec
-    t = mapset_times(st)
-    t isa AbstractString && return t
-    t === nothing && return effective_spec_path(s)
-    return write_spec_variant(s, "run_" * basename(s.path); edit! = cfg -> begin
-        for k in ("times", "start", "stop", "step_hours", "azel_step_hours")
-            delete!(cfg, k)
-        end
-        if t isa NamedTuple
-            cfg["start"] = string(t.start)
-            cfg["stop"] = string(t.stop)
-            cfg["step_hours"] = t.step
-            cfg["azel_step_hours"] = t.azel
-        else
-            cfg["times"] = String.(t)
-        end
-    end)
-end
+expected_frames(st) = st.spec.summary === nothing ? 0 : st.spec.summary.frames
 
-function expected_frames(st)
-    t = mapset_times(st)
-    t === nothing && return st.spec.summary === nothing ? 0 : st.spec.summary.frames
-    t isa AbstractString && return 0
-    t isa NamedTuple && return length(Hyperion._mapset_timestamps(t.start, t.stop, Hour(t.step)))
-    return length(unique(t))
-end
-
-function mapset_output(st)
-    F = st.fields
-    name = isempty(str(F, :ms_name)) ? spec_name(st.spec) : str(F, :ms_name)
-    root = projpath(isempty(str(F, :ms_out)) ? "data/outputs" : str(F, :ms_out))
-    return name, root, output_status(root, name)
-end
-
-function mapset_job!(app, st; dry = false)
+function render_job!(app, st; overwrite = bref(st.fields, :ms_overwrite)[])
     s, F = st.spec, st.fields
-    name, root, status = mapset_output(st)
+    name, root, status = render_output(st)
     backend = panel_backend(st, :ms_backend)
-    args = ["scripts/generate_mapset.jl", "--spec=$(mapset_spec_for_run(st))",
-            "--name=$name", "--out=$root", "--backend=$backend"]
-    bref(F, :ms_overwrite)[] && push!(args, "--overwrite")
-    bref(F, :ms_dsdesc)[] && push!(args, "--dataset-description")
+    args = ["scripts/generate_mapset.jl", "--spec=$(effective_spec_path(s))",
+            "--name=$name", "--out=$root", "--backend=$backend", "--format=$(image_format(s.cfg))"]
+    overwrite && push!(args, "--overwrite")
     backend == "cuda" && iref(F, :ms_gpus, 1)[] > 1 && push!(args, "--gpus=$(iref(F, :ms_gpus)[])")
-    dry && push!(args, "--dry-run")
     origin = output_origin(s.cfg)
-    return launch!(app, st, (dry ? "Dry run " : "Mapset ") * name, args...;
-        on_done = j -> (!dry && j.status == :done) && follow_up(() ->
-            show_images!(st.view, "Latest frames: $name", latest_frames(status.dir); origin)))
-end
-
-# ─── Single-frame preview ─────────────────────────────────────────────────
-
-function preview_job!(app, st)
-    s, F = st.spec, st.fields
-    t = parse_utc(str(F, :pv_time))
-    window = bref(F, :pv_crop)[] ? [Int(iref(F, k)[]) for k in (:pv_row, :pv_col, :pv_h, :pv_w)] : nothing
-    spec = write_spec_variant(s, "preview.toml"; edit! = cfg -> begin
-        for k in ("start", "stop", "step_hours", "azel_step_hours", "times", "dataset_description")
-            delete!(cfg, k)
-        end
-        cfg["times"] = [string(t)]
-        window === nothing || (cfg["layers"][1]["window"] = window)
-    end)
-    origin = window === nothing ? output_origin(s.cfg) : (window[1], window[2])
-    root = joinpath(GUI_DIR, "preview")
-    return launch!(app, st, "Preview $(spec_name(s)) $t", "scripts/generate_mapset.jl", "--spec=$spec",
-        "--name=preview", "--out=$root", "--backend=$(panel_backend(st, :ms_backend))", "--overwrite";
+    return launch!(app, st, "Render " * name, args...;
         on_done = j -> j.status == :done && follow_up(() ->
-            show_images!(st.view, "Preview: $(spec_name(s)) at $t", latest_frames(joinpath(root, "preview")); origin)))
+            show_images!(st.view, "Rendered: $name", latest_frames(status.dir); origin)))
 end
 
 # ─── Light curve ──────────────────────────────────────────────────────────
 
-const LOCATION_KEYS = (("lat", "lon"), ("x", "y"), ("col", "row"))
-
-function use_picked!(st, F, mode_key, a, b; dem = true)
+# The marker, when it is a point of the current terrain; otherwise a reason.
+function marker_for_terrain(st)
     p = st.view.picked
-    label!("")
-    if job_button("Use picked pixel"; disabled = p === nothing)
-        iref(F, mode_key)[] = 2
-        set!(tf(F, a), string(dem ? p.dem_col : p.col))
-        set!(tf(F, b), string(dem ? p.dem_row : p.row))
-    end
-    if p === nothing
-        help("Click a pixel of a map in the View first.")
-    else
-        CImGui.SameLine()
-        colored(PICK_TEXT, dem ? "col $(p.dem_col), row $(p.dem_row)" : "col $(p.col), row $(p.row)")
-        CImGui.SameLine()
-        CImGui.SmallButton("Clear pick##lc") && (st.view.picked = nothing)
-        help("Picked in the View: output col $(p.col), row $(p.row); first DEM col $(p.dem_col), row $(p.dem_row).")
-    end
+    p === nothing && return "Place the marker: click the terrain or an image in the View, or set its position."
+    get(p, :spec, "") == st.spec.path ||
+        return "The marker is on an image that is not of this preset's image area. Place it again on the " *
+               "Terrain view, or set its position."
+    return p
 end
 
 function light_curve_out(st)
     F = st.fields
-    a, b = LOCATION_KEYS[iref(F, :lc_mode)[] + 1]
-    default_out = "data/outputs/light_curves/" *
-        safe_name("$(spec_name(st.spec))_$(a)$(str(F, :lc_a))_$(b)$(str(F, :lc_b))") * ".csv"
+    p = st.view.picked
+    where = p === nothing ? "" : "_col$(p.dem_col)_row$(p.dem_row)"
+    default_out = "data/outputs/light_curves/" * safe_name("$(spec_name(st.spec))$where") * ".csv"
     return default_out, projpath(isempty(str(F, :lc_out)) ? default_out : str(F, :lc_out))
 end
 
-function light_curve_job!(app, st; dry = false)
+function light_curve_job!(app, st)
     F = st.fields
-    a, b = LOCATION_KEYS[iref(F, :lc_mode)[] + 1]
+    p = st.view.picked
     _, out = light_curve_out(st)
     mkpath(dirname(out))
     args = ["scripts/generate_light_curve.jl", "--spec=$(effective_spec_path(st.spec))",
-            "--$a=$(str(F, :lc_a))", "--$b=$(str(F, :lc_b))",
+            "--col=$(p.dem_col)", "--row=$(p.dem_row)",
             "--start=$(str(F, :lc_start))", "--stop=$(str(F, :lc_stop))",
-            "--step=$(str(F, :lc_step))", "--out=$out", "--backend=$(panel_backend(st, :lc_backend; default = 3))"]
+            "--step=$(str(F, :lc_step))", "--out=$out", "--horizon",
+            "--backend=$(panel_backend(st, :lc_backend; default = 3))"]
     isempty(str(F, :lc_height)) || push!(args, "--observer-height-m=$(str(F, :lc_height))")
     bref(F, :lc_overwrite)[] && push!(args, "--overwrite")
-    dry && push!(args, "--dry-run")
-    return launch!(app, st, (dry ? "Dry run light curve " : "Light curve ") * basename(out), args...;
-        on_done = j -> (!dry && j.status == :done) && follow_up(() ->
-            show_plot!(st.view, load_csv_plot(out; title = "Light curve", show = ["sun_fraction"]))))
+    return launch!(app, st, "Light curve " * basename(out), args...;
+        on_done = j -> j.status == :done && follow_up(() -> show_light_curve!(st, out)))
+end
+
+show_light_curve!(st, out) =
+    show_plot!(st.view, load_csv_plot(out; title = "Light curve", show = ["sun_fraction"]))
+
+function last_spec_time(cfg)
+    cfg === nothing && return ""
+    haskey(cfg, "times") && !isempty(cfg["times"]) && return string(maximum(string.(cfg["times"])))
+    return string(get(cfg, "stop", ""))
+end
+
+# One line describing the marker, in the units of the light-curve command.
+function marker_summary!(st)
+    loc = marker_location(st)
+    p = st.view.picked
+    colored(PICK_TEXT, @sprintf("lat %.6f°, lon %.6f°", loc.latitude_deg, loc.longitude_deg))
+    colored(DIM, @sprintf("x %.1f m, y %.1f m; first DEM col %d, row %d", loc.x_m, loc.y_m, p.dem_col, p.dem_row))
 end
 
 function light_curve_panel!(app, st)
     s, F = st.spec, st.fields
-    note("Visible fraction of the solar disk over time at one location, with terrain shadows.")
-    mode = radio_row!("Location", iref(F, :lc_mode), ("lat/lon", "x/y (m)", "col/row"))
-    use_picked!(st, F, :lc_mode, :lc_a, :lc_b)
-    a, b = LOCATION_KEYS[mode + 1]
-    field!(F, a, :lc_a; width = 160)
-    CImGui.SameLine()
-    CImGui.TextUnformatted(b)
-    CImGui.SameLine()
-    CImGui.SetNextItemWidth(160)
-    input!("##lc_b", tf(F, :lc_b))
-    mode == 2 && note("Column and row in the full first DEM, starting at zero.")
-    field!(F, "Start (UTC)", :lc_start; default = string(get(something(s.cfg, Dict()), "start", "")))
-    field!(F, "Stop (UTC)", :lc_stop; default = string(get(something(s.cfg, Dict()), "stop", "")))
+    label!("Terrain")
+    CImGui.TextUnformatted("preset " * preset_label(s.path) * (dirty(s) ? " (changed)" : ""))
+    marker = marker_for_terrain(st)
+    label!("Location")
+    if marker isa AbstractString
+        CImGui.TextWrapped(marker)
+    else
+        CImGui.BeginGroup()
+        marker_summary!(st)
+        CImGui.EndGroup()
+    end
+    label!("")
+    CImGui.SmallButton("Set position...##lc") && (OPEN_WINDOWS["Marker position"][] = true)
+    if !(marker isa AbstractString)
+        CImGui.SameLine()
+        CImGui.SmallButton("Show on terrain##lc") && show_layers!(app, st)
+    end
+    cfg = something(s.cfg, Dict{String,Any}())
+    field!(F, "Start (UTC)", :lc_start; default = first_spec_time(cfg))
+    field!(F, "Stop (UTC)", :lc_stop; default = last_spec_time(cfg))
     field!(F, "Step", :lc_step; default = "1h", width = 100)
     help("Ns, Nm, Nh, Nd, or HH:MM:SS.")
     default_out, out = light_curve_out(st)
-    ready = s.cfg !== nothing && !isempty(str(F, :lc_a)) && !isempty(str(F, :lc_b)) &&
+    ready = s.cfg !== nothing && !(marker isa AbstractString) && isempty(spec_problems(st)) &&
             !isempty(str(F, :lc_start)) && !isempty(str(F, :lc_stop))
     exists = isfile(out) && !bref(F, :lc_overwrite)[]
     CImGui.Spacing()
     primary_button("Calculate light curve"; disabled = !ready || exists) && light_curve_job!(app, st)
-    CImGui.SameLine()
-    job_button("Check"; disabled = !ready) && light_curve_job!(app, st; dry = true)
-    help("Check finds the pixel and the time range without calculating.")
     if isfile(out)
         CImGui.SameLine()
-        CImGui.Button("Plot saved result") &&
-            show_plot!(st.view, load_csv_plot(out; title = "Light curve", show = ["sun_fraction"]))
+        CImGui.Button("Show saved result") && show_light_curve!(st, out)
         label!("Result")
         CImGui.TextWrapped(replace(shortpath(out), "%" => "%%"))
         label!("")
         file_buttons(out; id = "lc")
-        exists && colored(DIM, "A result for this location exists. Turn on Overwrite in Options to calculate it again.")
+        isfile(horizon_file(out)) || colored(DIM, "No horizon profile; recalculate to add one.")
+        exists && colored(DIM, "Already calculated; turn on Overwrite in Options to redo.")
     end
     CImGui.Spacing()
     if CImGui.CollapsingHeader("Options##lc")
-        field!(F, "Observer height (m)", :lc_height; hint = "from spec", width = 100)
+        field!(F, "Observer height (m)", :lc_height; hint = "from preset", width = 100)
         backend_combo!(F, :lc_backend, st.settings; default = 3)
         field!(F, "Output CSV", :lc_out; hint = default_out)
         label!("")
@@ -263,7 +209,6 @@ end
 
 function azel_panel!(app, st)
     F = st.fields
-    note("Sun and Earth azimuth, elevation, distance, and angular size at one point. No terrain is used.")
     mode = radio_row!("Location", iref(F, :az_mode), ("lat/lon", "Shirley LDEM pixel"))
     a, b = mode == 0 ? ("lat", "lon") : ("row", "col")
     field!(F, a, :az_a; width = 160)
@@ -272,7 +217,16 @@ function azel_panel!(app, st)
     CImGui.SameLine()
     CImGui.SetNextItemWidth(160)
     input!("##az_b", tf(F, :az_b))
-    mode == 1 && note("Row and column on the 20 m Shirley polar grid (centre 15199.5).")
+    mode == 1 && note("20 m Shirley polar grid; centre 15199.5.")
+    if mode == 0
+        loc = marker_for_terrain(st) isa AbstractString ? nothing : marker_location(st)
+        label!("")
+        if job_button("Use the marker##az"; disabled = loc === nothing)
+            set!(tf(F, :az_a), @sprintf("%.6f", loc.latitude_deg))
+            set!(tf(F, :az_b), @sprintf("%.6f", loc.longitude_deg))
+        end
+        loc === nothing && help("Place the marker on the terrain of the selected preset first.")
+    end
     tmode = radio_row!("Times", iref(F, :az_tmode), ("range", "list file"))
     if tmode == 0
         field!(F, "Start (UTC)", :az_start; hint = "2027-06-01T00:00:00")
@@ -307,8 +261,8 @@ end
 
 function probe_panel!(app, st)
     s, F = st.spec, st.fields
-    note("Explains one pixel at one time: which terrain blocks each Sun ray, and an independent " *
-         "horizon check. The report appears in the Jobs window.")
+    label!("Terrain")
+    CImGui.TextUnformatted("preset " * preset_label(s.path))
     isempty(str(F, :pr_time)) && set!(tf(F, :pr_time), first_spec_time(s.cfg))
     field!(F, "Time (UTC)", :pr_time)
     field!(F, "col", :pr_col; width = 120)
@@ -319,19 +273,13 @@ function probe_panel!(app, st)
     input!("##pr_row", tf(F, :pr_row))
     p = st.view.picked
     label!("")
-    if job_button("Use picked pixel"; disabled = p === nothing)
+    if job_button("Use the marker##pr"; disabled = p === nothing)
         set!(tf(F, :pr_col), string(p.col))
         set!(tf(F, :pr_row), string(p.row))
     end
-    if p === nothing
-        help("Click a pixel of a map in the View first.")
-    else
-        CImGui.SameLine()
-        CImGui.SmallButton("Clear pick##pr") && (st.view.picked = nothing)
-        help("Output-image column and row, starting at zero.")
-    end
+    help(p === nothing ? "Place the marker in the View first." : "Image column and row, starting at zero.")
     first_kind = s.summary === nothing || isempty(s.summary.layers) ? "" : s.summary.layers[1].kind
-    first_kind == "site" || colored(WARN, "The probe needs a spec whose first layer is a site DEM.")
+    first_kind == "site" || colored(WARN, "The probe needs a preset whose first layer is a site DEM.")
     ready = s.cfg !== nothing && first_kind == "site" && parse_utc(str(F, :pr_time)) !== nothing &&
             tryparse(Int, str(F, :pr_col)) !== nothing && tryparse(Int, str(F, :pr_row)) !== nothing
     CImGui.Spacing()

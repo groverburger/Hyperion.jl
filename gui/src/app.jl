@@ -11,50 +11,40 @@ mutable struct State
     pending_spec::String
     selected_job::Int
     message::String
+    notice::String            # confirmation of a finished action
     select_tab::String        # tab to bring to the front on the next frame
     active_tab::String
+    history::History
 end
 function State()
     st = State(Settings(), SpecState(), View(), InputsState(), Browser(), Fields(),
-               Dict{String,Vector{String}}(), "", 0, "", "", "")
+               Dict{String,Vector{String}}(), "", 0, "", "", "", "", History())
     st.view.layers = LayersView()
     return st
 end
 
-# Occasional tasks open as separate windows from the Tools menu.
-const EXTRA_WINDOWS = [("Input files", inputs_panel!), ("Tests", tests_panel!), ("Settings", settings_panel!)]
+# Occasional tasks open as separate windows from the menus.
+const EXTRA_WINDOWS = [("Marker position", marker_panel!), ("Sun and Earth az/el", azel_panel!),
+                       ("Pixel probe", probe_panel!), ("Input files", inputs_panel!),
+                       ("Tests", tests_panel!), ("Settings", settings_panel!)]
 const OPEN_WINDOWS = Dict(name => Ref(false) for (name, _) in EXTRA_WINDOWS)
 
-function point_tab!(app, st)
-    note("Calculations at one location. Light curve and Probe use the terrain of the selected spec.")
-    if CImGui.BeginTabBar("point_tools")
-        for (name, panel!) in (("Light curve", light_curve_panel!), ("Az/el", azel_panel!), ("Probe", probe_panel!))
-            if CImGui.BeginTabItem(name)
-                CImGui.Spacing()
-                name == "Az/el" || (spec_selector!(st); CImGui.Spacing())
-                CImGui.PushID(name)
-                panel!(app, st)
-                CImGui.PopID()
-                CImGui.EndTabItem()
-            end
-        end
-        CImGui.EndTabBar()
-    end
-end
+const TABS = [("Render", render_tab!), ("Results", browse_panel!), ("Light curve", light_curve_panel!),
+              ("PSR", psr_tab!)]
 
-const TABS = [("Mapset", mapset_tab!), ("Results", browse_panel!), ("Point tools", point_tab!)]
-
-# The View follows the tab: the spec's DEMs for Mapset, the maps for Results,
-# and the last plot for Point tools. The View's own buttons still switch freely.
+# The View follows the tab: the terrain for Render, the images for Results,
+# and the last plot for Light curve. The View's own buttons still switch freely.
 function tab_changed!(app, st, name)
     st.active_tab = name
     v = st.view
-    if name == "Mapset" && st.spec.cfg !== nothing
+    if name == "Render" && st.spec.cfg !== nothing
         v.mode == :layers || show_layers!(app, st)
     elseif name == "Results" && !isempty(v.images)
         v.mode = :images
-    elseif name == "Point tools" && v.plot !== nothing
+    elseif name == "Light curve" && v.plot !== nothing
         v.mode = :plot
+    elseif name == "PSR" && any(im -> im.kind == :psr, v.images)
+        v.mode = :images
     end
 end
 
@@ -64,6 +54,11 @@ function tools_window!(app, st)
             colored(BAD, st.message)
             CImGui.SameLine()
             CImGui.SmallButton("dismiss") && (st.message = "")
+        end
+        if !isempty(st.notice)
+            colored(GOOD, st.notice)
+            CImGui.SameLine()
+            CImGui.SmallButton("dismiss##notice") && (st.notice = "")
         end
         if CImGui.BeginTabBar("tools")
             for (name, panel!) in TABS
@@ -91,8 +86,15 @@ end
 
 function menu_bar!(app, st)
     CImGui.BeginMenuBar() || return
+    edit_menu!(st)
+    if CImGui.BeginMenu("Marker")
+        CImGui.MenuItem("Set position...") && (OPEN_WINDOWS["Marker position"][] = true)
+        CImGui.MenuItem("Remove", C_NULL, false, st.view.picked !== nothing) && (st.view.picked = nothing)
+        CImGui.EndMenu()
+    end
     if CImGui.BeginMenu("Tools")
         for (name, _) in EXTRA_WINDOWS
+            name == "Marker position" && continue
             CImGui.MenuItem(name, C_NULL, OPEN_WINDOWS[name][]) && (OPEN_WINDOWS[name][] = !OPEN_WINDOWS[name][])
         end
         CImGui.EndMenu()
@@ -112,7 +114,8 @@ function extra_windows!(app, st)
         open[] || continue
         # Cascade the windows so that they do not open on top of each other.
         CImGui.SetNextWindowPos(CImGui.ImVec2(120 + 60k, 80 + 50k), CImGui.ImGuiCond_FirstUseEver)
-        CImGui.SetNextWindowSize(CImGui.ImVec2(760, 560), CImGui.ImGuiCond_FirstUseEver)
+        CImGui.SetNextWindowSize(name == "Marker position" ? CImGui.ImVec2(560, 330) : CImGui.ImVec2(760, 560),
+                                 CImGui.ImGuiCond_FirstUseEver)
         CImGui.SetNextWindowBgAlpha(1f0)
         if CImGui.Begin(name, open)
             CImGui.PushID(name)
@@ -147,9 +150,11 @@ function frame!(app, st, first)
         st.spec.cfg === nothing || show_layers!(app, st)
         first[] = false
     end
+    history_shortcuts!(st)
     menu_bar!(app, st)
     tools_window!(app, st)
     view_window!(app, st)
     jobs_window!(app, st)
     extra_windows!(app, st)
+    record_history!(st)
 end

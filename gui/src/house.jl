@@ -84,8 +84,6 @@ end
 function inputs_panel!(app, st)
     s = st.inputs
     s.scanned || (scan_inputs!(s); st.spec_refs = spec_references())
-    note("Files in data/inputs/. Hyperion's tests find terrain by SHA-256 regardless of file name; " *
-         "mapset specs use the paths in their TOML. Hashes are cached in data/outputs/.hyperion_gui/.")
     if CImGui.Button("Rescan")
         scan_inputs!(s)
         st.spec_refs = spec_references()
@@ -154,7 +152,7 @@ function inputs_panel!(app, st)
             end
             CImGui.TableNextColumn()
             specs = unique(vcat(get(st.spec_refs, something(h, "-"), String[]), get(st.spec_refs, f.path, String[])))
-            isempty(specs) || push!(uses, "specs: " * join(specs, ", "))
+            isempty(specs) || push!(uses, "presets: " * join(preset_label.(specs), ", "))
             CImGui.TextUnformatted(join(uses, "; "))
         end
         CImGui.EndTable()
@@ -167,7 +165,6 @@ function inputs_panel!(app, st)
             CImGui.TextWrapped(replace("$(p.name) (usual name $(p.file), $(human_bytes(p.bytes)))" *
                                (isempty(use) ? "" : "; needed by $use"), "%" => "%%"))
         end
-        isempty(unhashed) || note("Hash the remaining files to check them against these products.")
     end
 end
 
@@ -202,13 +199,10 @@ test_prelude(file) = """
 
 function tests_panel!(app, st)
     F = st.fields
-    note("Runs the selected test files one after another, each in its own process with the " *
-         "thread and priority limits from Settings. A failure stops the sequence.")
     files = test_files()
     for f in files
         CImGui.Checkbox(f, bref(F, Symbol("test_" * f), f == "png_output.jl"))
-        CImGui.SameLine()
-        note(get(TEST_NOTES, f, ""))
+        CImGui.IsItemHovered() && haskey(TEST_NOTES, f) && CImGui.SetTooltip(TEST_NOTES[f])
     end
     chosen = [f for f in files if bref(F, Symbol("test_" * f))[]]
     backend = backend_combo!(F, :test_backend, st.settings)
@@ -235,18 +229,15 @@ function settings_panel!(app, st)
     s = st.settings
     CImGui.SeparatorText("Background processes")
     CImGui.SliderInt("Julia threads", s.threads, 1, Sys.CPU_THREADS)
-    help("Threads for each Hyperion process. Lower values leave more of the computer free; " *
-         "CPU renders get slower.")
+    help("Threads for each Hyperion process.")
     CImGui.SliderInt("Priority (nice)", s.niceness, 0, 19)
-    help("19 is the lowest priority: other programs come first. Ignored where nice is unavailable.")
+    help("19 is the lowest priority.")
     CImGui.AlignTextToFramePadding()
     CImGui.TextUnformatted("Default backend")
     CImGui.SameLine()
     CImGui.SetNextItemWidth(160)
     combo!("##default_backend", s.backend, BACKENDS)
-    help("Used by panels whose backend you have not changed. 'auto' picks Metal or CUDA when available.")
-    note("This computer has $(Sys.CPU_THREADS) CPU threads. New jobs use the current settings; " *
-         "running jobs keep theirs.")
+    help("'auto' picks Metal or CUDA when available.")
     CImGui.SeparatorText("About")
     CImGui.TextUnformatted("Repository: $REPO")
     CImGui.TextUnformatted("Julia $(VERSION); Mirage $(pkgversion(Mirage)); Hyperion $(pkgversion(Hyperion))")

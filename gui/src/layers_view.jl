@@ -1,6 +1,7 @@
-# DEM and window view: one panel per terrain layer of the selected spec, with
-# a shaded overview of the DEM, the layer's window, the output area, and the
-# other layers' extents projected into this layer's grid.
+# Terrain view: one panel per terrain layer of the current settings, with a
+# shaded overview of the DEM, the layer's window, the image area, and the
+# other layers' extents projected into this layer's grid. The pink marker
+# chooses the location for the light curve and the probe.
 
 # Pixel ↔ lat/lon conversions shared with the light-curve command.
 include(joinpath(REPO, "scripts", "generate_light_curve.jl"))
@@ -84,29 +85,41 @@ mutable struct LayerPanel
     overview::Union{Nothing,MapImage}
     factor::Int
     overview_key::String
-    detail::Union{Nothing,MapImage}     # finer overview around the output area
+    detail::Union{Nothing,MapImage}     # finer overview around the image area
     detail_window::NTuple{4,Int}        # (row, col, height, width) in this grid
     detail_factor::Int
     outlines::Vector{Outline}
-    fit::Bool
+    fit::Symbol                   # :area, :whole, or :none after the user zooms or pans
     zoom::Float64                 # canvas pixels per DEM pixel
     pan::Tuple{Float64,Float64}
     error::String
 end
 
+# Rendered sun or DSN frames of the current settings, drawn over layer 1.
+mutable struct Overlay
+    kind::Base.RefValue{Int32}       # 0 none, 1 sun, 2 DSN
+    index::Base.RefValue{Int32}      # frame shown, in `tags`
+    opacity::Base.RefValue{Float32}
+    dir::String                      # render folder the tags come from
+    tags::Vector{String}
+    listed::Float64                  # time the tags were last listed
+    image::Union{Nothing,MapImage}
+end
+Overlay() = Overlay(Ref(Int32(0)), Ref(Int32(0)), Ref(0.8f0), "", String[], 0.0, nothing)
+
 mutable struct LayersView
     panels::Vector{LayerPanel}
     edits::Int                    # spec edits reflected in the panels
     spec_path::String
-    draw_window::Base.RefValue{Bool}
-    drag::Union{Nothing,NTuple{2,Float64}}   # window drag start (row, col)
-    drag_end::NTuple{2,Float64}
+    edit::Union{Nothing,NamedTuple}  # image-area handle being dragged, where, and the area before
+    edit_rect::NTuple{4,Int}         # image area during a drag: top, left, bottom, right pixel edges
     press::Union{Nothing,Tuple{Int,NTuple{2,Float64}}}   # (panel, screen position) of a left press
     message::String
+    overlay::Overlay
 end
-LayersView() = LayersView(LayerPanel[], -1, "", Ref(false), nothing, (0.0, 0.0), nothing, "")
+LayersView() = LayersView(LayerPanel[], -1, "", nothing, (0, 0, 0, 0), nothing, "", Overlay())
 
-# Where the picked point falls in panel `i`, as (row, col), or nothing.
+# Where the marker falls in panel `i`, as (row, col), or nothing.
 function picked_in_panel(st, i)
     p, lv = st.view.picked, st.view.layers
     (p === nothing || get(p, :spec, "") != st.spec.path || isempty(lv.panels)) && return nothing
@@ -116,25 +129,62 @@ function picked_in_panel(st, i)
 end
 
 """
-Pick the point under a click on panel `i`. Picks are stored in first-layer
-pixels, like picks on the maps, so the light curve and probe can use them.
+Place the marker under a click on panel `i`. The marker is stored in
+first-layer pixels, like a marker placed on an image, so the light curve and
+probe can use it.
 """
 function pick_from_layer!(st, i, row, col)
     lv = st.view.layers
     first, p = lv.panels[1], lv.panels[i]
     first.grid === nothing && return
     m = i == 1 ? (row, col) : map_pixel(p.grid, first.grid, row, col)
-    if m === nothing || !(-0.5 <= m[1] < first.grid.H - 0.5 && -0.5 <= m[2] < first.grid.W - 0.5)
-        lv.message = "That point is outside layer 1, so the light curve and probe cannot use it."
-        return
-    end
-    lv.message = ""
-    r, c = round(Int, m[1]), round(Int, m[2])
+    lv.message = set_marker!(st, m) ? "" : "Outside layer 1."
+end
+
+"""
+    set_marker!(st, (row, col)) -> Bool
+
+Move the marker to a fractional (row, col) of the first terrain layer of the
+current settings. Returns false when the point is outside that layer.
+"""
+function set_marker!(st, m)
+    grid = first_grid(st)
+    grid === nothing && return false
+    (m === nothing || !(-0.5 <= m[1] < grid.H - 0.5 && -0.5 <= m[2] < grid.W - 0.5)) && return false
+    # At a cell boundary, take the cell with the larger index, as the light-curve command does.
+    r, c = floor(Int, m[1] + 0.5), floor(Int, m[2] + 0.5)
     origin = output_origin(st.spec.cfg)
     o = output_size(st.spec.cfg)
-    size = o === nothing ? (first.grid.H, first.grid.W) : (o.rows, o.cols)
+    size = o === nothing ? (grid.H, grid.W) : (o.rows, o.cols)
     st.view.picked = (; row = r - origin[1], col = c - origin[2], dem_row = r, dem_col = c,
                       image = "", size, spec = st.spec.path)
+    return true
+end
+
+function first_grid(st)
+    st.spec.cfg === nothing && return nothing
+    layers = get(st.spec.cfg, "layers", Any[])
+    isempty(layers) ? nothing : layer_grid(layers[1])
+end
+
+# True when an image has the size and position of the current image area, so
+# a marker placed on it is also a point of the current terrain.
+function image_matches_preset(st, im)
+    st.spec.cfg === nothing && return false
+    o = output_size(st.spec.cfg)
+    return o !== nothing && im.size == (o.rows, o.cols) && im.origin == output_origin(st.spec.cfg)
+end
+
+"""
+    marker_location(st) -> NamedTuple or nothing
+
+The marker as a point of the first terrain layer: pixel, projected x and y in
+metres, and latitude and longitude, as the light-curve command computes them.
+"""
+function marker_location(st)
+    p, grid = st.view.picked, first_grid(st)
+    (p === nothing || grid === nothing) && return nothing
+    return LC.pixel_location(grid, p.dem_row, p.dem_col)
 end
 
 function overview_key(layer)
@@ -198,7 +248,8 @@ function read_overview(key)
     read!(overview_prefix(key) * ".f32", data)
     image = MapImage("overview", meta["path"], :overview, data,
         z -> isfinite(z) ? @sprintf("elevation ≈ %.0f m (1/%d overview)", z, meta["factor"]) : "no data",
-        texture_from(shaded(data, meta["factor"])), size(data), (0, 0), Tuple{RGBA{N0f8},String}[])
+        texture_from(shaded(data, meta["factor"])), size(data), (0, 0), Tuple{RGBA{N0f8},String}[],
+        z -> RGBA{N0f8}(0, 0, 0, 1))
     return image, meta["factor"]
 end
 
@@ -218,12 +269,12 @@ function load_detail!(panel::LayerPanel)
     return true
 end
 
-# Region three times the size of the output area, snapped to 512-pixel steps
+# Region three times the size of the image area, snapped to 512-pixel steps
 # so that small window edits reuse the cached detail; nothing when the
 # overview is already fine enough there.
 function detail_region(p::LayerPanel)
     p.grid === nothing && return nothing
-    k = findfirst(o -> o.label == "output area", p.outlines)
+    k = findfirst(o -> o.label == "image area", p.outlines)
     k === nothing && return nothing
     rs, cs = first.(p.outlines[k].points), last.(p.outlines[k].points)
     h, w = maximum(rs) - minimum(rs), maximum(cs) - minimum(cs)
@@ -251,7 +302,7 @@ function rebuild_outlines!(lv::LayersView, layers)
         p.grid === nothing && continue
         if out_rect !== nothing
             pts = project_rect(first.grid, p.grid, out_rect...)
-            isempty(pts) || push!(p.outlines, Outline("output area", OUTPUT_COLOR, pts, true))
+            isempty(pts) || push!(p.outlines, Outline("image area", OUTPUT_COLOR, pts, true))
         end
         w = get(p.layer, "window", nothing)
         if w !== nothing && i > 1
@@ -282,9 +333,9 @@ function sync_layers!(app, st)
         key = overview_key(layer)
         reuse = findfirst(p -> p.overview_key == key && !isempty(key), old)
         p = reuse === nothing ?
-            LayerPanel(layer, nothing, nothing, 1, key, nothing, (0, 0, 0, 0), 1, Outline[], true, 1.0, (0.0, 0.0), "") :
+            LayerPanel(layer, nothing, nothing, 1, key, nothing, (0, 0, 0, 0), 1, Outline[], :area, 1.0, (0.0, 0.0), "") :
             old[reuse]
-        reuse === nothing || (deleteat!(old, reuse); same_spec || (p.fit = true))
+        reuse === nothing || (deleteat!(old, reuse); same_spec || (p.fit = :area))
         p.layer = layer
         p.grid = layer_grid(layer)
         p.error = p.grid === nothing ? (isempty(get(layer, "path", "")) ? "No file selected." : "Cannot read this file.") : ""
@@ -360,12 +411,11 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
     if p.grid !== nothing
         CImGui.TextDisabled(replace(@sprintf("%d × %d pixels, %.4g m", p.grid.H, p.grid.W, p.grid.pixel_size_m), "%" => "%%"))
         CImGui.SameLine()
-        CImGui.SmallButton("whole##$i") && (p.fit = true)
+        CImGui.SmallButton("whole##$i") && (p.fit = :whole)
         CImGui.SameLine()
-        zoom_out = CImGui.SmallButton("output area##$i")
+        CImGui.SmallButton("area##$i") && (p.fit = :area)
     else
         CImGui.TextDisabled(" ")
-        zoom_out = false
     end
     under = CImGui.ImVec2(size[1], size[2] - 2 * CImGui.GetFrameHeightWithSpacing())
     vp = draw_canvas!(app, Symbol("dem", i); size = under, clear_color = (0.1, 0.1, 0.12, 1.0)) do vp
@@ -373,14 +423,13 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
             return
         end
         H, W = p.grid.H, p.grid.W
-        p.fit && fit_to!(p, vp.width, vp.height, -0.5, -0.5, H - 0.5, W - 0.5; margin = 0.02)
-        if zoom_out
-            out = findfirst(o -> o.label == "output area", p.outlines)
-            if out !== nothing
-                rs, cs = first.(p.outlines[out].points), last.(p.outlines[out].points)
-                fit_to!(p, vp.width, vp.height, minimum(rs), minimum(cs), maximum(rs), maximum(cs); margin = 0.6)
-                p.fit = false
-            end
+        # The fit is kept while the panel resizes, until the user zooms or pans.
+        out = p.fit == :area ? findfirst(o -> o.label == "image area", p.outlines) : nothing
+        if out !== nothing
+            rs, cs = first.(p.outlines[out].points), last.(p.outlines[out].points)
+            fit_to!(p, vp.width, vp.height, minimum(rs), minimum(cs), maximum(rs), maximum(cs); margin = 0.6)
+        elseif p.fit != :none
+            fit_to!(p, vp.width, vp.height, -0.5, -0.5, H - 0.5, W - 0.5; margin = 0.02)
         end
         X(c) = p.pan[1] + (c + 0.5) * p.zoom
         Y(r) = p.pan[2] + (r + 0.5) * p.zoom
@@ -395,55 +444,66 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
             Mirage.fillcolor((0.25, 0.25, 0.28, 1.0))
             Mirage.fillrect(X(-0.5), Y(-0.5), W * p.zoom, H * p.zoom)
         end
+        im = i == 1 ? lv.overlay.image : nothing
+        if im !== nothing
+            (r0, c0), (h, w) = im.origin, im.size
+            # drawimage tints the texture with the fill colour.
+            Mirage.fillcolor((1.0, 1.0, 1.0, Float64(lv.overlay.opacity[])))
+            Mirage.drawimage(X(c0 - 0.5), Y(r0 - 0.5), w * p.zoom, h * p.zoom, im.texture)
+        end
+        # Layer 1 shows the image area as a box with handles instead of an outline.
         for o in p.outlines
+            i == 1 && o.label == "image area" && continue
             stroke_outline(o, X, Y)
         end
-        if i == 1 && lv.drag !== nothing
-            (r0, c0), (r1, c1) = lv.drag, lv.drag_end
-            stroke_outline(Outline("", WINDOW_COLOR, [(r0, c0), (r0, c1), (r1, c1), (r1, c0)], false), X, Y)
-        end
+        i == 1 && draw_area_box(current_area(lv, p), E -> X(E - 0.5), E -> Y(E - 0.5), lv.edit !== nothing)
         q = picked_in_panel(st, i)
         q === nothing || pick_marker(X(q[2]), Y(q[1]), p.zoom)
     end
     p.grid === nothing && (CImGui.EndGroup(); return)
 
-    # Zoom with the wheel; pan with the right button (or the left when not drawing).
+    # Zoom with the wheel. On layer 1, a drag that starts on a handle of the
+    # image area resizes or moves it; other drags pan.
     if vp.hovered && vp.scroll_y != 0
         f = 1.2^vp.scroll_y
         mx, my = vp.mouse_rel
         p.pan = (mx - (mx - p.pan[1]) * f, my - (my - p.pan[2]) * f)
         p.zoom *= f
-        p.fit = false
+        p.fit = :none
     end
-    drawing = i == 1 && lv.draw_window[]
-    for button in (drawing ? (1,) : (0, 1))
+    col = (vp.mouse_rel[1] - p.pan[1]) / p.zoom - 0.5
+    row = (vp.mouse_rel[2] - p.pan[2]) / p.zoom - 0.5
+    handle = i == 1 && lv.edit === nothing && vp.hovered ?
+        area_handle(area_rect(p), E -> p.pan[1] + E * p.zoom, E -> p.pan[2] + E * p.zoom, vp.mouse_rel...) : nothing
+    if handle !== nothing
+        CImGui.SetMouseCursor(HANDLE_CURSORS[handle])
+        # Keep the view still while the area changes under it.
+        CImGui.IsMouseClicked(0) && (lv.edit = (; handle, start = (row + 0.5, col + 0.5), rect = area_rect(p)); p.fit = :none)
+    end
+    if i == 1 && lv.edit !== nothing
+        CImGui.SetMouseCursor(HANDLE_CURSORS[lv.edit.handle])
+        lv.edit_rect = drag_area(lv.edit, (row + 0.5, col + 0.5), p.grid.H, p.grid.W)
+        if CImGui.IsMouseReleased(0)
+            lv.edit_rect == lv.edit.rect || set_image_area!(st, p, lv.edit_rect)
+            lv.edit = nothing
+        end
+    end
+    for button in (0, 1)
+        button == 0 && lv.edit !== nothing && continue
         if (vp.hovered || vp.active) && CImGui.IsMouseDragging(button)
             d = CImGui.GetMouseDragDelta(button)
             p.pan = (p.pan[1] + d.x, p.pan[2] + d.y)
             CImGui.ResetMouseDragDelta(button)
-            p.fit = false
+            p.fit = :none
         end
     end
-    col = (vp.mouse_rel[1] - p.pan[1]) / p.zoom - 0.5
-    row = (vp.mouse_rel[2] - p.pan[2]) / p.zoom - 0.5
-    if drawing
-        if vp.clicked
-            lv.drag = (row, col)
-        end
-        lv.drag === nothing || (lv.drag_end = (row, col))
-        if lv.drag !== nothing && CImGui.IsMouseReleased(0)
-            set_output_window!(st, p, lv.drag, lv.drag_end)
-            lv.drag = nothing
-        end
-    else
-        # A left press and release without moving picks the point. Panning
-        # resets ImGui's drag delta, so compare the screen positions instead.
-        vp.hovered && CImGui.IsMouseClicked(0) && (lv.press = (i, vp.mouse_pos))
-        if lv.press !== nothing && lv.press[1] == i && CImGui.IsMouseReleased(0)
-            moved = hypot(vp.mouse_pos[1] - lv.press[2][1], vp.mouse_pos[2] - lv.press[2][2])
-            moved < 4 && vp.hovered && pick_from_layer!(st, i, row, col)
-            lv.press = nothing
-        end
+    # A left press and release without moving places the marker. Panning
+    # resets ImGui's drag delta, so compare the screen positions instead.
+    vp.hovered && handle === nothing && CImGui.IsMouseClicked(0) && (lv.press = (i, vp.mouse_pos))
+    if lv.press !== nothing && lv.press[1] == i && CImGui.IsMouseReleased(0)
+        moved = hypot(vp.mouse_pos[1] - lv.press[2][1], vp.mouse_pos[2] - lv.press[2][2])
+        moved < 4 && vp.hovered && pick_from_layer!(st, i, row, col)
+        lv.press = nothing
     end
     vp.hovered && CImGui.IsMouseClicked(1) && (st.view.picked = nothing)
     if vp.hovered && -0.5 <= row < p.grid.H - 0.5 && -0.5 <= col < p.grid.W - 0.5
@@ -460,6 +520,13 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
             z = p.overview.values[clamp(r ÷ p.factor + 1, 1, end), clamp(c ÷ p.factor + 1, 1, end)]
             CImGui.TextUnformatted(p.overview.describe(z))
         end
+        im = i == 1 ? lv.overlay.image : nothing
+        if im !== nothing && im.values !== nothing
+            rr, cc = r - im.origin[1] + 1, c - im.origin[2] + 1
+            if 1 <= rr <= im.size[1] && 1 <= cc <= im.size[2]
+                CImGui.TextUnformatted(replace(im.describe(im.values[rr, cc]), "%" => "%%"))
+            end
+        end
         for (j, q) in enumerate(lv.panels)
             (j == i || q.grid === nothing) && continue
             m = map_pixel(p.grid, q.grid, row, col)
@@ -467,58 +534,181 @@ function draw_layer_panel!(app, st, i, p::LayerPanel, size)
             inside = -0.5 <= m[1] < q.grid.H - 0.5 && -0.5 <= m[2] < q.grid.W - 0.5
             colored(inside ? DIM : WARN, @sprintf("layer %d pixel  row %.0f, col %.0f%s", j, m[1], m[2], inside ? "" : " (outside)"))
         end
-        CImGui.TextUnformatted(drawing ? "drag to draw the output window" :
-                               "click to pick this point; right-click to clear the pick")
+        if i == 1 && lv.edit !== nothing
+            t, l, b, r = lv.edit_rect
+            colored(OUTPUT_TEXT, "area $(r - l) × $(b - t) at row $t, col $l")
+        end
         CImGui.EndTooltip()
     end
     CImGui.EndGroup()
 end
 
-function set_output_window!(st, p::LayerPanel, a, b)
-    s = st.spec
-    r0 = clamp(round(Int, min(a[1], b[1])), 0, p.grid.H - 1)
-    c0 = clamp(round(Int, min(a[2], b[2])), 0, p.grid.W - 1)
-    r1 = clamp(round(Int, max(a[1], b[1])), r0, p.grid.H - 1)
-    c1 = clamp(round(Int, max(a[2], b[2])), c0, p.grid.W - 1)
-    (r1 - r0 < 1 || c1 - c0 < 1) && return
-    p.layer["window"] = [r0, c0, r1 - r0 + 1, c1 - c0 + 1]
-    s.generation += 1
-    changed!(s)
+# ─── Image-area box ───────────────────────────────────────────────────────
+#
+# The image area is edited on layer 1 like a selection in a paint program:
+# drag a side or corner to resize it, or the centre square to move it. It is
+# kept in pixel edges (top, left, bottom, right): the window
+# [row, col, height, width] covers edges row to row + height.
+
+const OUTPUT_TEXT = (0.4f0, 0.9f0, 1f0, 1f0)
+const HANDLE_CURSORS = Dict(
+    :n => CImGui.ImGuiMouseCursor_ResizeNS, :s => CImGui.ImGuiMouseCursor_ResizeNS,
+    :e => CImGui.ImGuiMouseCursor_ResizeEW, :w => CImGui.ImGuiMouseCursor_ResizeEW,
+    :nw => CImGui.ImGuiMouseCursor_ResizeNWSE, :se => CImGui.ImGuiMouseCursor_ResizeNWSE,
+    :ne => CImGui.ImGuiMouseCursor_ResizeNESW, :sw => CImGui.ImGuiMouseCursor_ResizeNESW,
+    :move => CImGui.ImGuiMouseCursor_ResizeAll)
+const GRAB = 7.0        # pixels from a side or corner that still grab it
+
+function area_rect(p::LayerPanel)
+    w = get(p.layer, "window", nothing)
+    r0, c0, h, wd = w === nothing ? (0, 0, p.grid.H, p.grid.W) : Int.(w)
+    return (r0, c0, r0 + h, c0 + wd)
+end
+
+current_area(lv, p) = lv.edit === nothing ? area_rect(p) : lv.edit_rect
+
+# The handle under the mouse at (mx, my), given screen positions of column and row edges.
+function area_handle((t, l, b, r), X, Y, mx, my)
+    x0, x1, y0, y1 = X(l), X(r), Y(t), Y(b)
+    (x0 - GRAB <= mx <= x1 + GRAB && y0 - GRAB <= my <= y1 + GRAB) || return nothing
+    # Sides and corners first, so a box that is small on screen can still be resized.
+    v = abs(my - y0) <= GRAB ? "n" : abs(my - y1) <= GRAB ? "s" : ""
+    h = abs(mx - x0) <= GRAB ? "w" : abs(mx - x1) <= GRAB ? "e" : ""
+    isempty(v * h) || return Symbol(v * h)
+    abs(mx - (x0 + x1) / 2) <= GRAB + 2 && abs(my - (y0 + y1) / 2) <= GRAB + 2 && return :move
+    return nothing
+end
+
+# The area after dragging `edit.handle` from `edit.start` to `now` (both in
+# edges), kept inside the grid and at least one pixel in size.
+function drag_area(edit, now, H, W)
+    t, l, b, r = edit.rect
+    dr, dc = round(Int, now[1] - edit.start[1]), round(Int, now[2] - edit.start[2])
+    if edit.handle == :move
+        dr = clamp(dr, -t, H - b)
+        dc = clamp(dc, -l, W - r)
+        return (t + dr, l + dc, b + dr, r + dc)
+    end
+    name = String(edit.handle)
+    'n' in name && (t = clamp(t + dr, 0, b - 1))
+    's' in name && (b = clamp(b + dr, t + 1, H))
+    'w' in name && (l = clamp(l + dc, 0, r - 1))
+    'e' in name && (r = clamp(r + dc, l + 1, W))
+    return (t, l, b, r)
+end
+
+function draw_area_box((t, l, b, r), X, Y, active)
+    x0, x1, y0, y1 = X(l), X(r), Y(t), Y(b)
+    Mirage.strokecolor((OUTPUT_COLOR..., 1.0))
+    Mirage.strokewidth(active ? 3 : 4)
+    Mirage.beginpath()
+    Mirage.moveto(x0, y0); Mirage.lineto(x1, y0); Mirage.lineto(x1, y1); Mirage.lineto(x0, y1)
+    Mirage.closepath()
+    Mirage.stroke()
+    xm, ym = (x0 + x1) / 2, (y0 + y1) / 2
+    for (x, y) in ((x0, y0), (xm, y0), (x1, y0), (x1, ym), (x1, y1), (xm, y1), (x0, y1), (x0, ym), (xm, ym))
+        Mirage.fillcolor((0.0, 0.0, 0.0, 0.9))
+        Mirage.fillrect(x - 5, y - 5, 10, 10)
+        Mirage.fillcolor((x, y) == (xm, ym) ? (OUTPUT_COLOR..., 1.0) : (1.0, 1.0, 1.0, 1.0))
+        Mirage.fillrect(x - 3.5, y - 3.5, 7, 7)
+    end
+end
+
+# Store the image area as the first layer's window; the whole layer needs none.
+function set_image_area!(st, p::LayerPanel, (t, l, b, r))
+    if (t, l, b, r) == (0, 0, p.grid.H, p.grid.W)
+        delete!(p.layer, "window")
+    else
+        p.layer["window"] = [t, l, b - t, r - l]
+    end
+    st.spec.generation += 1
+    changed!(st.spec)
+end
+
+# ─── Rendered images over layer 1 ─────────────────────────────────────────
+
+const OVERLAY_KINDS = ("none", "sun", "DSN")
+overlay_kind(o::Overlay) = ("", "sun", "dsn")[o.kind[] + 1]
+
+# List the frames of the current render (every two seconds, so a running
+# render adds them) and load the chosen one.
+function update_overlay!(st)
+    o = st.view.layers.overlay
+    kind = overlay_kind(o)
+    if isempty(kind)
+        o.image === nothing || (free!(o.image); o.image = nothing)
+        return
+    end
+    dir = render_dir(st)
+    if dir != o.dir || time() - o.listed > 2
+        shown = isempty(o.tags) || dir != o.dir ? nothing : o.tags[clamp(o.index[] + 1, 1, end)]
+        o.dir = dir
+        o.tags = sort(union(frame_tags(o.dir, "sun"), frame_tags(o.dir, "dsn")))
+        o.listed = time()
+        k = shown === nothing ? nothing : findfirst(==(shown), o.tags)
+        o.index[] = k === nothing ? 0 : k - 1
+    end
+    o.index[] = clamp(o.index[], 0, max(length(o.tags) - 1, 0))
+    path = isempty(o.tags) ? "" : frame_path(o.dir, kind, o.tags[o.index[] + 1])
+    o.image !== nothing && o.image.path == path && return
+    o.image === nothing || (free!(o.image); o.image = nothing)
+    isfile(path) || return
+    try
+        o.image = load_map_image(path; origin = manifest_origin(o.dir))
+    catch e
+        @warn "Cannot read $path" exception = e
+    end
+end
+
+function overlay_controls!(st)
+    o = st.view.layers.overlay
+    CImGui.AlignTextToFramePadding()
+    CImGui.TextUnformatted("Rendered")
+    for (k, name) in enumerate(OVERLAY_KINDS)
+        CImGui.SameLine()
+        CImGui.RadioButton("$name##overlay", o.kind[] == k - 1) && (o.kind[] = k - 1)
+    end
+    update_overlay!(st)
+    isempty(overlay_kind(o)) && return
+    CImGui.SameLine(0, 16)
+    if isempty(o.tags)
+        colored(DIM, "none rendered yet")
+        return
+    end
+    CImGui.SetNextItemWidth(260)
+    time_text = string(tag_time(o.tags[o.index[] + 1]))
+    CImGui.SliderInt("##overlay_time", o.index, 0, length(o.tags) - 1, time_text)
+    CImGui.SameLine()
+    CImGui.SetNextItemWidth(100)
+    CImGui.SliderFloat("opacity##overlay", o.opacity, 0f0, 1f0, "%.2f")
+    o.image === nothing && (CImGui.SameLine(); colored(DIM, "no $(OVERLAY_KINDS[o.kind[] + 1]) image at this time"))
 end
 
 function draw_layers!(app, st)
     lv = st.view.layers
     sync_layers!(app, st)
     if isempty(lv.panels)
-        note("This spec has no terrain layers.")
+        note("This preset has no terrain layers.")
         return
     end
-    CImGui.Checkbox("Drag on layer 1 to set the output window", lv.draw_window)
-    help("When on, dragging with the left button on the first layer replaces its window. " *
-         "Pan with the right button. The form updates; Save writes the file.")
-    CImGui.SameLine()
-    for (label, col) in (("output area", OUTPUT_COLOR), ("window", WINDOW_COLOR),
-                         ("other layers' extents", LAYER_COLORS[1]))
-        CImGui.SameLine(0, 14)
-        CImGui.ColorButton("##lg$label", (Float32.(col)..., 1f0), CImGui.ImGuiColorEditFlags_NoTooltip, CImGui.ImVec2(14, 14))
-        CImGui.SameLine(0, 4)
-        CImGui.TextUnformatted(label)
-    end
+    overlay_controls!(st)
+    # Marker, warnings, and overview progress share the rendered-images row.
     pk = st.view.picked
     if pk !== nothing && get(pk, :spec, "") == st.spec.path
-        colored(PICK_TEXT, "picked layer 1 col $(pk.dem_col), row $(pk.dem_row)")
+        CImGui.SameLine(0, 24)
+        colored(PICK_TEXT, "marker col $(pk.dem_col), row $(pk.dem_row)")
         CImGui.SameLine()
-        CImGui.SmallButton("Clear##layerpick") && (st.view.picked = nothing)
+        CImGui.SmallButton("Remove##layerpick") && (st.view.picked = nothing)
     end
-    isempty(lv.message) || colored(WARN, lv.message)
+    isempty(lv.message) || (CImGui.SameLine(0, 16); colored(WARN, lv.message))
     pending = count(p -> p.overview === nothing && p.grid !== nothing, lv.panels)
-    pending > 0 && colored(DIM, "Building $(pending) DEM overview(s) in the background; outlines are already exact.")
+    pending > 0 && (CImGui.SameLine(0, 16); colored(DIM, "loading $(pending) overview(s)..."))
     avail = CImGui.GetContentRegionAvail()
     n = length(lv.panels)
     gap = 8.0
     w = (avail.x - gap * (n - 1)) / n
     for (i, p) in enumerate(lv.panels)
         i > 1 && CImGui.SameLine(0, gap)
-        draw_layer_panel!(app, st, i, p, (w, avail.y - CImGui.GetFrameHeightWithSpacing() * (pending > 0 ? 1 : 0)))
+        draw_layer_panel!(app, st, i, p, (w, avail.y))
     end
 end

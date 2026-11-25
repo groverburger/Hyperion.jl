@@ -1,5 +1,5 @@
-# Central view: shows map images (sun/DSN PNGs) with zoom, pan, and a
-# per-pixel readout, or a time-series plot of a CSV file.
+# Central view: shows images (sun and DSN frames, PNG or GeoTIFF) with zoom,
+# pan, and a per-pixel readout, or a plot of a CSV file.
 
 mutable struct MapImage
     label::String
@@ -11,6 +11,7 @@ mutable struct MapImage
     size::Tuple{Int,Int}             # (rows, columns)
     origin::Tuple{Int,Int}           # first-DEM (row, col) of output pixel (0, 0)
     legend::Vector{Tuple{RGBA{N0f8},String}}
+    color::Function                  # value -> RGBA{N0f8}, for saving as PNG
 end
 
 swatch(r, g, b) = RGBA{N0f8}(r / 255, g / 255, b / 255, 1)
@@ -35,6 +36,16 @@ function draw_legend(legend)
     end
 end
 
+# Positions of a body over time, for the horizon panorama. Azimuths are degrees
+# counterclockwise from east, as in Hyperion's CSV files.
+struct SkyTrack
+    name::String
+    azimuth::Vector{Float64}
+    elevation::Vector{Float64}
+    fraction::Union{Nothing,Vector{Float64}}   # visible solar-disk fraction, sun only
+    disk::Bool                                  # draw the solar disk at its true size
+end
+
 mutable struct CsvPlot
     path::String
     title::String
@@ -42,6 +53,13 @@ mutable struct CsvPlot
     names::Vector{String}
     columns::Vector{Vector{Float64}}
     shown::Vector{Base.RefValue{Bool}}
+    horizon::Union{Nothing,NamedTuple}          # (azimuth, elevation, distance) of the terrain horizon
+    tracks::Vector{SkyTrack}
+    hover::Int                                  # sample under the mouse in either panel; 0 if none
+    pinned::Int                                 # sample chosen by a click; 0 if none
+    center::Float64                             # panorama: bearing at the centre, degrees
+    span::Float64                               # panorama: bearings shown, degrees
+    press::Union{Nothing,Tuple{Float64,Float64}}   # panorama: where a left press started
 end
 
 mutable struct View
@@ -89,25 +107,44 @@ describe_dsn(v) = v == 0 ? "DSN 0: Earth centre at or below the terrain horizon"
     @sprintf("DSN %d: Earth centre %.1f° above the terrain horizon", v, v / 10)
 describer(kind) = kind == :sun ? describe_sun : kind == :dsn ? describe_dsn : v -> "value $v"
 
+# Display colours of the sun and DSN palettes; DSN values from 7.1° up are
+# transparent, as in the PNG files.
+function palette_color(kind)
+    P = kind == :sun ? Hyperion.SUN_PALETTE : Hyperion.DSN_PALETTE
+    clear_from = kind == :sun ? 256 : Hyperion.DSN_TRANSPARENT_FROM
+    return v -> RGBA{N0f8}(P[Int(v) + 1, 1] / 255, P[Int(v) + 1, 2] / 255, P[Int(v) + 1, 3] / 255,
+                           v >= clear_from ? 0 : 1)
+end
+const AG = Hyperion.ArchGDAL
+is_tiff(path) = lowercase(splitext(path)[2]) in (".tif", ".tiff")
+
 # No OpenGL context exists in headless use (scripts and checks).
 texture_from(rgba::Matrix{RGBA{N0f8}}) = HEADLESS[] ? UInt32(0) : Mirage.load_texture(rgba)
 
 """
     load_map_image(path; origin = (0, 0)) -> MapImage
 
-Read a sun or DSN PNG. Palette PNGs keep the stored values for the readout;
-older RGB files only provide colours.
+Read a sun or DSN image. GeoTIFFs and palette PNGs keep the stored values for
+the readout; older RGB PNGs only provide colours.
 """
 function load_map_image(path::AbstractString; origin = (0, 0), label = basename(path))
-    img, values = read_map_png(path)
+    img, values = read_map_image(path)
     kind = image_kind(path)
     rgba = Matrix{RGBA{N0f8}}(RGBA{N0f8}.(img))
+    color = kind in (:sun, :dsn) ? palette_color(kind) : (v -> RGBA{N0f8}(0, 0, 0, 1))
     return MapImage(label, String(path), kind, values, describer(kind), texture_from(rgba), size(img), origin,
-                    palette_legend(kind))
+                    palette_legend(kind), color)
 end
 
 # Decoded image and its stored values (nothing for RGB DSN files).
-function read_map_png(path::AbstractString)
+function read_map_image(path::AbstractString)
+    if is_tiff(path)
+        values = AG.read(path) do ds
+            Matrix{UInt8}(permutedims(AG.read(AG.getband(ds, 1))))   # GDAL reads (columns, rows)
+        end
+        color = palette_color(image_kind(path) == :dsn ? :dsn : :sun)
+        return color.(values), values
+    end
     img = FileIO.load(path)
     values = hasproperty(img, :index) ? Matrix{UInt8}(img.index) : nothing
     if values === nothing && image_kind(path) == :sun
@@ -126,7 +163,7 @@ function value_image(label, values::AbstractMatrix, color::Function; describe = 
                      kind = :other, origin = (0, 0), path = "", legend = Tuple{RGBA{N0f8},String}[])
     rgba = RGBA{N0f8}[color(x) for x in values]
     return MapImage(String(label), String(path), kind, values, describe, texture_from(rgba), size(values), origin,
-                    legend)
+                    legend, color)
 end
 
 function show_images!(v::View, title, paths; origin = (0, 0), keep_view = false)
@@ -182,10 +219,12 @@ function draw_images!(app, st)
         v.pan = (0.0, 0.0)
     end
     im = v.images[v.current[] + 1]
+    CImGui.SameLine()
+    save_image_button!(st, im)
     picked_here = v.picked !== nothing && v.picked.size == im.size
     if picked_here
         CImGui.SameLine(0, 16)
-        colored(PICK_TEXT, "picked col $(v.picked.col), row $(v.picked.row)")
+        colored(PICK_TEXT, "marker col $(v.picked.col), row $(v.picked.row)")
         CImGui.SameLine()
         CImGui.SmallButton("Clear##pick") && (v.picked = nothing)
     end
@@ -256,7 +295,7 @@ function draw_images!(app, st)
             v.hover = (; row, col, dem_row = row + im.origin[1], dem_col = col + im.origin[2],
                         image = im.path, size = im.size, spec = "")
             CImGui.BeginTooltip()
-            CImGui.TextUnformatted("output pixel  col $col, row $row")
+            CImGui.TextUnformatted("image pixel   col $col, row $row")
             CImGui.TextUnformatted("first DEM     col $(col + im.origin[2]), row $(row + im.origin[1])")
             # Every loaded layer of the same size, current one first.
             for other in vcat(im, filter(o -> o !== im && o.size == im.size, v.images))
@@ -264,10 +303,10 @@ function draw_images!(app, st)
                 txt = other.describe(other.values[row + 1, col + 1])
                 other === im ? CImGui.TextUnformatted(txt) : colored(DIM, txt)
             end
-            CImGui.TextUnformatted("click to pick this pixel; right-click to clear the pick")
+            CImGui.TextUnformatted("click to place the marker here; right-click to remove it")
             CImGui.EndTooltip()
             if CImGui.IsMouseReleased(0) && CImGui.GetMouseDragDelta(0).x == 0
-                v.picked = v.hover
+                v.picked = merge(v.hover, (; spec = image_matches_preset(st, im) ? st.spec.path : ""))
             end
             CImGui.IsMouseClicked(1) && (v.picked = nothing)
         end
@@ -304,7 +343,27 @@ function load_csv_plot(path::AbstractString; title = basename(path), show = Stri
     names = String.(header[keep])
     shown = [Ref(n in show) for n in names]
     any(s -> s[], shown) || isempty(shown) || (shown[1][] = true)
-    return CsvPlot(String(path), String(title), times, names, cols[keep], shown)
+    column(name) = (j = findfirst(==(name), header); j === nothing ? nothing : cols[j])
+    tracks = SkyTrack[]
+    for (prefix, label, frac) in (("sun_", "Sun", "sun_fraction"), ("rover_to_sun_", "Sun", ""),
+                                  ("rover_to_earth_", "Earth", ""))
+        az, el = column(prefix * "azimuth_deg"), column(prefix * "elevation_deg")
+        (az === nothing || el === nothing) && continue
+        push!(tracks, SkyTrack(label, az, el, isempty(frac) ? nothing : column(frac), label == "Sun"))
+    end
+    return CsvPlot(String(path), String(title), times, names, cols[keep], shown,
+                   load_horizon(horizon_file(path)), tracks, 0, 0, 180.0, 360.0, nothing)
+end
+
+# The light-curve command writes the horizon profile next to the curve.
+horizon_file(csv) = splitext(csv)[1] * "_horizon.csv"
+
+function load_horizon(path)
+    isfile(path) || return nothing
+    rows = [split(l, ',') for l in readlines(path)[2:end] if !isempty(strip(l))]
+    num(x) = something(tryparse(Float64, strip(x)), NaN)
+    return (; azimuth = [num(r[1]) for r in rows], elevation = [num(r[2]) for r in rows],
+            distance = [length(r) >= 3 ? num(r[3]) : NaN for r in rows])
 end
 
 function show_plot!(v::View, plot::CsvPlot)
@@ -321,8 +380,34 @@ function draw_plot!(app, st)
     CImGui.TextUnformatted(shortpath(p.path) * "  ($(length(p.times)) samples)")
     CImGui.SameLine()
     file_buttons(p.path; id = "plot")
-    right_edge = CImGui.GetCursorScreenPos().x + CImGui.GetContentRegionAvail().x
-    for (i, name) in enumerate(p.names)
+    if p.pinned > 0
+        CImGui.SameLine(0, 16)
+        colored(PICK_TEXT, "marked " * Dates.format(p.times[p.pinned], "yyyy-mm-dd HH:MM") * " UTC")
+        CImGui.SameLine()
+        CImGui.SmallButton("Clear##pin") && (p.pinned = 0)
+    end
+    avail = CImGui.GetContentRegionAvail()
+    if isempty(p.tracks)
+        p.hover = draw_series!(app, p, (avail.x, avail.y))
+        return
+    end
+    # The panorama above the time series. A light curve shows only the
+    # visible fraction below it, so it needs no column legend.
+    light_curve = any(t -> t.fraction !== nothing, p.tracks)
+    pano_h = round(avail.y * (light_curve ? 0.66 : 0.55))
+    hover = draw_panorama!(app, p, (avail.x, pano_h))
+    h2 = draw_series!(app, p, (avail.x, avail.y - pano_h - 6); legend = !light_curve)
+    p.hover = hover > 0 ? hover : h2
+end
+
+# Time series of the shown columns. Returns the sample under the mouse, or 0.
+function draw_series!(app, p::CsvPlot, size; legend = true)
+    CImGui.BeginGroup()
+    top_y = CImGui.GetCursorScreenPos().y
+    right_edge = CImGui.GetCursorScreenPos().x + size[1]
+    legend || CImGui.TextDisabled(join([n == "sun_fraction" ? "Visible fraction of the solar disk" : n
+                                        for (n, on) in zip(p.names, p.shown) if on[]], ", "))
+    for (i, name) in enumerate(legend ? p.names : String[])
         # Wrap the legend when the next checkbox would not fit.
         w = CImGui.CalcTextSize(name).x + CImGui.GetFrameHeight() + 16
         if i > 1
@@ -334,7 +419,7 @@ function draw_plot!(app, st)
         CImGui.Checkbox(name, p.shown[i])
         CImGui.PopStyleColor()
     end
-    isempty(p.times) && return note("No samples.")
+    isempty(p.times) && (note("No samples."); CImGui.EndGroup(); return 0)
 
     t0 = first(p.times)
     secs = [Dates.value(t - t0) / 1000 for t in p.times]
@@ -348,7 +433,8 @@ function draw_plot!(app, st)
     yhi += pad
     left, right, top, bottom = 70.0, 20.0, 10.0, 34.0
 
-    vp = draw_canvas!(app, :plot; clear_color = (0.12, 0.12, 0.14, 1.0)) do vp
+    canvas = CImGui.ImVec2(size[1], max(size[2] - (CImGui.GetCursorScreenPos().y - top_y), 60))
+    vp = draw_canvas!(app, :plot; size = canvas, clear_color = (0.12, 0.12, 0.14, 1.0)) do vp
         pw, ph = vp.width - left - right, vp.height - top - bottom
         X(s) = left + s / xmax * pw
         Y(y) = top + (yhi - y) / (yhi - ylo) * ph
@@ -366,6 +452,16 @@ function draw_plot!(app, st)
             Mirage.strokewidth(1.5)
             stroke_series(secs, p.columns[i], X, Y, pw)
         end
+        # The sample hovered in the panorama, and the clicked one.
+        for (k, colour) in ((p.hover, (1.0, 1.0, 1.0, 0.5)), (p.pinned, (PICK_COLOR..., 0.9)))
+            k > 0 || continue
+            Mirage.strokecolor(colour)
+            Mirage.strokewidth(1.5)
+            Mirage.beginpath()
+            Mirage.moveto(X(secs[k]), top)
+            Mirage.lineto(X(secs[k]), top + ph)
+            Mirage.stroke()
+        end
     end
 
     # Axis labels and the hover readout use the ImGui draw list for crisp text.
@@ -382,10 +478,12 @@ function draw_plot!(app, st)
         x = vp.x + left + k / 4 * pw - (k == 4 ? 130 : k == 0 ? 0 : 65)
         CImGui.AddText(dl, (x, vp.y + vp.height - bottom + 8), col32(200, 200, 200), lbl)
     end
+    hovered = 0
     if vp.hovered && vp.width > left + right
         s = (vp.mouse_rel[1] - left) / pw * xmax
         i = clamp(searchsortedfirst(secs, s), 1, length(secs))
         i > 1 && abs(secs[i-1] - s) < abs(secs[i] - s) && (i -= 1)
+        hovered = i
         x = vp.x + left + secs[i] / xmax * pw
         CImGui.AddLine(dl, (x, vp.y + top), (x, vp.y + top + ph), col32(255, 255, 255, 90))
         CImGui.BeginTooltip()
@@ -394,7 +492,10 @@ function draw_plot!(app, st)
             CImGui.TextUnformatted(@sprintf("%s = %.6g", p.names[j], p.columns[j][i]))
         end
         CImGui.EndTooltip()
+        CImGui.IsMouseClicked(0) && (p.pinned = i)
     end
+    CImGui.EndGroup()
+    return hovered
 end
 
 # Draw one series, reducing to a min/max pair per screen column for long series.
@@ -434,8 +535,8 @@ end
 # last plot. Each keeps its content while another is shown.
 function view_switcher!(st)
     v = st.view
-    modes = [(:layers, "DEMs and windows", st.spec.cfg !== nothing),
-             (:images, "Maps", !isempty(v.images)),
+    modes = [(:layers, "Terrain", st.spec.cfg !== nothing),
+             (:images, "Images", !isempty(v.images)),
              (:plot, "Plot", v.plot !== nothing)]
     for (i, (mode, label, available)) in enumerate(modes)
         i > 1 && CImGui.SameLine()
@@ -450,7 +551,7 @@ function view_switcher!(st)
         active && CImGui.PopStyleColor()
     end
     CImGui.SameLine(0, 16)
-    title = v.mode == :layers ? spec_name(st.spec) * " (the selected spec)" :
+    title = v.mode == :layers ? preset_label(st.spec.path) :
             v.mode == :images ? v.title : v.mode == :plot && v.plot !== nothing ? v.plot.title : ""
     CImGui.AlignTextToFramePadding()
     colored(DIM, title)
@@ -468,8 +569,7 @@ function view_window!(app, st)
         elseif v.mode == :layers && st.spec.cfg !== nothing
             draw_layers!(app, st)
         else
-            note("Choose a spec in the Mapset tab to see its DEMs and windows here. Maps from previews, " *
-                 "runs, and the Results tab, and plots from the Point tools, also appear here.")
+            note("No preset selected.")
         end
     end
     CImGui.End()

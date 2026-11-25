@@ -84,6 +84,17 @@ Use `--help` to show the command options.
 
 The [mapset guide](docs/src/mapsets.md) explains layers, timestamps, tiles, and output files.
 
+## Permanent shadow
+
+The [PSR workflow](docs/src/psr.md) classifies pixels using any positive modeled
+sunlight before image quantization. It retires sunlit pixels from subsequent
+calculations and checkpoints long studies for resume.
+
+```sh
+julia --project=. scripts/generate_psr.jl \
+  --spec=data/inputs/mapsets/nobile_20m_shirley.toml --backend=metal
+```
+
 ## Light curves
 
 ```bash
@@ -121,8 +132,8 @@ julia --project=gui -e 'using Pkg; Pkg.instantiate()'   # first time only
 julia --project=gui gui/hyperion_gui.jl
 ```
 
-The GUI runs the mapset, preview, light-curve, azimuth and elevation, and probe commands in low-priority background processes.
-It also browses mapsets, shows Earth-contact maps and per-pixel statistics, checks input files, and runs tests.
+The GUI renders sun and DSN images as GeoTIFFs or PNGs from saved presets, and runs the light-curve, azimuth and elevation, and probe commands, in low-priority background processes.
+It also browses rendered images, shows Earth-contact maps, per-pixel statistics, and a panorama of the horizon with the Sun's path, checks input files, and runs tests.
 Refer to the [GUI guide](docs/src/gui.md).
 
 ## Tests

@@ -55,7 +55,7 @@ function main(args)
             "lit: sun >= $sun_min; contact: DSN >= $dsn_min ($(dsn_min / 10)°)")
 
     first_dsn = frame_values(frame_path(dir, "dsn", tags[1]))
-    first_dsn === nothing && error("DSN images in $dir are RGB and do not store values; statistics need palette PNGs.")
+    first_dsn === nothing && error("DSN images in $dir are RGB and do not store values; statistics need GeoTIFFs or palette PNGs.")
     H, W = size(first_dsn)
     lit = zeros(Int32, H, W); contact = zeros(Int32, H, W); both = zeros(Int32, H, W)
     sun_sum = zeros(Float32, H, W)

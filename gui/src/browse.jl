@@ -1,6 +1,7 @@
-# Mapset browser: step through the frames of an existing mapset (from Hyperion
-# or mapbuilder), show Earth-contact maps at a chosen DSN threshold, compare
-# with a second mapset, and run per-pixel time series and statistics.
+# Results browser: step through the sun and DSN images of a render (from the
+# GUI, Hyperion's mapset command, or mapbuilder), show Earth-contact maps at a
+# chosen DSN threshold, compare with another result, and run per-pixel time
+# series and statistics.
 
 const TAG_FORMAT = dateformat"yyyy-mm-ddTHH-MM-SS"
 
@@ -29,11 +30,31 @@ function frame_tags(dir, kind)
     d = joinpath(dir, kind)
     isdir(d) || return String[]
     pre = kind * "."
-    return sort([f[length(pre)+1:end-4] for f in readdir(d)
-                 if startswith(f, pre) && endswith(f, ".png")])
+    return sort(unique([f[length(pre)+1:end-4] for f in readdir(d) if startswith(f, pre) && is_frame_file(f)]))
 end
-frame_path(dir, kind, tag) = joinpath(dir, kind, "$kind.$tag.png")
+# The GeoTIFF of a frame when there is one, else the PNG.
+function frame_path(dir, kind, tag)
+    tif = joinpath(dir, kind, "$kind.$tag.tif")
+    return isfile(tif) ? tif : joinpath(dir, kind, "$kind.$tag.png")
+end
 tag_time(tag) = something(tryparse(DateTime, tag, TAG_FORMAT), DateTime(0))
+
+# Layer 1's file, SHA-256, and window from a Hyperion manifest; nothing without
+# a manifest (mapbuilder). The window is nothing when the manifest has none.
+function manifest_area(dir)
+    path = joinpath(dir, "other", "manifest.csv")
+    isfile(path) || return nothing
+    file, sha, window = "", "", nothing
+    for line in eachline(path)
+        m = match(r"^layer\.1,path,\"?([^\"]*)\"?$", line)
+        m === nothing || (file = String(m[1]))
+        m = match(r"^layer\.1,sha256,([0-9a-fA-F]+)", line)
+        m === nothing || (sha = lowercase(m[1]))
+        m = match(r"^layer\.1,window,\D*(\d+)\D+(\d+)\D+(\d+)\D+(\d+)", line)
+        m === nothing || (window = Tuple(parse.(Int, m.captures)))
+    end
+    return (; file, sha, window)
+end
 
 # First-DEM offset of output pixel (0, 0), from a Hyperion manifest.
 function manifest_origin(dir)
@@ -210,27 +231,23 @@ function browse_panel!(app, st)
     b, F = st.browser, st.fields
     root = projpath(isempty(str(F, :br_root)) ? "data/outputs" : str(F, :br_root))
     folders = mapset_folders(root)
-    label!("Mapset")
+    label!("Images")
     CImGui.SetNextItemWidth(-1)
-    if CImGui.BeginCombo("##mapset", isempty(b.dir) ? "Choose a mapset" : basename(b.dir), CImGui.ImGuiComboFlags_HeightLarge)
-        isempty(folders) && CImGui.TextDisabled("No mapsets in $(shortpath(root))")
+    if CImGui.BeginCombo("##mapset", isempty(b.dir) ? "Choose a folder of rendered images" : basename(b.dir), CImGui.ImGuiComboFlags_HeightLarge)
+        isempty(folders) && CImGui.TextDisabled("No rendered images in $(shortpath(root))")
         for d in folders
             CImGui.Selectable(basename(d), d == b.dir) && open_mapset!(st, d)
         end
         CImGui.EndCombo()
     end
     if CImGui.TreeNode("Look in another folder")
-        field!(F, "Folder of mapsets", :br_root; hint = "data/outputs")
-        note("Any folder whose subfolders have sun/ and dsn/ folders, from Hyperion or mapbuilder.")
+        field!(F, "Output folder", :br_root; hint = "data/outputs")
         CImGui.TreePop()
     end
-    if isempty(b.dir)
-        note("Choose a mapset to step through its Sun and DSN frames.")
-        return
-    end
+    isempty(b.dir) && return
     n = length(b.tags)
     if n == 0
-        note("No sun or DSN frames found.")
+        note("No sun or DSN images found.")
         return
     end
     nsun, ndsn = length(frame_tags(b.dir, "sun")), length(frame_tags(b.dir, "dsn"))
@@ -280,23 +297,21 @@ function browse_panel!(app, st)
     CImGui.SetNextItemWidth(200)
     CImGui.SliderFloat("DSN threshold (°)", b.threshold, 0f0, 7f0, "%.1f")
     CImGui.IsItemDeactivatedAfterEdit() && refresh_contact!(st)
-    help("Contact means the Earth centre is at least this far above the terrain horizon. " *
-         "Pick the 'contact' or 'sun and contact' layer in the View. Needs palette DSN files.")
-    b.dsn === nothing && b.loaded > 0 && colored(WARN, "This frame has no stored DSN values (RGB file).")
+    help("Minimum Earth elevation above the terrain horizon for contact.")
+    b.dsn === nothing && b.loaded > 0 && colored(WARN, "No DSN values in this frame (RGB file).")
     end
 
-    if CImGui.CollapsingHeader("Compare with another mapset")
-    field!(F, "Mapset B", :br_compare; hint = "folder to compare with", width = -60)
+    if CImGui.CollapsingHeader("Compare with other results")
+    field!(F, "Results B", :br_compare; hint = "folder to compare with", width = -60)
     CImGui.SameLine()
     if CImGui.Button("Set")
         p = projpath(str(F, :br_compare))
         b.compare = is_mapset(p) ? p : ""
-        is_mapset(p) || (st.message = "Not a mapset folder: $p")
+        is_mapset(p) || (st.message = "No sun/ or dsn/ folder in $p")
         load_frame!(st)
     end
     if !isempty(b.compare)
-        CImGui.TextWrapped("B layers come from $(shortpath(b.compare)) at the same timestamp. " *
-                           "Differences need the same grid size; nothing is resampled.")
+        CImGui.TextWrapped("B: " * shortpath(b.compare))
         tag = b.tags[b.index[] + 1]
         isfile(frame_path(b.compare, "sun", tag)) || isfile(frame_path(b.compare, "dsn", tag)) ||
             colored(WARN, "B has no frame at this timestamp.")
@@ -309,11 +324,11 @@ function browse_panel!(app, st)
     frame_size = b.sun !== nothing ? size(b.sun) : b.dsn !== nothing ? size(b.dsn) : (0, 0)
     p !== nothing && p.size != frame_size && (p = nothing)
     if p === nothing
-        note("Click a pixel of this mapset in the View to pick it.")
+        note("Click an image to place the marker.")
     else
-        colored(PICK_TEXT, "Picked: col $(p.col), row $(p.row)")
+        colored(PICK_TEXT, "col $(p.col), row $(p.row)")
         CImGui.SameLine()
-        CImGui.SmallButton("Clear##brpick") && (st.view.picked = nothing)
+        CImGui.SmallButton("Remove##brpick") && (st.view.picked = nothing)
     end
     CImGui.SetNextItemWidth(100)
     CImGui.InputInt("every Nth frame##series", iref(F, :br_series_stride, 1))
@@ -327,8 +342,7 @@ function browse_panel!(app, st)
             on_done = j -> j.status == :done && follow_up(() ->
                 show_plot!(st.view, load_csv_plot(out; title = "Time series", show = ["sun_percent", "dsn_deg"]))))
     end
-    help("Reads every frame in a separate low-priority process. Large 1 m mapsets take a while; " *
-         "use every Nth frame for a quicker look.")
+    help("Use every Nth frame for a quicker look.")
     end
 
     if CImGui.CollapsingHeader("Statistics over all frames")
@@ -349,7 +363,6 @@ function browse_panel!(app, st)
     end
     CImGui.SameLine()
     job_button("Load previous result"; disabled = !isfile(joinpath(out, "stats.toml"))) && load_stats!(st, out)
-    help("Percent of frames lit, in contact (DSN threshold above), and both; mean solar fraction; and the " *
-         "longest continuous shadow and outage in hours. Results appear as 'stat:' layers in the View.")
+    help("Lit, contact, and both (% of frames); mean solar fraction; longest shadow and outage (h).")
     end
 end

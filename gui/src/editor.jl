@@ -1,9 +1,9 @@
-# Form editor for mapset specifications. Each control edits `st.spec.cfg`;
-# Save writes it back as TOML with render_toml.
+# Controls for the current settings. Each control edits `st.spec.cfg`;
+# Save to preset writes it back as TOML with render_toml.
 
 const LABEL_X = 170
 
-# Widget state is keyed by the spec generation, so reopening a spec, or
+# Widget state is keyed by the settings generation, so opening a preset, or
 # reordering its layers, rereads every field from `cfg`.
 ekey(s::SpecState, id) = Symbol("ed", s.generation, "_", id)
 
@@ -16,7 +16,7 @@ end
 """
     param!(st, label, id, current; parse, optional) -> (changed, value)
 
-A text field bound to a spec value. `parse(text)` returns the value or
+A text field bound to a setting. `parse(text)` returns the value or
 `nothing` when the text is invalid; the error is shown under the field and
 blocks runs. An empty optional field returns `(true, nothing)`.
 """
@@ -76,45 +76,65 @@ end
 
 # ─── Top-level settings ───────────────────────────────────────────────────
 
-function times_form!(st)
-    s, cfg = st.spec, st.spec.cfg
-    list = haskey(cfg, "times")
-    label!("Times")
-    if CImGui.RadioButton("range##spec_times", !list) && list
-        times = sort(String[string(t) for t in cfg["times"]])
+const TIME_MODES = ("One time", "Time range", "List of times")
+
+time_mode(cfg) = haskey(cfg, "times") ? (length(cfg["times"]) == 1 ? 0 : 2) : 1
+
+# Convert the times in `cfg` to another mode, keeping what carries over.
+function set_time_mode!(s::SpecState, mode)
+    cfg = s.cfg
+    times = haskey(cfg, "times") ? sort(String[string(t) for t in cfg["times"]]) :
+            filter(!isempty, [string(get(cfg, "start", "")), string(get(cfg, "stop", ""))])
+    if mode == 1
         delete!(cfg, "times")
         cfg["start"] = isempty(times) ? "" : first(times)
         cfg["stop"] = isempty(times) ? "" : last(times)
-        cfg["step_hours"] = get(cfg, "step_hours", 2)
-        s.generation += 1
-        changed!(s)
-    end
-    CImGui.SameLine()
-    if CImGui.RadioButton("list of timestamps##spec_times", list) && !list
-        cfg["times"] = String[string(get(cfg, "start", ""))]
+        cfg["step_hours"] = get(cfg, "step_hours", 1)
+    else
+        cfg["times"] = mode == 0 ? times[1:min(1, end)] : times
         foreach(k -> delete!(cfg, k), ("start", "stop", "step_hours"))
-        s.generation += 1
-        changed!(s)
     end
-    if !haskey(cfg, "times")
+    s.generation += 1
+    changed!(s)
+end
+
+"""
+    times_section!(st)
+
+The times to render: one time, a range with a step, or a list.
+"""
+function times_section!(st)
+    s, cfg = st.spec, st.spec.cfg
+    # A list of one time is shown as "One time" unless the list was chosen.
+    mode = iref(st.fields, ekey(s, "time_mode"), time_mode(cfg))
+    before = mode[]
+    radio_row!("Render", mode, TIME_MODES)
+    mode[] == before || set_time_mode!(s, mode[])
+    if mode[] == 0
+        id = "one_time"
+        current = haskey(cfg, "times") && !isempty(cfg["times"]) ? string(cfg["times"][1]) : nothing
+        changed, v = param!(st, "Time (UTC)", id, current; parse = parse_time, hint = "2027-09-14T00:00:00")
+        changed && v !== nothing && (cfg["times"] = [v]; changed!(s))
+    elseif mode[] == 1
         apply!(s, cfg, "start", param!(st, "Start (UTC)", "start", get(cfg, "start", nothing);
                                        parse = parse_time, hint = "2027-09-14T00:00:00"))
         apply!(s, cfg, "stop", param!(st, "Stop (UTC)", "stop", get(cfg, "stop", nothing);
                                       parse = parse_time, hint = "2027-10-12T23:00:00"))
-        apply!(s, cfg, "step_hours", param!(st, "Frame step (h)", "step_hours", get(cfg, "step_hours", nothing);
+        apply!(s, cfg, "step_hours", param!(st, "Every (hours)", "step_hours", get(cfg, "step_hours", nothing);
                                             parse = parse_posint, width = 120))
     else
         id = "times"
-        f = tf(st.fields, ekey(s, id), join(string.(cfg["times"]), '\n'); capacity = 1 << 18)
-        label!("Timestamps (UTC)")
+        f = tf(st.fields, ekey(s, id), join(string.(get(cfg, "times", String[])), '\n'); capacity = 1 << 18)
+        label!("Times (UTC)")
         CImGui.TextDisabled("one per line")
+        CImGui.Dummy(CImGui.ImVec2(LABEL_X - 8, 0)); CImGui.SameLine(LABEL_X)
         if CImGui.InputTextMultiline("##times", f.buf, length(f.buf), CImGui.ImVec2(-1, CImGui.GetTextLineHeight() * 7))
             lines = filter(!isempty, strip.(split(value(f), '\n')))
             bad = findfirst(l -> parse_time(l) === nothing, lines)
             if bad !== nothing
-                s.field_errors[id] = "Cannot read timestamp \"$(lines[bad])\"."
+                s.field_errors[id] = "Cannot read the time \"$(lines[bad])\"."
             elseif isempty(lines)
-                s.field_errors[id] = "Enter at least one timestamp."
+                s.field_errors[id] = "Enter at least one time."
             else
                 delete!(s.field_errors, id)
                 cfg["times"] = String[parse_time(l) for l in lines]
@@ -123,22 +143,32 @@ function times_form!(st)
         end
         haskey(s.field_errors, id) && colored(BAD, s.field_errors[id])
     end
-    apply!(s, cfg, "azel_step_hours", param!(st, "Az/el step (h)", "azel_step_hours",
-        get(cfg, "azel_step_hours", nothing); parse = parse_posint, width = 120, optional = true,
-        help_text = "Cadence of other/azimuths_elevations.csv. Empty means 1 hour."))
+    # Errors of fields that the current mode does not show no longer apply.
+    for (k, m) in (("one_time", 0), ("start", 1), ("stop", 1), ("step_hours", 1), ("times", 2))
+        m == mode[] || delete!(s.field_errors, k)
+    end
 end
 
 function advanced_form!(st)
     s, cfg = st.spec, st.spec.cfg
-    CImGui.CollapsingHeader("Advanced settings") || return
     apply!(s, cfg, "observer_height_m", param!(st, "Observer height (m)", "observer_height_m",
         get(cfg, "observer_height_m", nothing); parse = parse_float, width = 120, optional = true,
         help_text = "Height of the observer above the terrain. Empty means 0."))
-    for (key, label, h) in (("tile_height", "Tile height", "Render the output in tiles of this many rows. Empty means automatic."),
-                            ("tile_width", "Tile width", "Render the output in tiles of this many columns. Empty means automatic."),
+    for (key, label, h) in (("tile_height", "Tile height", "Render the image in tiles of this many rows. Empty means automatic."),
+                            ("tile_width", "Tile width", "Render the image in tiles of this many columns. Empty means automatic."),
                             ("workgroup_size", "GPU workgroup size", "Empty means the default."))
         apply!(s, cfg, key, param!(st, label, key, get(cfg, key, nothing);
                                    parse = parse_posint, width = 120, optional = true, help_text = h))
+    end
+end
+
+# Files written next to the images, set in the Render tab's options.
+function extra_outputs_form!(st)
+    s, cfg = st.spec, st.spec.cfg
+    if time_mode(cfg) == 1
+        apply!(s, cfg, "azel_step_hours", param!(st, "Az/el table step (h)", "azel_step_hours",
+            get(cfg, "azel_step_hours", nothing); parse = parse_posint, width = 120, optional = true,
+            help_text = "Cadence of other/azimuths_elevations.csv. Empty means 1 hour."))
     end
     ds = Ref(Bool(get(cfg, "dataset_description", false)))
     label!("Dataset description")
@@ -197,7 +227,7 @@ function hash_status!(app, st, layer, i)
     CImGui.Dummy(CImGui.ImVec2(LABEL_X - 8, 0))
     CImGui.SameLine(LABEL_X)
     if known === nothing
-        colored(DIM, "file not hashed yet")
+        colored(DIM, "not hashed")
         CImGui.SameLine()
         busy = any(j -> running(j) && j.title == "Hash $(basename(path))", JOBS)
         if job_button("Hash file##$i"; disabled = busy)
@@ -211,11 +241,11 @@ function hash_status!(app, st, layer, i)
             end)
         end
     elseif isempty(want)
-        colored(DIM, "no hash in spec, so the file is not verified")
+        colored(DIM, "no hash in preset")
     elseif known == want
-        colored(GOOD, "file matches the hash")
+        colored(GOOD, "hash matches")
     else
-        colored(BAD, "file does not match the hash")
+        colored(BAD, "hash does not match")
     end
     if known !== nothing && known != want
         CImGui.SameLine()
@@ -241,9 +271,8 @@ function window_form!(st, layer, i)
         s.generation += 1
         changed!(s)
     end
-    help("Row, column, height, and width in this file's pixels, starting at zero. " *
-         (i == 1 ? "For the first layer, the window is the output area. You can also drag it in the DEM view." :
-                   "Only the first layer can have a window."))
+    help("Row, column, height, width in pixels from zero." *
+         (i == 1 ? " This is the image area." : " Only the first layer can have one."))
     haskey(layer, "window") || return
     w = Int.(layer["window"])
     CImGui.Dummy(CImGui.ImVec2(LABEL_X - 8, 0))
@@ -328,7 +357,7 @@ function layer_form!(app, st, layers, i)
         apply!(s, layer, "name", param!(st, "Display name", "name$i", get(layer, "name", nothing); optional = true))
         apply!(s, layer, "sha256", param!(st, "SHA-256", "sha$i", get(layer, "sha256", nothing);
             parse = parse_sha, optional = true, hint = "64 hex characters; empty skips the check",
-            help_text = "The mapset command refuses to run when the file does not match."))
+            help_text = "Rendering stops when the file does not match."))
         hash_status!(app, st, layer, i)
         if kind == "site"
             c = Ref(Bool(get(layer, "cutoff", false)))
@@ -387,56 +416,7 @@ function layers_form!(app, st)
     end
 end
 
-# ─── Whole form ───────────────────────────────────────────────────────────
+# ─── New presets ──────────────────────────────────────────────────────────
 
-const NEW_SPEC = Dict{String,Any}("start" => "2027-09-14T00:00:00", "stop" => "2027-09-14T00:00:00",
-                                  "step_hours" => 1, "layers" => Any[Dict{String,Any}("kind" => "site", "path" => "")])
-
-function spec_form!(app, st)
-    s, F = st.spec, st.fields
-    if s.cfg === nothing
-        note("Fix or replace the TOML file to edit it here.")
-        return
-    end
-    cfg = s.cfg
-    # Save controls.
-    CImGui.BeginDisabled(!dirty(s) || !isempty(s.field_errors))
-    if CImGui.Button("Save")
-        write(s.path, render_toml(cfg))
-        open_spec!(s, s.path)
-    end
-    CImGui.EndDisabled()
-    CImGui.SameLine()
-    CImGui.BeginDisabled(!dirty(s))
-    CImGui.Button("Revert") && open_spec!(s, s.path)
-    CImGui.EndDisabled()
-    CImGui.SameLine()
-    CImGui.SetNextItemWidth(200)
-    input!("##saveas", tf(F, :saveas); hint = "new_file_name")
-    target = joinpath(SPEC_DIR, safe_name(replace(str(F, :saveas), r"\.toml$" => "")) * ".toml")
-    named = !isempty(str(F, :saveas))
-    CImGui.SameLine()
-    CImGui.BeginDisabled(!named || isfile(target) || !isempty(s.field_errors))
-    if CImGui.Button("Save as")
-        write(target, render_toml(cfg))
-        refresh_specs!(s; select = target)
-        open_spec!(s, target)
-        set!(tf(F, :saveas), "")
-    end
-    CImGui.EndDisabled()
-    help("Save as writes this form to a new file in data/inputs/mapsets/.")
-    named && isfile(target) && colored(WARN, "$(basename(target)) already exists.")
-    s.has_comments && dirty(s) && colored(WARN, "Saving rewrites $(basename(s.path)) without its comments.")
-
-    CImGui.Spacing()
-    apply!(s, cfg, "name", param!(st, "Mapset name", "name", get(cfg, "name", nothing);
-        help_text = "The output folder name, unless the run settings below override it."))
-    times_form!(st)
-    advanced_form!(st)
-    layers_form!(app, st)
-    if CImGui.CollapsingHeader("TOML that Save writes")
-        CImGui.BeginChild("toml_preview", CImGui.ImVec2(0, CImGui.GetTextLineHeight() * 14), CImGui.ImGuiChildFlags_Borders)
-        CImGui.TextUnformatted(render_toml(cfg))
-        CImGui.EndChild()
-    end
-end
+const NEW_SPEC = Dict{String,Any}("times" => ["2027-09-14T00:00:00"], "image_format" => "geotiff",
+                                  "layers" => Any[Dict{String,Any}("kind" => "site", "path" => "")])
