@@ -125,6 +125,19 @@ The calculation uses eight Sun rays and the existing fixed solar half-angle of 0
 The fraction does not include irradiance, surface-incidence losses, panel orientation, or electrical power.
 Geometric Sun elevation does not include terrain obstruction.
 
+`--horizon` also writes a terrain horizon profile to the CSV path with `_horizon.csv` in place of `.csv`.
+
+| Horizon field | Meaning |
+|---|---|
+| `azimuth_deg` | Azimuth, counterclockwise from east, every 0.25° |
+| `horizon_elevation_deg` | Highest terrain elevation angle seen from the observer in that direction |
+| `distance_m` | Distance to that terrain point along the surface |
+
+The profile follows great circles in Float64 from the observer at the selected pixel's elevation plus the observer height.
+Each step samples the finest loaded layer that covers the point, with bilinear interpolation.
+The step is half a pixel and grows to 0.2% of the distance.
+The profile is for display and checks; the CSV's solar fraction comes from the renderer's own rays.
+
 The metadata path is the CSV path with `.toml` appended.
 It records the input hashes, effective layer settings, selected pixel, time range, observer height, Julia version, and actual backend.
 Existing outputs cause an error unless you supply `--overwrite`.

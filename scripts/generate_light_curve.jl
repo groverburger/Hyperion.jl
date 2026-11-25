@@ -16,7 +16,7 @@ const ROOT = dirname(@__DIR__)
 const VALUE_OPTIONS = Set(["spec", "lat", "lon", "x", "y", "row", "col",
                           "start", "stop", "step", "out", "observer-height-m",
                           "backend", "kernels"])
-const SWITCHES = Set(["dry-run", "overwrite", "help"])
+const SWITCHES = Set(["dry-run", "overwrite", "horizon", "help"])
 
 function usage()
     return """
@@ -37,6 +37,8 @@ function usage()
       --backend=cpu|auto|metal|cuda  Default cpu. Explicit GPU requests must load.
       --kernels=<directory>     Default: repository kernels directory.
       --dry-run                Resolve the pixel and time range without rendering.
+      --horizon                Also write <out stem>_horizon.csv: the terrain horizon
+                               elevation every 0.25° of azimuth at the observer.
       --overwrite              Replace the CSV and its .toml metadata file.
       --help                   Show this text.
 
@@ -238,6 +240,95 @@ function write_curve(io, times, point, elevation, observer, render)
     end
 end
 
+# ─── Horizon profile ──────────────────────────────────────────────────────
+
+horizon_path(output) = splitext(output)[1] * "_horizon.csv"
+
+# Projection and elevations of each loaded layer, for sampling by direction.
+function horizon_layer(l)
+    if l.kind === :site
+        d = l.dem
+        return (; data=d.data, scale=Float64(d.elev_scale_to_m), s0=d.s0, l0=d.l0,
+                pixel_size_m=d.pixel_size_m, lat0=d.lat0, lon0=d.lon0)
+    end
+    return (; data=l.dem.data, scale=Float64(l.dem.elev_scale_to_m), s0=Float64(l.source.s0),
+            l0=Float64(l.source.l0), pixel_size_m=Float64(l.spec.pixel_size_m), lat0=-pi/2, lon0=0.0)
+end
+
+# Bilinear elevation in metres at the Moon-fixed unit vector u. Returns
+# (elevation, inside): NaN elevation inside the grid means no data there.
+function horizon_sample(L, u)
+    loc = Hyp._moonme_to_local(u, L.lat0, L.lon0)
+    denom = 1 - loc[3]
+    denom > eps(Float64) || return NaN, false
+    x = 2*Hyp.MOON_RADIUS_M*loc[2]/denom
+    y = 2*Hyp.MOON_RADIUS_M*loc[1]/denom
+    row, col = L.l0 - y/L.pixel_size_m, L.s0 + x/L.pixel_size_m
+    H, W = size(L.data)
+    r, c = floor(Int,row), floor(Int,col)
+    0 <= r < H-1 && 0 <= c < W-1 || return NaN, false
+    fr, fc = row-r, col-c
+    D = L.data
+    e = (1-fr)*(1-fc)*Float64(D[r+1,c+1]) + (1-fr)*fc*Float64(D[r+1,c+2]) +
+        fr*(1-fc)*Float64(D[r+2,c+1]) + fr*fc*Float64(D[r+2,c+2])
+    e *= L.scale
+    return (isfinite(e) && abs(e) < 1e5 ? e : NaN), true
+end
+
+"""
+    horizon_profile(loaded, point, elevation, observer; step_deg=0.25)
+
+Terrain horizon around `point`: for each azimuth (degrees counterclockwise from
+east, as in the light-curve CSV), the highest elevation angle of the terrain and
+its distance. Rays follow great circles in Float64 and sample the finest layer
+that covers each point, with a step of half a pixel that grows to 0.2% of the
+distance. This profile is for display; the light-curve values come from the
+renderer, which marches its own rays.
+"""
+function horizon_profile(loaded, point, elevation, observer; step_deg=0.25)
+    layers = [horizon_layer(l) for l in loaded]
+    R = Hyp.MOON_RADIUS_M
+    lat, lon = deg2rad(point.latitude_deg), deg2rad(point.longitude_deg)
+    up = (cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat))
+    east = (-sin(lon), cos(lon), 0.0)
+    north = (-sin(lat)*cos(lon), -sin(lat)*sin(lon), cos(lat))
+    eye = (R + elevation + observer) .* up
+    first_step = 0.5*minimum(L.pixel_size_m for L in layers)
+    azimuths = collect(0.0:step_deg:360.0-step_deg/2)
+    best = fill(-90.0, length(azimuths))
+    where = fill(NaN, length(azimuths))
+    Threads.@threads for k in eachindex(azimuths)
+        a = deg2rad(azimuths[k])
+        dir = cos(a) .* east .+ sin(a) .* north
+        d = first_step
+        while d < pi*R
+            t = d/R
+            u = cos(t) .* up .+ sin(t) .* dir
+            e, pixel, inside = NaN, 0.0, false
+            for L in layers
+                e, in_grid = horizon_sample(L, u)
+                in_grid && (inside = true; pixel = L.pixel_size_m)
+                isfinite(e) && break
+            end
+            inside || break
+            if isfinite(e)
+                v = (R + e) .* u .- eye
+                angle = asind(clamp(sum(v .* up)/sqrt(sum(v .* v)), -1.0, 1.0))
+                angle > best[k] && (best[k] = angle; where[k] = d)
+            end
+            d += max(0.5*pixel, 0.002*d)
+        end
+    end
+    return azimuths, best, where
+end
+
+function write_horizon(io, azimuths, elevations, distances)
+    println(io, "azimuth_deg,horizon_elevation_deg,distance_m")
+    for (a, e, d) in zip(azimuths, elevations, distances)
+        println(io, a, ',', e, ',', isfinite(d) ? round(d; digits=1) : "")
+    end
+end
+
 function main(args=ARGS)
     opts = parse_args(args)
     if haskey(opts,"help") || isempty(args)
@@ -259,7 +350,8 @@ function main(args=ARGS)
     output = abspath(opts["out"])
     metadata_path = output*".toml"
     overwrite = haskey(opts,"overwrite")
-    for path in (output,metadata_path)
+    horizon = haskey(opts,"horizon") ? horizon_path(output) : nothing
+    for path in filter(!isnothing, [output,metadata_path,horizon])
         ispath(path) && !overwrite && error("Output exists: $path; use --overwrite")
     end
     # Read metadata before the full terrain load. Hash checks occur in point_layers.
@@ -295,6 +387,7 @@ function main(args=ARGS)
         "sample_count"=>length(times), "sun_fraction_definition"=>"sun_u8 / 255",
         "terrain_extent"=>"full DEM; first-layer window and cutoff settings are overridden",
         "layers"=>[layer_metadata(l,config["layers"][i]) for (i,l) in enumerate(layers)])
+    horizon === nothing || (metadata["horizon_profile"] = horizon)
     mkpath(dirname(output))
     mktempdir(dirname(output)) do tmp
         open(joinpath(tmp,"curve.csv"),"w") do io
@@ -304,6 +397,12 @@ function main(args=ARGS)
             TOML.print(io,metadata)
         end
         mv(joinpath(tmp,"curve.csv"),output; force=overwrite)
+        if horizon !== nothing
+            @info "Horizon profile" azimuth_step_deg=0.25
+            profile = horizon_profile(loaded,point,elevation,observer)
+            open(io -> write_horizon(io,profile...),joinpath(tmp,"horizon.csv"),"w")
+            mv(joinpath(tmp,"horizon.csv"),horizon; force=overwrite)
+        end
         mv(joinpath(tmp,"metadata.toml"),metadata_path; force=overwrite)
     end
     println("Wrote $output and $metadata_path")

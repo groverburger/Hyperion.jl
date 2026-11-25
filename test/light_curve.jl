@@ -87,6 +87,20 @@ end
         @test meta["layers"][1]["sha256"] == cfg["layers"][1]["sha256"]
         @test_throws ErrorException LC.main(args)
         loaded = Hyperion._load_mapset_layers(layers)
+        # GDAL stores the fixture array as (columns, rows), so the ridge is in
+        # columns 21 to 23: 50 to 70 m east of the point and 23 m above the
+        # observer. The terrain is level to the west.
+        az,el,dist = LC.horizon_profile(loaded,point,41.25,0.5)
+        @test length(az) == 1440
+        east,west = findfirst(==(0.0),az),findfirst(==(180.0),az)
+        @test 15 < el[east] < 30
+        @test 40 < dist[east] < 80
+        @test -1 < el[west] < 0
+        horizon_out = joinpath(dir,"with_horizon.csv")
+        LC.main([filter(a -> !startswith(a,"--out="),args)...,"--out=$horizon_out","--horizon"])
+        @test isfile(joinpath(dir,"with_horizon_horizon.csv"))
+        @test length(readlines(joinpath(dir,"with_horizon_horizon.csv"))) == 1441
+        @test TOML.parsefile(horizon_out*".toml")["horizon_profile"] == joinpath(dir,"with_horizon_horizon.csv")
         @test size(loaded[1].dem.data) == (32,32)
         cached = LC.prepare_renderer(loaded,0.5;backend=Hyperion.CPU(),DeviceArray=Array)
         full = Hyperion.TerrainStack(Hyperion.SiteTerrain(loaded[1].dem;window=(15,15,3,3)))
